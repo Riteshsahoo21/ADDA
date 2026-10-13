@@ -1,56 +1,68 @@
-# Welcome to your Expo app 👋
+# ADDA — Apna Virtual Hangout
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Android React Native app with native `expo-gl` rendering. No WebView or browser-rendered 3D scene is used. The installed debug APK opens ADDA directly; Expo Go is not needed.
 
-## Get started
+## Current rooms
 
-1. Install dependencies
+- **Loft 16:** the supplied `loft_16_interior.glb` replaces the former home scene. Walk up to the black sofa for **Sit on sofa**, or tap it; the avatar uses bundled sit/idle/stand animation clips. The wall door leads to School Rooftop.
+- **School Rooftop:** the supplied `school_rooftop.glb` is scaled and centered for the avatar. Its return door is solid; walk near it for **Back to Loft**.
+- **Tea Party:** the supplied ZIP exports become a chai stall with two sittable benches opposite three shops across an evening road. Approach a chai bench for **Sit on bench**, then use **Stand up** to leave it. The road and shop fronts are walkable, with collision around the stall counter, benches, and shop row. The road and grass terrain end together beyond a four-sided chain-link fence. The supplied Sketchfab maple trees stand inside the fence beside the shops, leaving the road clear.
+- Choose **Boy** or **Girl** after selecting Loft 16 or Tea Party. Both use Quaternius's human-proportioned CC0 models. FPP hides the avatar; TPP shows it.
+- The lower-left thumbstick relocates to the first touch. Push it fully forward to auto-sprint. A second finger can turn the camera anywhere on the right side while moving; the avatar faces its camera-relative travel direction. Jump/Crouch remain usable during movement. Both rooms fill the landscape screen and hide Android's system bars until exit.
 
-   ```bash
-   npm install
-   ```
+The native texture adapter reads predecoded RGBA packs alongside local GLBs. Three.js's browser `Image`/`Blob` texture path does not work in Expo GL. `scripts/pack_native_textures.py` builds those packs from GLBs without changing the source GLB. The chai mesh was simplified from 1,000,000 to 230,950 triangles with `meshoptimizer`; its source ZIP remains at the project root. This may alter small geometric details. Tea and shop textures are rendered at 1024px rather than the original 2048px to limit mobile memory use. No hardware FPS result is claimed; the in-app counter measures the JavaScript render loop only.
 
-2. Start the app
+## Versions
 
-   ```bash
-   npx expo start
-   ```
+Expo SDK 57, React Native 0.86, React 19.2, TypeScript, `expo-gl` 57, and Three.js 0.162. Three r162 is retained because it still supports the WebGL 1 context supplied by Expo GL on the tested phone. `expo-three` is not required. A small adapter in `src/three/renderer/createNativeRenderer.ts` connects Three to Expo GL.
 
-In the output, you'll find options to open the app in a
+## Windows USB run
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+Install Node.js 22.13+, JDK 17, Android SDK Platform 36, Build Tools, Command Line Tools, and Platform Tools. Set `ANDROID_HOME`/`ANDROID_SDK_ROOT` to the SDK directory and `JAVA_HOME` to JDK 17. Connect an Android phone by USB, enable USB debugging, and accept its RSA prompt.
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+In PowerShell window 1:
 
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```powershell
+cd D:\hangout\adda
+adb devices
+npm.cmd install
+adb reverse tcp:8081 tcp:8081
+npm.cmd start
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+In PowerShell window 2, for the first install or after native dependency/config changes:
 
-### Other setup steps
+```powershell
+cd D:\hangout\adda
+npm.cmd run android -- --device 2602BPC18I
+```
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+Use the model/serial shown by `adb devices -l` if it differs. `npm.cmd start` configures IPv4 localhost and USB port reversal. Keep Metro running; JavaScript, UI, scene, and bundled asset changes normally reload through Fast Refresh. A changed native module, plugin, or Gradle setting needs a new Android build. After changing `metro.config.js`, restart Metro. If a GL scene stays stale after Fast Refresh, open the React Native development menu and Reload. Do not use remote Chrome JS debugging with Expo GL.
 
-## Learn more
+For device logs:
 
-To learn more about developing your project with Expo, look at the following resources:
+```powershell
+adb logcat -s ReactNativeJS:V Expo:V EXGL:V AndroidRuntime:E
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+## Phone check
 
-## Join the community
+1. Enter any nonempty username/password, then open **The Adda Gang** home screen.
+2. Tap **Loft 16**, choose **Boy** or **Girl**, and confirm the imported furnished room appears in landscape.
+3. Switch FPP/TPP. Check forward/back/left/right facing, then move with the left thumb while turning the camera with the right finger and tap Jump without lifting either finger.
+4. In Loft 16, walk near the sofa, tap **Sit on sofa**, then **Stand up**. Find the wall door below **WAY TO ROOFTOP**, enter the rooftop, and walk near its door to return.
+5. Exit; open **Tea Party** with either avatar. Approach either chai bench, tap **Sit on bench**, check the sit and stand animations, then cross the road and walk along all three shop fronts.
+6. Exit and confirm the portrait home screen returns without a crash.
 
-Join our community of developers creating universal apps.
+If a model fails, the room displays a model warning instead of silently hiding it. If the GL context fails, the screen shows a renderer error and Metro/Android logs include `[ADDA GL]`.
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+## Checks
+
+```powershell
+npm.cmd run typecheck
+npm.cmd run lint
+npx.cmd expo install --check
+node scripts/verify_native_glb.mjs
+```
+
+See [ASSET_GUIDE.md](ASSET_GUIDE.md) for asset sources and licenses.
