@@ -272,8 +272,8 @@ export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; a
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const avatarId = avatar === 'girl' ? require('../../../assets/models/girl.glb') : require('../../../assets/models/boy.glb');
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const textureId = avatar === 'girl' ? require('../../../assets/models/girl.rgba') : require('../../../assets/models/boy.rgba');
-          const images = avatar === 'girl' ? require('../../../assets/models/girl.json') : require('../../../assets/models/boy.json');
+          const textureId = avatar === 'girl' ? require('../../../assets/textures/girl.rgba') : require('../../../assets/textures/boy.rgba');
+          const images = avatar === 'girl' ? require('../../../assets/textures/girl.json') : require('../../../assets/textures/boy.json');
           const gltf = await loadBundledGlb(avatarId, { moduleId: textureId, images });
           if (!active) return;
           // Box3 underestimates this rigged mesh in its bind pose. Its glTF
@@ -311,17 +311,17 @@ export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; a
         } catch (cause) { failures.push(`avatar: ${String(cause)}`); console.warn('[ADDA GL] Avatar failed', cause); }
         const roomAssets = roomKind === 'loft' ? [
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: require('../../../assets/models/loft16.glb'), texture: require('../../../assets/models/loft16.rgba'), images: require('../../../assets/models/loft16.json'), name: 'Loft 16', size: 10.6, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: false },
+          { id: require('../../../assets/models/loft16.glb'), texture: require('../../../assets/textures/loft16.rgba'), images: require('../../../assets/textures/loft16.json'), name: 'Loft 16', size: 10.6, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: false },
         ] : roomKind === 'roof' ? [
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: require('../../../assets/models/school-rooftop.glb'), texture: require('../../../assets/models/school-rooftop.rgba'), images: require('../../../assets/models/school-rooftop.json'), name: 'School Rooftop', size: 1, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
+          { id: require('../../../assets/models/school-rooftop.glb'), texture: require('../../../assets/textures/school-rooftop.rgba'), images: require('../../../assets/textures/school-rooftop.json'), name: 'School Rooftop', size: 1, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
         ] : [
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: require('../../../assets/models/tea-ground.glb'), texture: require('../../../assets/models/tea-ground.rgba'), images: require('../../../assets/models/tea-ground.json'), name: 'road and ground', size: 52, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
+          { id: require('../../../assets/models/tea-ground.glb'), texture: require('../../../assets/textures/tea-ground.rgba'), images: require('../../../assets/textures/tea-ground.json'), name: 'road and ground', size: 26, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: require('../../../assets/models/chai-stall.glb'), texture: require('../../../assets/models/chai-stall.rgba'), images: require('../../../assets/models/chai-stall.json'), name: 'chai stall and bench', size: 3.2, axis: 'y' as const, x: -7.2, z: -2.2, rotation: Math.PI / 2, rawScale: false },
+          { id: require('../../../assets/models/chai-stall.glb'), texture: require('../../../assets/textures/chai-stall.rgba'), images: require('../../../assets/textures/chai-stall.json'), name: 'chai stall and bench', size: 3.2, axis: 'y' as const, x: -7.2, z: -2.2, rotation: Math.PI / 2, rawScale: false },
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: require('../../../assets/models/three-shops.glb'), texture: require('../../../assets/models/three-shops.rgba'), images: require('../../../assets/models/three-shops.json'), name: 'three shops', size: 2.8, axis: 'y' as const, x: 7.7, z: -2.2, rotation: -Math.PI / 2, rawScale: false },
+          { id: require('../../../assets/models/three-shops.glb'), texture: require('../../../assets/textures/three-shops.rgba'), images: require('../../../assets/textures/three-shops.json'), name: 'three shops', size: 2.8, axis: 'y' as const, x: 7.7, z: -2.2, rotation: -Math.PI / 2, rawScale: false },
         ];
         for (const item of roomAssets) {
           try {
@@ -383,8 +383,8 @@ export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; a
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const treeId = require('../../../assets/models/maple-tree.glb');
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const textureId = require('../../../assets/models/maple-tree.rgba');
-            const images = require('../../../assets/models/maple-tree.json');
+            const textureId = require('../../../assets/textures/maple-tree.rgba');
+            const images = require('../../../assets/textures/maple-tree.json');
             const trees = await loadBundledGlb(treeId, { moduleId: textureId, images });
             if (!active) return;
             addMapleTrees(room.scene, trees.scene);

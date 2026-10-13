@@ -4,9 +4,10 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 for (const name of ['loft16', 'school-rooftop', 'chai-stall', 'three-shops', 'tea-ground', 'maple-tree', 'boy', 'girl']) {
   const path = `assets/models/${name}`;
+  const texPath = `assets/textures/${name}`;
   const data = fs.readFileSync(`${path}.glb`);
-  const manifest = JSON.parse(fs.readFileSync(`${path}.json`, 'utf8'));
-  const raw = fs.readFileSync(`${path}.rgba`);
+  const manifest = JSON.parse(fs.readFileSync(`${texPath}.json`, 'utf8'));
+  const raw = fs.readFileSync(`${texPath}.rgba`);
   const loader = new GLTFLoader();
   loader.register(parser => ({
     name: 'ADDA_native_rgba',
