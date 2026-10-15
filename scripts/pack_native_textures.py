@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image
 
 source, target, max_edge = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3])
+skin_edge = int(sys.argv[4]) if len(sys.argv) > 4 else max_edge
 data = source.read_bytes()
 assert data[:4] == b'glTF'
 json_length = struct.unpack_from('<I', data, 12)[0]
@@ -20,7 +21,8 @@ for entry in doc.get('images', []):
     start = binary_offset + view.get('byteOffset', 0)
     encoded = data[start:start + view['byteLength']]
     image = Image.open(io.BytesIO(encoded)).convert('RGBA')
-    image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+    limit = skin_edge if 'young_' in entry.get('name', '').lower() else max_edge
+    image.thumbnail((limit, limit), Image.Resampling.LANCZOS)
     payload = image.tobytes()
     images.append({'offset': len(pixels), 'width': image.width, 'height': image.height})
     pixels.extend(payload)

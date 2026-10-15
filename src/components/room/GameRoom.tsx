@@ -11,6 +11,8 @@ import { addMapleTrees } from '@/three/environment/teaBoundary';
 import { canWalkTea, createTeaSeats, TeaObstacle, TeaSeat, teaObstacleFromBounds, teaStallObstacle } from '@/three/environment/teaInteractions';
 import { loadBundledGlb } from '@/three/loaders/loadBundledGlb';
 import { createNativeRenderer } from '@/three/renderer/createNativeRenderer';
+import { avatarScale, loadAvatar } from '@/three/player/avatarAssets';
+import { AvatarStyle } from '@/three/player/avatarStyle';
 
 const STICK_SIZE = 110;
 const STICK_TRAVEL = 37;
@@ -89,41 +91,7 @@ function fallbackAvatar() {
   return group;
 }
 
-function dressAvatar(model: THREE.Group, avatar: 'boy' | 'girl') {
-  const shirt = new THREE.Color(avatar === 'boy' ? '#344264' : '#853f65');
-  const trousers = new THREE.Color(avatar === 'boy' ? '#303e56' : '#313248');
-  const shoes = new THREE.Color('#292631');
-  const skin = new THREE.Color('#ffffff');
-  const color = new THREE.Color();
-  model.traverse(object => {
-    if (!(object instanceof THREE.SkinnedMesh) || !object.name.startsWith('SuperHero')) return;
-    const geometry = object.geometry;
-    const positions = geometry.getAttribute('position');
-    const colors = new Float32Array(positions.count * 3);
-    for (let i = 0; i < positions.count; i++) {
-      const x = Math.abs(positions.getX(i));
-      const y = positions.getY(i);
-      if (y < 0.15) color.copy(shoes);
-      else if (y < 0.91 && x < 0.42) color.copy(trousers);
-      else if (y > 0.91 && y < 1.54 && (x < 0.35 || y > 1.22)) color.copy(shirt);
-      else color.copy(skin);
-      colors[i * 3] = color.r;
-      colors[i * 3 + 1] = color.g;
-      colors[i * 3 + 2] = color.b;
-    }
-    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    object.geometry = geometry;
-    const materials = Array.isArray(object.material) ? object.material : [object.material];
-    materials.forEach(material => {
-      const standard = material as THREE.MeshStandardMaterial;
-      standard.vertexColors = true;
-      standard.needsUpdate = true;
-    });
-  });
-  return model;
-}
-
-export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; avatar: 'boy' | 'girl'; onPortal: () => void }) {
+export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; avatar: AvatarStyle; onPortal: () => void }) {
   const [status, setStatus] = useState<'initializing' | 'ready' | 'error'>('initializing');
   const [assetStatus, setAssetStatus] = useState('Loading room assets');
   const [error, setError] = useState('');
@@ -268,18 +236,13 @@ export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; a
       const loadModels = async () => {
         const failures: string[] = [];
         try {
-          // Metro requires literal asset paths for Android bundling.
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const avatarId = avatar === 'girl' ? require('../../../assets/models/girl.glb') : require('../../../assets/models/boy.glb');
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const textureId = avatar === 'girl' ? require('../../../assets/textures/girl.rgba') : require('../../../assets/textures/boy.rgba');
-          const images = avatar === 'girl' ? require('../../../assets/textures/girl.json') : require('../../../assets/textures/boy.json');
-          const gltf = await loadBundledGlb(avatarId, { moduleId: textureId, images });
+          const gltf = await loadAvatar(avatar);
           if (!active) return;
-          // Box3 underestimates this rigged mesh in its bind pose. Its glTF
-          // coordinates are already about 1.8 m tall, so leave scale at 1.
-          const model = dressAvatar(gltf.scene, avatar);
-          // This mesh is authored facing +Z; the controller faces -Z at yaw zero.
+          // Skinned-mesh Box3 bounds do not describe the actual posed height.
+          // Calibrate from the rig's head and foot bones to the existing controller.
+          const model = gltf.scene;
+          model.scale.setScalar(avatarScale());
+          // The avatar is authored facing +Z; the controller faces -Z at yaw zero.
           model.rotation.y = Math.PI;
           room.avatarMount.remove(fallback);
           room.avatarMount.add(model);
@@ -390,7 +353,7 @@ export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; a
             addMapleTrees(room.scene, trees.scene);
           } catch (cause) { failures.push(`maple trees: ${String(cause)}`); console.warn('[ADDA GL] Maple trees failed', cause); }
         }
-        if (active && mounted.current) setAssetStatus(failures.length ? `Model warning: ${failures.join('; ')}` : `${roomKind === 'loft' ? 'Loft 16' : roomKind === 'roof' ? 'School Rooftop' : 'Road & shops'} · ${avatar} loaded`);
+        if (active && mounted.current) setAssetStatus(failures.length ? `Model warning: ${failures.join('; ')}` : `${roomKind === 'loft' ? 'Loft 16' : roomKind === 'roof' ? 'School Rooftop' : 'Road & shops'} · ${avatar.body} loaded`);
       };
       void loadModels();
 
@@ -747,36 +710,36 @@ export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; a
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#151228' },
+  container: { flex: 1, backgroundColor: colors.background },
   lookZone: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
-  badge: { position: 'absolute', left: 18, top: 85, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#171421D9', borderRadius: 30, paddingHorizontal: 12, paddingVertical: 8 },
+  badge: { position: 'absolute', left: 18, top: 85, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FFFFFFE8', borderRadius: 30, paddingHorizontal: 12, paddingVertical: 8 },
   dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.green }, errorDot: { backgroundColor: colors.error },
   badgeText: { color: colors.text, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
-  modelBadge: { position: 'absolute', left: 18, top: 119, maxWidth: '60%', backgroundColor: '#171421B9', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 5 },
+  modelBadge: { position: 'absolute', left: 18, top: 119, maxWidth: '60%', backgroundColor: '#FFFFFFD9', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 5 },
   modelText: { color: colors.text, fontSize: 9, fontWeight: '700' },
   errorCard: { position: 'absolute', alignSelf: 'center', top: '35%', width: '80%', padding: 20, backgroundColor: colors.surface, borderColor: colors.error, borderWidth: 1, borderRadius: 18 },
   errorTitle: { color: colors.error, fontSize: 18, fontWeight: '800' }, errorText: { color: colors.text, fontSize: 13, marginTop: 8 },
-  viewButton: { position: 'absolute', top: 85, right: 28, backgroundColor: '#211C32E8', borderWidth: 1, borderColor: colors.purple, borderRadius: 13, paddingHorizontal: 16, paddingVertical: 11 },
+  viewButton: { position: 'absolute', top: 85, right: 28, backgroundColor: '#FFFFFFE8', borderWidth: 1, borderColor: colors.primary, borderRadius: 13, paddingHorizontal: 16, paddingVertical: 11 },
   viewText: { color: colors.text, fontSize: 12, fontWeight: '900' },
   joystickArea: { position: 'absolute', width: 220, height: 190 },
-  sprintLabel: { position: 'absolute', left: 26, top: 2, color: '#ECE6F6A8', fontSize: 10, fontWeight: '900', letterSpacing: 1.5 }, sprintActive: { color: colors.green },
-  stickBase: { position: 'absolute', width: STICK_SIZE, height: STICK_SIZE, borderRadius: STICK_SIZE / 2, backgroundColor: '#17152166', borderWidth: 2, borderColor: '#F2EBFF77', alignItems: 'center', justifyContent: 'center' },
+  sprintLabel: { position: 'absolute', left: 26, top: 2, color: colors.primaryDark, fontSize: 10, fontWeight: '900', letterSpacing: 1.5 }, sprintActive: { color: colors.green },
+  stickBase: { position: 'absolute', width: STICK_SIZE, height: STICK_SIZE, borderRadius: STICK_SIZE / 2, backgroundColor: '#FFFFFF85', borderWidth: 2, borderColor: '#15794BAA', alignItems: 'center', justifyContent: 'center' },
   stickSprinting: { borderColor: colors.green },
-  stickGuide: { width: 72, height: 72, borderRadius: 36, borderWidth: 1, borderColor: '#F2EBFF44', position: 'absolute' },
-  stickThumb: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#292733A8', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#F2EBFFAA' },
-  thumbCenter: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#F2EBFFAA' },
+  stickGuide: { width: 72, height: 72, borderRadius: 36, borderWidth: 1, borderColor: '#15794B66', position: 'absolute' },
+  stickThumb: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#FFFFFFE8', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.primary },
+  thumbCenter: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.primary },
   actions: { position: 'absolute', right: 28, bottom: 20, gap: 13, alignItems: 'center' },
-  actionButton: { width: 68, height: 68, borderRadius: 34, backgroundColor: '#211C32DD', borderWidth: 1.5, borderColor: '#8F7AA6', alignItems: 'center', justifyContent: 'center' },
-  crouchedButton: { borderColor: colors.green, backgroundColor: '#254638DD' },
-  actionIcon: { color: colors.text, fontSize: 25, fontWeight: '800', lineHeight: 29 },
-  actionLabel: { color: colors.text, fontSize: 8, fontWeight: '900', letterSpacing: 0.5 },
-  standButton: { position: 'absolute', backgroundColor: '#211C32E8', borderWidth: 1.5, borderColor: colors.purple, borderRadius: 18, paddingHorizontal: 18, paddingVertical: 16 },
+  actionButton: { width: 68, height: 68, borderRadius: 34, backgroundColor: '#FFFFFFE8', borderWidth: 1.5, borderColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
+  crouchedButton: { borderColor: colors.green, backgroundColor: '#E5F4E9EE' },
+  actionIcon: { color: colors.primaryDark, fontSize: 25, fontWeight: '800', lineHeight: 29 },
+  actionLabel: { color: colors.primaryDark, fontSize: 8, fontWeight: '900', letterSpacing: 0.5 },
+  standButton: { position: 'absolute', backgroundColor: '#FFFFFFF0', borderWidth: 1.5, borderColor: colors.primary, borderRadius: 18, paddingHorizontal: 18, paddingVertical: 16 },
   standText: { color: colors.text, fontWeight: '900', fontSize: 13 },
-  doorButton: { position: 'absolute', bottom: 32, alignSelf: 'center', backgroundColor: '#211C32F0', borderWidth: 1.5, borderColor: colors.purple, borderRadius: 16, paddingHorizontal: 20, paddingVertical: 13 },
-  sitButton: { position: 'absolute', bottom: 32, alignSelf: 'center', backgroundColor: '#211C32F0', borderWidth: 1.5, borderColor: colors.purple, borderRadius: 16, paddingHorizontal: 20, paddingVertical: 13 },
+  doorButton: { position: 'absolute', bottom: 32, alignSelf: 'center', backgroundColor: '#FFFFFFF0', borderWidth: 1.5, borderColor: colors.primary, borderRadius: 16, paddingHorizontal: 20, paddingVertical: 13 },
+  sitButton: { position: 'absolute', bottom: 32, alignSelf: 'center', backgroundColor: '#FFFFFFF0', borderWidth: 1.5, borderColor: colors.primary, borderRadius: 16, paddingHorizontal: 20, paddingVertical: 13 },
   doorButtonText: { color: colors.text, fontWeight: '900', fontSize: 12, letterSpacing: 0.8 },
-  seatMessage: { position: 'absolute', bottom: 70, alignSelf: 'center', backgroundColor: '#211C32DA', borderRadius: 12, paddingHorizontal: 18, paddingVertical: 10 },
+  seatMessage: { position: 'absolute', bottom: 70, alignSelf: 'center', backgroundColor: '#FFFFFFE8', borderRadius: 12, paddingHorizontal: 18, paddingVertical: 10 },
   seatMessageText: { color: colors.text, fontWeight: '800', fontSize: 12 },
-  hint: { position: 'absolute', bottom: 11, alignSelf: 'center', backgroundColor: '#171421A9', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 },
+  hint: { position: 'absolute', bottom: 11, alignSelf: 'center', backgroundColor: '#FFFFFFC7', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 },
   hintText: { color: colors.text, fontSize: 9 },
 });

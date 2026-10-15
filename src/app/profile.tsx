@@ -1,0 +1,72 @@
+import { useCallback, useState } from 'react';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { router, useFocusEffect, type Href } from 'expo-router';
+import { QrCode, ScanLine } from 'lucide-react-native';
+import { BottomNav, type HubTab } from '@/components/ui/BottomNav';
+import { FriendQr } from '@/components/ui/FriendQr';
+import { colors } from '@/constants/theme';
+import { useSession } from '@/context/session';
+import { socialApi, type OwnProfile } from '@/lib/social-api';
+
+export default function ProfileScreen() {
+  const { username, login } = useSession();
+  const [profile, setProfile] = useState<OwnProfile | null>(null);
+  const [name, setName] = useState('');
+  const [handle, setHandle] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+
+  useFocusEffect(useCallback(() => {
+    if (!username) { router.replace('/login'); return; }
+    void socialApi<OwnProfile>('/me').then((result) => {
+      setProfile(result); setName(result.name); setHandle(result.username); setError('');
+    }).catch((cause) => setError(cause instanceof Error ? cause.message : 'Could not load profile.'));
+  }, [username]));
+
+  const save = async () => {
+    if (busy) return;
+    setBusy(true); setSaved(false); setError('');
+    try {
+      const result = await socialApi<OwnProfile>('/me', 'PATCH', { name: name.trim(), username: handle.trim().toLowerCase() });
+      setProfile(result); setHandle(result.username); login(result.name); setSaved(true);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save your profile.'); }
+    finally { setBusy(false); }
+  };
+  const selectTab = (tab: HubTab) => { if (tab !== 'you') router.replace({ pathname: '/home', params: { tab } }); };
+  if (!username) return null;
+
+  return <SafeAreaView style={styles.safe}>
+    <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+      <Text style={styles.eyebrow}>YOUR ADDA IDENTITY</Text><Text style={styles.title}>Your profile</Text>
+      <View style={styles.avatar}><Text style={styles.avatarText}>{name[0]?.toUpperCase() || username[0].toUpperCase()}</Text></View>
+      <Text style={styles.label}>DISPLAY NAME</Text><TextInput style={styles.input} value={name} onChangeText={(value) => { setName(value); setSaved(false); }} placeholder="Your name" placeholderTextColor={colors.muted} maxLength={60} />
+      <Text style={styles.label}>USERNAME</Text><View style={styles.usernameRow}><Text style={styles.at}>@</Text><TextInput style={styles.usernameInput} value={handle} onChangeText={(value) => { setHandle(value); setSaved(false); }} placeholder="username" placeholderTextColor={colors.muted} autoCapitalize="none" autoCorrect={false} maxLength={24} /></View>
+      <Text style={styles.hint}>Friends can find you by username. Use 3–24 letters, numbers, dots or underscores.</Text>
+      {!!error && <Text style={styles.error}>{error}</Text>}
+      {saved && <Text style={styles.success}>Profile saved.</Text>}
+      <Pressable accessibilityRole="button" disabled={busy || !profile} onPress={() => void save()} style={[styles.save, (busy || !profile) && styles.disabled]}><Text style={styles.saveText}>{busy ? 'Saving…' : 'Save changes'}</Text></Pressable>
+
+      <View style={styles.qrCard}><View style={styles.qrHeading}><QrCode size={22} color={colors.primary} /><Text style={styles.qrTitle}>Your friend QR</Text></View><Text style={styles.qrCopy}>Someone can scan this to add you. It contains only a random friend code, never your email or private details.</Text>
+        <View style={styles.qrSurface}>{profile ? <FriendQr code={profile.friendCode} /> : <ActivityIndicator color={colors.primary} />}</View>
+        <Text style={styles.qrUsername}>@{profile?.username || '...'}</Text>
+        <Pressable onPress={() => router.push('/scan' as Href)} style={styles.scanButton}><ScanLine size={19} color={colors.primaryDark} /><Text style={styles.scanText}>Scan a friend’s QR</Text></Pressable>
+      </View>
+    </ScrollView>
+    <BottomNav active="you" onSelect={selectTab} />
+  </SafeAreaView>;
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.background }, content: { paddingHorizontal: 24, paddingTop: 27, paddingBottom: 36 },
+  eyebrow: { color: colors.primary, fontSize: 10, letterSpacing: 1.6, fontWeight: '800' }, title: { color: colors.text, fontSize: 29, fontWeight: '800', marginTop: 6, marginBottom: 22 },
+  avatar: { width: 76, height: 76, borderRadius: 26, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center', marginBottom: 24 }, avatarText: { color: colors.primaryDark, fontSize: 31, fontWeight: '900' },
+  label: { color: colors.muted, fontSize: 11, fontWeight: '800', letterSpacing: 1, marginBottom: 8 }, input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, height: 52, paddingHorizontal: 15, color: colors.text, fontSize: 16, marginBottom: 17 },
+  usernameRow: { height: 52, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 15 }, at: { color: colors.primary, fontSize: 19, fontWeight: '800' }, usernameInput: { flex: 1, fontSize: 16, color: colors.text, marginLeft: 3 },
+  hint: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 8 }, error: { color: colors.error, marginTop: 12, fontSize: 13 }, success: { color: colors.primary, marginTop: 12, fontWeight: '700' },
+  save: { height: 52, backgroundColor: colors.primary, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginTop: 18 }, saveText: { color: '#FFFFFF', fontWeight: '800', fontSize: 15 }, disabled: { opacity: 0.5 },
+  qrCard: { marginTop: 35, padding: 20, backgroundColor: colors.surface, borderRadius: 22, borderWidth: 1, borderColor: colors.border, alignItems: 'center' }, qrHeading: { flexDirection: 'row', alignItems: 'center', gap: 10, alignSelf: 'flex-start' }, qrTitle: { color: colors.text, fontSize: 18, fontWeight: '800' }, qrCopy: { color: colors.muted, alignSelf: 'flex-start', fontSize: 12, lineHeight: 18, marginTop: 9, marginBottom: 18 },
+  qrSurface: { width: 258, height: 258, backgroundColor: '#FFFFFF', borderRadius: 15, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border }, qrUsername: { color: colors.text, fontWeight: '700', marginTop: 12 },
+  scanButton: { flexDirection: 'row', gap: 9, alignItems: 'center', marginTop: 21, backgroundColor: colors.primarySoft, paddingHorizontal: 17, paddingVertical: 13, borderRadius: 14 }, scanText: { color: colors.primaryDark, fontWeight: '800' },
+});

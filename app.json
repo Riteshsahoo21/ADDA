@@ -8,9 +8,18 @@
     "android": {
       "package": "com.adda.virtualhangout",
       "versionCode": 1,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "usesCleartextTraffic": true
     },
-    "plugins": ["expo-router", "expo-screen-orientation"],
-    "experiments": { "typedRoutes": true }
+    "plugins": [
+      "expo-router",
+      "expo-screen-orientation",
+      "expo-secure-store",
+      ["expo-camera", { "cameraPermission": "Allow ADDA to scan a friend's QR code.", "recordAudioAndroid": false }],
+      "@react-native-google-signin/google-signin"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
   }
 }

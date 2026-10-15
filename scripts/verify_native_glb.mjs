@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
-for (const name of ['loft16', 'school-rooftop', 'chai-stall', 'three-shops', 'tea-ground', 'maple-tree', 'boy', 'girl']) {
+for (const name of ['loft16', 'school-rooftop', 'chai-stall', 'three-shops', 'tea-ground', 'maple-tree', 'avatar-man', 'avatar-uncle', 'avatar-photo-boy', 'avatar-self', 'avatar-woman', 'avatar-chinese-woman', 'avatar-nepali-woman', 'avatar-white-top-woman']) {
   const path = `assets/models/${name}`;
   const texPath = `assets/textures/${name}`;
   const data = fs.readFileSync(`${path}.glb`);
@@ -27,7 +27,19 @@ for (const name of ['loft16', 'school-rooftop', 'chai-stall', 'three-shops', 'te
   const bounds = new THREE.Box3().setFromObject(gltf.scene);
   const dimensions = bounds.getSize(new THREE.Vector3()).toArray().map(x => Number(x.toFixed(2)));
   const center = bounds.getCenter(new THREE.Vector3()).toArray().map(x => Number(x.toFixed(2)));
-  console.log(name, { dimensions, center, meshes: gltf.scene.getObjectsByProperty('type', 'Mesh').length });
+  let meshes = 0;
+  gltf.scene.traverse(object => { if (object.isMesh) meshes += 1; });
+  if (meshes === 0) throw new Error(`${name} contains no meshes`);
+  console.log(name, { dimensions, center, meshes });
+  if (name === 'avatar-self' || name === 'avatar-woman' || name === 'avatar-chinese-woman' || name === 'avatar-nepali-woman' || name === 'avatar-white-top-woman') {
+    const expected = ['idle', 'walk', 'sprint', 'jump', 'crouch_idle', 'crouch_walk', 'sit_enter', 'sit_idle', 'sit_exit'];
+    const names = gltf.animations.map(clip => clip.name);
+    if (expected.some(clip => !names.includes(clip))) throw new Error(`${name} clips missing: ${names.join(', ')}`);
+    let skinned = 0;
+    gltf.scene.traverse(object => { if (object.isSkinnedMesh) skinned += 1; });
+    if (skinned !== 1) throw new Error(`${name} expected one skinned mesh, got ${skinned}`);
+    console.log(`${name} clips`, gltf.animations.map(clip => `${clip.name}:${clip.duration.toFixed(2)}s`).join(', '));
+  }
   if (name === 'school-rooftop') {
     const deck = gltf.scene.getObjectByName('Object_26');
     const steelDoor = gltf.scene.getObjectByName('Object_30');

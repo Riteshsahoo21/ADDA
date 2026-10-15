@@ -7,7 +7,8 @@ try {
     process.exit(0);
   }
   execFileSync('adb', ['reverse', 'tcp:8081', 'tcp:8081'], { stdio: 'inherit', timeout: 5000 });
-  console.log('[ADDA USB] Metro port 8081 is forwarded over USB.');
+  execFileSync('adb', ['reverse', 'tcp:3000', 'tcp:3000'], { stdio: 'inherit', timeout: 5000 });
+  console.log('[ADDA USB] Metro port 8081 and Auth port 3000 are forwarded over USB.');
 } catch (error) {
   console.log('[ADDA USB] Could not run adb reverse. Run `adb devices` and `adb reverse tcp:8081 tcp:8081` manually.');
 }

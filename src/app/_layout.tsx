@@ -14,7 +14,7 @@ if (__DEV__) {
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}><SessionProvider>
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
       <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.background }, animation: 'fade' }} />
     </SessionProvider></GestureHandlerRootView>
   );
