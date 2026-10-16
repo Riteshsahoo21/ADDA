@@ -30,6 +30,8 @@ export class GroupMedia {
   private recvTransport: MediasoupTypes.Transport | null = null;
   private localStream: MediaStream | null = null;
   private muted = false;
+  private playbackMuted = false;
+  private mutedUsers = new Set<string>();
   private cameraOff = false;
   private consumers = new Map<string, { consumer: MediasoupTypes.Consumer; info: ProducerInfo; stream: MediaStream }>();
   private producing: MediasoupTypes.Producer[] = [];
@@ -105,6 +107,15 @@ export class GroupMedia {
     this.muted = muted;
     this.localStream?.getAudioTracks().forEach(track => { track.enabled = !muted; });
   }
+  setPlaybackMuted(muted: boolean) {
+    this.playbackMuted = muted;
+    this.updatePlaybackVolumes();
+  }
+  setUserMuted(userId: string, muted: boolean) {
+    if (muted) this.mutedUsers.add(userId);
+    else this.mutedUsers.delete(userId);
+    this.updatePlaybackVolumes();
+  }
   setCameraOff(off: boolean) {
     this.cameraOff = off;
     this.localStream?.getVideoTracks().forEach(track => { track.enabled = !off; });
@@ -135,7 +146,7 @@ export class GroupMedia {
     for (const id of this.consumers.keys()) if (!wanted.has(id)) this.remove(id);
     for (const info of producers) {
       const current = this.consumers.get(info.producerId);
-      if (current) { current.info = info; this.setVolume(current.consumer.track as unknown as MediaStreamTrack, info.distance); continue; }
+      if (current) { current.info = info; this.setVolume(current.consumer.track as unknown as MediaStreamTrack, info); continue; }
       const parameters = await request<MediasoupTypes.ConsumerOptions>(this.socket, 'media:consume', {
         transportId: this.recvTransport.id, producerId: info.producerId, rtpCapabilities: this.device.rtpCapabilities,
       });
@@ -144,14 +155,23 @@ export class GroupMedia {
       const track = consumer.track as unknown as MediaStreamTrack;
       const stream = new MediaStream([track]);
       this.consumers.set(info.producerId, { consumer, info, stream });
-      this.setVolume(track, info.distance);
+      this.setVolume(track, info);
       await request(this.socket, 'media:resume', consumer.id);
       this.emitTracks();
     }
   }
 
-  private setVolume(track: MediaStreamTrack, distance?: number) {
-    if (track.kind === 'audio' && typeof distance === 'number') track._setVolume(Math.max(0.2, Math.min(1, 1 - distance / 12)));
+  private updatePlaybackVolumes() {
+    for (const { consumer, info } of this.consumers.values()) {
+      this.setVolume(consumer.track as unknown as MediaStreamTrack, info);
+    }
+  }
+  private setVolume(track: MediaStreamTrack, info: ProducerInfo) {
+    if (track.kind !== 'audio') return;
+    const volume = this.playbackMuted || this.mutedUsers.has(info.userId)
+      ? 0
+      : typeof info.distance === 'number' ? Math.max(0.2, Math.min(1, 1 - info.distance / 12)) : 1;
+    track._setVolume(volume);
   }
   private remove(id: string) {
     const entry = this.consumers.get(id);

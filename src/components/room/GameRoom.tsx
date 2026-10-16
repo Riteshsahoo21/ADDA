@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GLView, ExpoWebGLRenderingContext } from 'expo-gl';
-import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { Accessibility, ArrowBigUp, Camera, Eye, PersonStanding } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as THREE from 'three';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
@@ -95,9 +96,8 @@ function fallbackAvatar() {
 
 export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }: { roomKind: RoomKind; avatar: AvatarStyle; onPortal: () => void; peers?: RoomPeer[]; onPosition?: (x: number, z: number, yaw: number) => void }) {
   const [status, setStatus] = useState<'initializing' | 'ready' | 'error'>('initializing');
-  const [assetStatus, setAssetStatus] = useState('Loading room assets');
+  const [assetStatus, setAssetStatus] = useState('');
   const [error, setError] = useState('');
-  const [fps, setFps] = useState(0);
   const [stick, setStick] = useState<Stick>({ x: 0, y: 0 });
   const [stickAnchor, setStickAnchor] = useState(RESTING_STICK);
   const [sprinting, setSprinting] = useState(false);
@@ -385,13 +385,11 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
             addMapleTrees(room.scene, trees.scene);
           } catch (cause) { failures.push(`maple trees: ${String(cause)}`); console.warn('[ADDA GL] Maple trees failed', cause); }
         }
-        if (active && mounted.current) setAssetStatus(failures.length ? `Model warning: ${failures.join('; ')}` : `${roomKind === 'loft' ? 'Loft 16' : roomKind === 'roof' ? 'School Rooftop' : 'Road & shops'} · ${avatar.body} loaded`);
+        if (active && mounted.current) setAssetStatus(failures.length ? `Model warning: ${failures.join('; ')}` : '');
       };
       void loadModels();
 
       const clock = new THREE.Clock();
-      let sampleTime = 0;
-      let sampleFrames = 0;
       let jumpHeight = 0;
       let verticalVelocity = 0;
       const beginSeat = (onSide: boolean, coordinate: number, teaSeat?: TeaSeat) => {
@@ -723,12 +721,6 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
           }
           renderer.render(room.scene, room.camera);
           gl.endFrameEXP();
-          sampleFrames += 1;
-          sampleTime += delta;
-          if (__DEV__ && sampleTime >= 1) {
-            if (mounted.current) setFps(Math.round(sampleFrames / sampleTime));
-            sampleFrames = 0; sampleTime = 0;
-          }
           frame = requestAnimationFrame(render);
         } catch (cause) {
           active = false;
@@ -762,11 +754,11 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
   return <View style={styles.container}>
     <GLView style={StyleSheet.absoluteFill} onContextCreate={onContextCreate} />
     {status === 'ready' && <GestureDetector gesture={gestures.look}><View style={styles.lookZone} /></GestureDetector>}
-    <View pointerEvents="none" style={styles.badge}><View style={[styles.dot, status === 'error' && styles.errorDot]} /><Text style={styles.badgeText}>{status === 'ready' ? `NATIVE 3D READY${__DEV__ ? `  ·  ${fps} FPS` : ''}` : status === 'error' ? '3D ERROR' : 'INITIALIZING 3D…'}</Text></View>
-    {status === 'ready' && <View pointerEvents="none" style={styles.modelBadge}><Text style={styles.modelText}>{assetStatus}</Text></View>}
+    {status === 'initializing' && <View pointerEvents="none" style={styles.loading}><ActivityIndicator color="#FFFFFF" /></View>}
+    {status === 'ready' && !!assetStatus && <View pointerEvents="none" style={styles.modelBadge}><Text style={styles.modelText}>{assetStatus}</Text></View>}
     {status === 'error' && <View style={styles.errorCard}><Text style={styles.errorTitle}>Renderer could not start</Text><Text style={styles.errorText}>{error}</Text></View>}
     {status === 'ready' && <>
-      <Pressable accessibilityRole="button" accessibilityLabel="Switch between first person and third person" onPress={toggleView} style={[styles.viewButton, { right: 28 + insets.right }]}><Text style={styles.viewText}>{viewMode}  ↔  {viewMode === 'FPP' ? 'TPP' : 'FPP'}</Text></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Switch to ${viewMode === 'FPP' ? 'third' : 'first'} person camera`} onPress={toggleView} style={[styles.viewButton, { right: 28 + insets.right }]}>{viewMode === 'FPP' ? <Camera size={19} color="#F7FAF8" /> : <Eye size={19} color="#F7FAF8" />}<Text style={styles.viewText}>{viewMode === 'FPP' ? '3RD PERSON' : '1ST PERSON'}</Text></Pressable>
       {seatUi === 'free' && <GestureDetector gesture={gestures.move}><View accessibilityLabel="Movement joystick. Drag farther forward to sprint." style={[styles.joystickArea, { left: 16 + insets.left, bottom: 8 + insets.bottom }]}>
         <Text style={[styles.sprintLabel, sprinting && styles.sprintActive]}>{sprinting ? 'AUTO SPRINT' : 'MOVE'}</Text>
         <View pointerEvents="none" style={[styles.stickBase, sprinting && styles.stickSprinting, { left: stickAnchor.x - STICK_SIZE / 2, top: stickAnchor.y - STICK_SIZE / 2 }]}>
@@ -775,12 +767,11 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
         </View>
       </View></GestureDetector>}
       {seatUi === 'free' ? <View style={[styles.actions, { right: 28 + insets.right, bottom: 20 + insets.bottom }]}>
-        <GestureDetector gesture={gestures.jumpTap}><View accessible accessibilityRole="button" accessibilityLabel="Jump" style={styles.actionButton}><Text style={styles.actionIcon}>↑</Text><Text style={styles.actionLabel}>JUMP</Text></View></GestureDetector>
-        <GestureDetector gesture={gestures.crouchTap}><View accessible accessibilityRole="button" accessibilityLabel={crouched ? 'Stand up' : 'Crouch'} accessibilityState={{ selected: crouched }} style={[styles.actionButton, crouched && styles.crouchedButton]}><Text style={styles.actionIcon}>{crouched ? '↥' : '↓'}</Text><Text style={styles.actionLabel}>{crouched ? 'STAND' : 'CROUCH'}</Text></View></GestureDetector>
+        <GestureDetector gesture={gestures.jumpTap}><View accessible accessibilityRole="button" accessibilityLabel="Jump" style={styles.actionButton}><ArrowBigUp size={30} strokeWidth={2.4} color="#F7FAF8" /><Text style={styles.actionLabel}>JUMP</Text></View></GestureDetector>
+        <GestureDetector gesture={gestures.crouchTap}><View accessible accessibilityRole="button" accessibilityLabel={crouched ? 'Stand up' : 'Crouch'} accessibilityState={{ selected: crouched }} style={[styles.actionButton, crouched && styles.crouchedButton]}>{crouched ? <PersonStanding size={30} strokeWidth={2.2} color="#F7FAF8" /> : <Accessibility size={30} strokeWidth={2.2} color="#F7FAF8" />}<Text style={styles.actionLabel}>{crouched ? 'STAND' : 'CROUCH'}</Text></View></GestureDetector>
       </View> : seatUi === 'seated' ? <Pressable accessibilityRole="button" accessibilityLabel="Stand up" onPress={standUp} style={[styles.standButton, { right: 28 + insets.right, bottom: 32 + insets.bottom }]}><Text style={styles.standText}>STAND UP</Text></Pressable> : <View pointerEvents="none" style={styles.seatMessage}><Text style={styles.seatMessageText}>{seatUi === 'approaching' ? roomKind === 'tea' ? 'Walking to bench…' : 'Walking to sofa…' : seatUi === 'entering' ? 'Sitting down…' : 'Standing up…'}</Text></View>}
       {nearDoor && seatUi === 'free' && (roomKind === 'loft' || roomKind === 'roof') && <Pressable accessibilityRole="button" accessibilityLabel={roomKind === 'roof' ? 'Back to Loft' : 'Go to Rooftop'} onPress={onPortal} style={styles.doorButton}><Text style={styles.doorButtonText}>{roomKind === 'roof' ? 'BACK TO LOFT' : 'GO TO ROOFTOP'}</Text></Pressable>}
       {nearSofa && seatUi === 'free' && <Pressable accessibilityRole="button" accessibilityLabel={roomKind === 'tea' ? 'Sit on chai bench' : 'Sit on the black sofa'} onPress={sitDown} style={styles.sitButton}><Text style={styles.doorButtonText}>{roomKind === 'tea' ? 'SIT ON BENCH' : 'SIT ON SOFA'}</Text></Pressable>}
-      <View pointerEvents="none" style={styles.hint}><Text style={styles.hintText}>{roomKind === 'loft' ? 'Approach the sofa or rooftop door for an action' : roomKind === 'roof' ? 'Approach the door to return to Loft 16' : 'Walk to the chai benches or cross to the three shops'}</Text></View>
     </>}
   </View>;
 }
@@ -788,15 +779,13 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   lookZone: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
-  badge: { position: 'absolute', left: 18, top: 85, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FFFFFFE8', borderRadius: 30, paddingHorizontal: 12, paddingVertical: 8 },
-  dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.green }, errorDot: { backgroundColor: colors.error },
-  badgeText: { color: colors.text, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
-  modelBadge: { position: 'absolute', left: 18, top: 119, maxWidth: '60%', backgroundColor: '#FFFFFFD9', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 5 },
-  modelText: { color: colors.text, fontSize: 9, fontWeight: '700' },
+  loading: { position: 'absolute', alignSelf: 'center', top: '48%', backgroundColor: '#10221DBB', borderRadius: 22, padding: 12 },
+  modelBadge: { position: 'absolute', left: 18, top: 85, maxWidth: '60%', backgroundColor: '#10221DEB', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 },
+  modelText: { color: '#FFD49A', fontSize: 10, fontWeight: '700' },
   errorCard: { position: 'absolute', alignSelf: 'center', top: '35%', width: '80%', padding: 20, backgroundColor: colors.surface, borderColor: colors.error, borderWidth: 1, borderRadius: 18 },
   errorTitle: { color: colors.error, fontSize: 18, fontWeight: '800' }, errorText: { color: colors.text, fontSize: 13, marginTop: 8 },
-  viewButton: { position: 'absolute', top: 85, right: 28, backgroundColor: '#FFFFFFE8', borderWidth: 1, borderColor: colors.primary, borderRadius: 13, paddingHorizontal: 16, paddingVertical: 11 },
-  viewText: { color: colors.text, fontSize: 12, fontWeight: '900' },
+  viewButton: { position: 'absolute', top: 85, right: 28, flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: '#10221DE8', borderRadius: 13, paddingHorizontal: 13, paddingVertical: 11 },
+  viewText: { color: '#F7FAF8', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
   joystickArea: { position: 'absolute', width: 220, height: 190 },
   sprintLabel: { position: 'absolute', left: 26, top: 2, color: colors.primaryDark, fontSize: 10, fontWeight: '900', letterSpacing: 1.5 }, sprintActive: { color: colors.green },
   stickBase: { position: 'absolute', width: STICK_SIZE, height: STICK_SIZE, borderRadius: STICK_SIZE / 2, backgroundColor: '#FFFFFF85', borderWidth: 2, borderColor: '#15794BAA', alignItems: 'center', justifyContent: 'center' },
@@ -805,10 +794,9 @@ const styles = StyleSheet.create({
   stickThumb: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#FFFFFFE8', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.primary },
   thumbCenter: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.primary },
   actions: { position: 'absolute', right: 28, bottom: 20, gap: 13, alignItems: 'center' },
-  actionButton: { width: 68, height: 68, borderRadius: 34, backgroundColor: '#FFFFFFE8', borderWidth: 1.5, borderColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
-  crouchedButton: { borderColor: colors.green, backgroundColor: '#E5F4E9EE' },
-  actionIcon: { color: colors.primaryDark, fontSize: 25, fontWeight: '800', lineHeight: 29 },
-  actionLabel: { color: colors.primaryDark, fontSize: 8, fontWeight: '900', letterSpacing: 0.5 },
+  actionButton: { width: 68, height: 68, borderRadius: 34, backgroundColor: '#10221DBB', borderWidth: 1.5, borderColor: '#FFFFFF77', alignItems: 'center', justifyContent: 'center' },
+  crouchedButton: { borderColor: '#67CC8A', backgroundColor: '#277A55DD' },
+  actionLabel: { color: '#F7FAF8', fontSize: 8, fontWeight: '900', letterSpacing: 0.5 },
   standButton: { position: 'absolute', backgroundColor: '#FFFFFFF0', borderWidth: 1.5, borderColor: colors.primary, borderRadius: 18, paddingHorizontal: 18, paddingVertical: 16 },
   standText: { color: colors.text, fontWeight: '900', fontSize: 13 },
   doorButton: { position: 'absolute', bottom: 32, alignSelf: 'center', backgroundColor: '#FFFFFFF0', borderWidth: 1.5, borderColor: colors.primary, borderRadius: 16, paddingHorizontal: 20, paddingVertical: 13 },
@@ -816,6 +804,4 @@ const styles = StyleSheet.create({
   doorButtonText: { color: colors.text, fontWeight: '900', fontSize: 12, letterSpacing: 0.8 },
   seatMessage: { position: 'absolute', bottom: 70, alignSelf: 'center', backgroundColor: '#FFFFFFE8', borderRadius: 12, paddingHorizontal: 18, paddingVertical: 10 },
   seatMessageText: { color: colors.text, fontWeight: '800', fontSize: 12 },
-  hint: { position: 'absolute', bottom: 11, alignSelf: 'center', backgroundColor: '#FFFFFFC7', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 },
-  hintText: { color: colors.text, fontSize: 9 },
 });
