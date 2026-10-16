@@ -5,7 +5,7 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import { NavigationBar } from 'expo-navigation-bar';
 import { router, useIsFocused, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { MessageCircle, Mic, MicOff, Send, Users, Volume2, VolumeX, X } from 'lucide-react-native';
+import { House, MessageCircle, Mic, MicOff, Send, Users, Volume2, VolumeX, X } from 'lucide-react-native';
 import { GameRoom } from '@/components/room/GameRoom';
 import InCallManager from 'react-native-incall-manager';
 import { RoomKind } from '@/three/environment/createGameScene';
@@ -14,7 +14,7 @@ import { useSession } from '@/context/session';
 import { AvatarBody } from '@/three/player/avatarStyle';
 import { GroupMedia } from '@/lib/group-media';
 import { getRealtimeSocket } from '@/lib/realtime';
-import { sendRoomMessage, type RoomJoin, type RoomMessage, type RoomPeer } from '@/lib/rooms';
+import { sendRoomMessage, type RoomJoin, type RoomMessage, type RoomMotionSnapshot, type RoomPeer } from '@/lib/rooms';
 
 const avatarBodies = new Set(['man', 'uncle', 'photo_boy', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman']);
 
@@ -37,6 +37,7 @@ export default function HangoutScreen() {
   const [nearbySpeakers, setNearbySpeakers] = useState(0);
   const [chatOpen, setChatOpen] = useState(false);
   const [playersOpen, setPlayersOpen] = useState(false);
+  const [roomMenuOpen, setRoomMenuOpen] = useState(false);
   const [chatText, setChatText] = useState('');
   const [chatError, setChatError] = useState('');
   const [messages, setMessages] = useState<RoomMessage[]>([]);
@@ -46,14 +47,14 @@ export default function HangoutScreen() {
   const speakerMutedRef = useRef(false);
   const mutedPeersRef = useRef<Set<string>>(new Set());
   const presenceRef = useRef<Awaited<ReturnType<typeof getRealtimeSocket>> | null>(null);
-  const positionRef = useRef({ x: 0, z: 0, yaw: 0 });
+  const positionRef = useRef<RoomMotionSnapshot>({ x: 0, y: 0, z: 0, yaw: 0, pose: 'idle' });
   const lastVoicePosition = useRef({ x: Number.POSITIVE_INFINITY, z: Number.POSITIVE_INFINITY, at: 0 });
-  const onPosition = useCallback((x: number, z: number, yaw: number) => {
-    positionRef.current = { x, z, yaw };
-    presenceRef.current?.volatile.emit('room:position', positionRef.current);
-    if (Math.hypot(x - lastVoicePosition.current.x, z - lastVoicePosition.current.z) > 0.2 || Date.now() - lastVoicePosition.current.at > 2000) {
-      lastVoicePosition.current = { x, z, at: Date.now() };
-      mediaRef.current?.setPosition(x, z);
+  const onPosition = useCallback((snapshot: RoomMotionSnapshot) => {
+    positionRef.current = snapshot;
+    presenceRef.current?.volatile.emit('room:position', snapshot);
+    if (Math.hypot(snapshot.x - lastVoicePosition.current.x, snapshot.z - lastVoicePosition.current.z) > 0.2 || Date.now() - lastVoicePosition.current.at > 2000) {
+      lastVoicePosition.current = { x: snapshot.x, z: snapshot.z, at: Date.now() };
+      mediaRef.current?.setPosition(snapshot.x, snapshot.z);
     }
   }, []);
 
@@ -170,16 +171,22 @@ export default function HangoutScreen() {
     <NavigationBar hidden />
     {landscapeReady && (width >= height || orientationFailed) && <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} />}
     <View style={[styles.topBar, { left: Math.max(16, insets.left + 8), right: Math.max(16, insets.right + 8), top: Math.max(8, insets.top + 4) }]}>
-      <View style={styles.roomIdentity}><Text style={styles.title}>{roomKind === 'tea' ? 'Tea Party' : roomKind === 'roof' ? 'School Rooftop' : 'Loft 16'}</Text><Text style={styles.roomStatus} numberOfLines={1}>{voiceStatus}{nearbySpeakers ? ` · ${nearbySpeakers} nearby` : ''}</Text></View>
       <View style={styles.toolbar}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Room menu" accessibilityState={{ expanded: roomMenuOpen }} onPress={() => { setRoomMenuOpen(current => !current); setPlayersOpen(false); setChatOpen(false); }} style={[styles.toolButton, roomMenuOpen && styles.toolButtonActive]}><House size={22} color="#F7FAF8" /></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Room chat" accessibilityState={{ expanded: chatOpen }} onPress={() => { setChatOpen(current => !current); setPlayersOpen(false); setRoomMenuOpen(false); }} style={[styles.toolButton, chatOpen && styles.toolButtonActive]}><MessageCircle size={22} color="#F7FAF8" /></Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={micMuted ? 'Unmute my microphone' : 'Mute my microphone'} accessibilityState={{ selected: micMuted }} onPress={toggleMic} style={[styles.toolButton, micMuted && styles.toolButtonOff]}>{micMuted ? <MicOff size={22} color="#F7FAF8" /> : <Mic size={22} color="#F7FAF8" />}</Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={speakerMuted ? 'Turn my speaker on' : 'Mute my speaker'} accessibilityState={{ selected: speakerMuted }} onPress={toggleSpeaker} style={[styles.toolButton, speakerMuted && styles.toolButtonOff]}>{speakerMuted ? <VolumeX size={22} color="#F7FAF8" /> : <Volume2 size={22} color="#F7FAF8" />}</Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Room chat" accessibilityState={{ expanded: chatOpen }} onPress={() => { setChatOpen(current => !current); setPlayersOpen(false); }} style={[styles.toolButton, chatOpen && styles.toolButtonActive]}><MessageCircle size={22} color="#F7FAF8" /></Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Players in room" accessibilityState={{ expanded: playersOpen }} onPress={() => { setPlayersOpen(current => !current); setChatOpen(false); }} style={[styles.toolButton, playersOpen && styles.toolButtonActive]}><Users size={22} color="#F7FAF8" /><Text style={styles.playerCount}>{peers.length + 1}</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Players in room" accessibilityState={{ expanded: playersOpen }} onPress={() => { setPlayersOpen(current => !current); setChatOpen(false); setRoomMenuOpen(false); }} style={[styles.toolButton, playersOpen && styles.toolButtonActive]}><Users size={22} color="#F7FAF8" /><Text style={styles.playerCount}>{peers.length + 1}</Text></Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={roomKind === 'roof' ? 'Back to Loft' : 'Exit room'} onPress={() => roomKind === 'roof' ? setRoomKind('loft') : router.replace('/home')} style={styles.toolButton}><X size={22} color="#F7FAF8" /></Pressable>
       </View>
+      <View style={styles.roomIdentity}><Text style={styles.title}>{roomKind === 'tea' ? 'Tea Party' : roomKind === 'roof' ? 'School Rooftop' : 'Loft 16'}</Text><Text style={styles.roomStatus} numberOfLines={1}>{voiceStatus}{nearbySpeakers ? ` · ${nearbySpeakers} nearby` : ''}</Text></View>
     </View>
-    {playersOpen && <View style={[styles.playersPanel, { right: Math.max(16, insets.right + 8), top: Math.max(66, insets.top + 62) }]}>
+    {roomMenuOpen && <View style={[styles.playersPanel, { left: Math.max(16, insets.left + 8), top: Math.max(66, insets.top + 62) }]}>
+      <Text style={styles.panelTitle}>{roomKind === 'tea' ? 'Tea Party' : roomKind === 'roof' ? 'School Rooftop' : 'Loft 16'}</Text>
+      <Text style={styles.roomMenuStatus}>{voiceStatus}</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel={roomKind === 'roof' ? 'Back to Loft' : 'Exit room'} onPress={() => roomKind === 'roof' ? setRoomKind('loft') : router.replace('/home')} style={styles.roomMenuExit}><Text style={styles.roomMenuExitText}>{roomKind === 'roof' ? 'Back to Loft' : 'Exit room'}</Text></Pressable>
+    </View>}
+    {playersOpen && <View style={[styles.playersPanel, { left: Math.max(16, insets.left + 8), top: Math.max(66, insets.top + 62) }]}>
       <Text style={styles.panelTitle}>Players in room</Text>
       <ScrollView style={styles.playersList}>
         <View style={styles.playerRow}><Text style={styles.playerName}>You</Text><Text style={styles.playerMeta}>{micMuted ? 'Mic muted' : 'Mic on'}</Text></View>
@@ -213,6 +220,9 @@ const styles = StyleSheet.create({
   playersPanel: { position: 'absolute', width: 240, maxHeight: 230, backgroundColor: '#10221DF2', borderRadius: 16, padding: 13, gap: 5 },
   playersList: { maxHeight: 178 },
   panelTitle: { color: '#F7FAF8', fontSize: 13, fontWeight: '800', marginBottom: 4 },
+  roomMenuStatus: { color: '#A7B6AC', fontSize: 11, marginBottom: 8 },
+  roomMenuExit: { alignSelf: 'flex-start', backgroundColor: '#FFFFFF1A', borderRadius: 9, paddingHorizontal: 12, paddingVertical: 8 },
+  roomMenuExitText: { color: '#F7FAF8', fontSize: 12, fontWeight: '700' },
   playerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 34, gap: 8 },
   playerName: { color: '#F7FAF8', fontSize: 12, fontWeight: '700', flexShrink: 1 },
   playerMeta: { color: '#A7B6AC', fontSize: 10 },

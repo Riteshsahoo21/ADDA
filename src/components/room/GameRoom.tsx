@@ -15,7 +15,7 @@ import { loadBundledGlb } from '@/three/loaders/loadBundledGlb';
 import { createNativeRenderer } from '@/three/renderer/createNativeRenderer';
 import { avatarScale, loadAvatar } from '@/three/player/avatarAssets';
 import { AvatarStyle, type AvatarBody } from '@/three/player/avatarStyle';
-import type { RoomPeer } from '@/lib/rooms';
+import type { RoomMotionSnapshot, RoomPeer, RoomPose } from '@/lib/rooms';
 
 const STICK_SIZE = 110;
 const STICK_TRAVEL = 37;
@@ -94,7 +94,7 @@ function fallbackAvatar() {
   return group;
 }
 
-export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }: { roomKind: RoomKind; avatar: AvatarStyle; onPortal: () => void; peers?: RoomPeer[]; onPosition?: (x: number, z: number, yaw: number) => void }) {
+export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }: { roomKind: RoomKind; avatar: AvatarStyle; onPortal: () => void; peers?: RoomPeer[]; onPosition?: (snapshot: RoomMotionSnapshot) => void }) {
   const [status, setStatus] = useState<'initializing' | 'ready' | 'error'>('initializing');
   const [assetStatus, setAssetStatus] = useState('');
   const [error, setError] = useState('');
@@ -238,7 +238,7 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
       const room = world;
       const fallback = fallbackAvatar();
       room.avatarMount.add(fallback);
-      type RemoteAvatar = { mount: THREE.Group; body: AvatarBody; mixer?: THREE.AnimationMixer; idle?: THREE.AnimationAction; walk?: THREE.AnimationAction; playing?: THREE.AnimationAction; lastMovingAt: number; initialized: boolean };
+      type RemoteAvatar = { mount: THREE.Group; body: AvatarBody; mixer?: THREE.AnimationMixer; actions: Partial<Record<RoomPose, THREE.AnimationAction>>; playing?: THREE.AnimationAction; lastMovingAt: number; initialized: boolean };
       const remoteAvatars = new Map<string, RemoteAvatar>();
       const remoteModelCache = new Map<AvatarBody, ReturnType<typeof loadAvatar>>();
       const loadRemoteAvatar = (userId: string, entry: RemoteAvatar) => {
@@ -251,19 +251,30 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
           model.rotation.y = Math.PI;
           entry.mount.clear();
           entry.mount.add(model);
-          const idle = gltf.animations.find(clip => /^idle(?:_loop)?$/i.test(clip.name));
-          const walk = gltf.animations.find(clip => /^walk(?:_loop)?$/i.test(clip.name));
-          if (idle || walk) {
-            entry.mixer = new THREE.AnimationMixer(model);
-            entry.idle = idle ? entry.mixer.clipAction(idle) : undefined;
-            entry.walk = walk ? entry.mixer.clipAction(walk) : undefined;
-            entry.playing = entry.idle ?? entry.walk;
-            entry.playing?.play();
+          entry.mixer = new THREE.AnimationMixer(model);
+          for (const clip of gltf.animations) {
+            const name = clip.name.toLowerCase();
+            const pose: RoomPose | undefined = name === 'idle' || name === 'idle_loop' ? 'idle'
+              : name === 'walk' || name === 'walk_loop' ? 'walk'
+              : name === 'sprint' || name === 'run' || name === 'sprint_loop' ? 'run'
+              : name === 'jump' || name === 'jump_loop' ? 'jump'
+              : name === 'crouch_idle' || name === 'crouchidle' || name === 'crouch_idle_loop' ? 'crouch_idle'
+              : name === 'crouch_walk' || name === 'crouchwalk' || name === 'crouch_fwd_loop' ? 'crouch_walk'
+              : name === 'sit_enter' || name === 'sit_idle' || name === 'sit_exit' ? name : undefined;
+            if (!pose) continue;
+            const action = entry.mixer.clipAction(clip);
+            if (pose === 'sit_enter' || pose === 'sit_exit') {
+              action.setLoop(THREE.LoopOnce, 1);
+              action.clampWhenFinished = true;
+            }
+            entry.actions[pose] = action;
           }
+          entry.playing = entry.actions.idle ?? entry.actions.walk;
+          entry.playing?.play();
         }).catch(error => console.warn('[ADDA GL] Remote avatar failed', error));
       };
       let lastPositionSent = 0;
-      let lastSentPosition = { x: Number.POSITIVE_INFINITY, z: Number.POSITIVE_INFINITY, yaw: Number.POSITIVE_INFINITY };
+      let lastSentPosition: RoomMotionSnapshot = { x: Number.POSITIVE_INFINITY, y: Number.POSITIVE_INFINITY, z: Number.POSITIVE_INFINITY, yaw: Number.POSITIVE_INFINITY, pose: 'idle' };
 
       const loadModels = async () => {
         const failures: string[] = [];
@@ -437,14 +448,6 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
         try {
           const delta = Math.min(clock.getDelta(), 0.05);
           const now = Date.now();
-          const currentPosition = { x: room.player.position.x, z: room.player.position.z, yaw: room.avatarMount.rotation.y };
-          const moved = Math.hypot(currentPosition.x - lastSentPosition.x, currentPosition.z - lastSentPosition.z) > 0.025 ||
-            Math.abs(currentPosition.yaw - lastSentPosition.yaw) > 0.035;
-          if (now - lastPositionSent > 150 && (moved || now - lastPositionSent > 2000)) {
-            lastPositionSent = now;
-            lastSentPosition = currentPosition;
-            positionRef.current?.(currentPosition.x, currentPosition.z, currentPosition.yaw);
-          }
           const present = new Set(peersRef.current.map(peer => peer.userId));
           for (const [id, entry] of remoteAvatars) if (!present.has(id)) { room.scene.remove(entry.mount); remoteAvatars.delete(id); }
           for (const peer of peersRef.current) {
@@ -453,14 +456,14 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
               if (entry) room.scene.remove(entry.mount);
               const mount = new THREE.Group();
               mount.add(fallbackAvatar());
-              entry = { mount, body: peer.avatar, lastMovingAt: 0, initialized: false };
+              entry = { mount, body: peer.avatar, actions: {}, lastMovingAt: 0, initialized: false };
               room.scene.add(mount);
               remoteAvatars.set(peer.userId, entry);
               loadRemoteAvatar(peer.userId, entry);
             }
             const distance = Math.hypot(entry.mount.position.x - peer.x, entry.mount.position.z - peer.z);
             if (!entry.initialized || distance > 5) {
-              entry.mount.position.set(peer.x, 0, peer.z);
+              entry.mount.position.set(peer.x, peer.y ?? 0, peer.z);
               entry.mount.rotation.y = peer.yaw;
               entry.initialized = true;
             } else {
@@ -468,11 +471,15 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
               // Smooth network snapshots while keeping local input independent of packet timing.
               const blend = 1 - Math.exp(-12 * delta);
               entry.mount.position.x += (peer.x - entry.mount.position.x) * blend;
+              entry.mount.position.y += ((peer.y ?? 0) - entry.mount.position.y) * blend;
               entry.mount.position.z += (peer.z - entry.mount.position.z) * blend;
               const angle = THREE.MathUtils.euclideanModulo(peer.yaw - entry.mount.rotation.y + Math.PI, Math.PI * 2) - Math.PI;
               entry.mount.rotation.y += angle * blend;
             }
-            const wanted = now - entry.lastMovingAt < 260 ? entry.walk ?? entry.idle : entry.idle ?? entry.walk;
+            const pose = peer.pose ?? (now - entry.lastMovingAt < 260 ? 'walk' : 'idle');
+            const wanted = entry.actions[pose] ?? (pose === 'crouch_idle' ? entry.actions.idle
+              : pose === 'crouch_walk' || pose === 'run' ? entry.actions.walk
+              : pose === 'jump' ? entry.actions.walk : undefined) ?? entry.actions.idle ?? entry.actions.walk;
             if (wanted && wanted !== entry.playing) {
               entry.playing?.fadeOut(0.18);
               wanted.reset().fadeIn(0.18).play();
@@ -665,6 +672,24 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
             playing = wanted;
           }
           mixer?.update(delta);
+          const pose: RoomPose = seatPhase === 'entering' ? 'sit_enter'
+            : seatPhase === 'seated' ? 'sit_idle'
+            : seatPhase === 'exiting' ? 'sit_exit'
+            : jumpHeight > 0.05 ? 'jump'
+            : crouchRef.current ? (walking ? 'crouch_walk' : 'crouch_idle')
+            : walking ? (running ? 'run' : 'walk') : 'idle';
+          const snapshot: RoomMotionSnapshot = {
+            x: room.player.position.x, y: room.player.position.y, z: room.player.position.z,
+            yaw: room.avatarMount.rotation.y, pose,
+          };
+          const changed = Math.hypot(snapshot.x - lastSentPosition.x, snapshot.z - lastSentPosition.z) > 0.025 ||
+            Math.abs(snapshot.y - lastSentPosition.y) > 0.025 ||
+            Math.abs(snapshot.yaw - lastSentPosition.yaw) > 0.035 || snapshot.pose !== lastSentPosition.pose;
+          if (now - lastPositionSent > 150 && (changed || now - lastPositionSent > 2000)) {
+            lastPositionSent = now;
+            lastSentPosition = snapshot;
+            positionRef.current?.(snapshot);
+          }
           heading.set(Math.sin(yaw.current) * Math.cos(pitch.current), Math.sin(pitch.current), -Math.cos(yaw.current) * Math.cos(pitch.current));
           const sittingCamera = seatPhase === 'entering' || seatPhase === 'seated' || seatPhase === 'exiting';
           if (modeRef.current === 'FPP') {
