@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "313925349132",
+    "project_id": "adda-51cd7",
+    "storage_bucket": "adda-51cd7.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:313925349132:android:b6d73639a96f25a12ea329",
+        "android_client_info": {
+          "package_name": "com.adda.virtualhangout"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAYX7w0fFAx3_F5Of7aElPol7IjAdK6Yd8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

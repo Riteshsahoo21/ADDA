@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-na
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as THREE from 'three';
+import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { colors } from '@/constants/theme';
 import { createGameScene, RoomKind } from '@/three/environment/createGameScene';
 import { createLoftDetails } from '@/three/environment/loftDetails';
@@ -12,7 +13,8 @@ import { canWalkTea, createTeaSeats, TeaObstacle, TeaSeat, teaObstacleFromBounds
 import { loadBundledGlb } from '@/three/loaders/loadBundledGlb';
 import { createNativeRenderer } from '@/three/renderer/createNativeRenderer';
 import { avatarScale, loadAvatar } from '@/three/player/avatarAssets';
-import { AvatarStyle } from '@/three/player/avatarStyle';
+import { AvatarStyle, type AvatarBody } from '@/three/player/avatarStyle';
+import type { RoomPeer } from '@/lib/rooms';
 
 const STICK_SIZE = 110;
 const STICK_TRAVEL = 37;
@@ -91,7 +93,7 @@ function fallbackAvatar() {
   return group;
 }
 
-export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; avatar: AvatarStyle; onPortal: () => void }) {
+export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }: { roomKind: RoomKind; avatar: AvatarStyle; onPortal: () => void; peers?: RoomPeer[]; onPosition?: (x: number, z: number, yaw: number) => void }) {
   const [status, setStatus] = useState<'initializing' | 'ready' | 'error'>('initializing');
   const [assetStatus, setAssetStatus] = useState('Loading room assets');
   const [error, setError] = useState('');
@@ -117,10 +119,14 @@ export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; a
   const pendingWorldTap = useRef<{ x: number; y: number } | null>(null);
   const windowSize = useRef({ width: windowWidth, height: windowHeight });
   const cleanup = useRef<(() => void) | null>(null);
+  const peersRef = useRef(peers);
+  const positionRef = useRef(onPosition);
   const lookTranslation = useRef({ x: 0, y: 0 });
   const insets = useSafeAreaInsets();
 
   useEffect(() => { windowSize.current = { width: windowWidth, height: windowHeight }; }, [windowWidth, windowHeight]);
+  useEffect(() => { peersRef.current = peers; }, [peers]);
+  useEffect(() => { positionRef.current = onPosition; }, [onPosition]);
 
   const updateStick = useCallback((x: number, y: number) => {
     const distance = Math.hypot(x, y);
@@ -232,6 +238,32 @@ export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; a
       const room = world;
       const fallback = fallbackAvatar();
       room.avatarMount.add(fallback);
+      type RemoteAvatar = { mount: THREE.Group; body: AvatarBody; mixer?: THREE.AnimationMixer; idle?: THREE.AnimationAction; walk?: THREE.AnimationAction; playing?: THREE.AnimationAction; lastMovingAt: number; initialized: boolean };
+      const remoteAvatars = new Map<string, RemoteAvatar>();
+      const remoteModelCache = new Map<AvatarBody, ReturnType<typeof loadAvatar>>();
+      const loadRemoteAvatar = (userId: string, entry: RemoteAvatar) => {
+        let pending = remoteModelCache.get(entry.body);
+        if (!pending) { pending = loadAvatar({ body: entry.body }); remoteModelCache.set(entry.body, pending); }
+        void pending.then(gltf => {
+          if (!active || remoteAvatars.get(userId) !== entry) return;
+          const model = cloneSkeleton(gltf.scene) as THREE.Group;
+          model.scale.setScalar(avatarScale());
+          model.rotation.y = Math.PI;
+          entry.mount.clear();
+          entry.mount.add(model);
+          const idle = gltf.animations.find(clip => /^idle(?:_loop)?$/i.test(clip.name));
+          const walk = gltf.animations.find(clip => /^walk(?:_loop)?$/i.test(clip.name));
+          if (idle || walk) {
+            entry.mixer = new THREE.AnimationMixer(model);
+            entry.idle = idle ? entry.mixer.clipAction(idle) : undefined;
+            entry.walk = walk ? entry.mixer.clipAction(walk) : undefined;
+            entry.playing = entry.idle ?? entry.walk;
+            entry.playing?.play();
+          }
+        }).catch(error => console.warn('[ADDA GL] Remote avatar failed', error));
+      };
+      let lastPositionSent = 0;
+      let lastSentPosition = { x: Number.POSITIVE_INFINITY, z: Number.POSITIVE_INFINITY, yaw: Number.POSITIVE_INFINITY };
 
       const loadModels = async () => {
         const failures: string[] = [];
@@ -274,17 +306,17 @@ export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; a
         } catch (cause) { failures.push(`avatar: ${String(cause)}`); console.warn('[ADDA GL] Avatar failed', cause); }
         const roomAssets = roomKind === 'loft' ? [
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: require('../../../assets/models/loft16.glb'), texture: require('../../../assets/textures/loft16.rgba'), images: require('../../../assets/textures/loft16.json'), name: 'Loft 16', size: 10.6, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: false },
+          { id: require('../../../assets/runtime_models/loft16.glb'), texture: require('../../../assets/textures/loft16.rgba'), images: require('../../../assets/textures/loft16.json'), name: 'Loft 16', size: 10.6, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: false },
         ] : roomKind === 'roof' ? [
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: require('../../../assets/models/school-rooftop.glb'), texture: require('../../../assets/textures/school-rooftop.rgba'), images: require('../../../assets/textures/school-rooftop.json'), name: 'School Rooftop', size: 1, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
+          { id: require('../../../assets/runtime_models/school-rooftop.glb'), texture: require('../../../assets/textures/school-rooftop.rgba'), images: require('../../../assets/textures/school-rooftop.json'), name: 'School Rooftop', size: 1, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
         ] : [
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: require('../../../assets/models/tea-ground.glb'), texture: require('../../../assets/textures/tea-ground.rgba'), images: require('../../../assets/textures/tea-ground.json'), name: 'road and ground', size: 26, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
+          { id: require('../../../assets/runtime_models/tea-ground.glb'), texture: require('../../../assets/textures/tea-ground.rgba'), images: require('../../../assets/textures/tea-ground.json'), name: 'road and ground', size: 26, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: require('../../../assets/models/chai-stall.glb'), texture: require('../../../assets/textures/chai-stall.rgba'), images: require('../../../assets/textures/chai-stall.json'), name: 'chai stall and bench', size: 3.2, axis: 'y' as const, x: -7.2, z: -2.2, rotation: Math.PI / 2, rawScale: false },
+          { id: require('../../../assets/runtime_models/chai-stall.glb'), texture: require('../../../assets/textures/chai-stall.rgba'), images: require('../../../assets/textures/chai-stall.json'), name: 'chai stall and bench', size: 3.2, axis: 'y' as const, x: -7.2, z: -2.2, rotation: Math.PI / 2, rawScale: false },
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: require('../../../assets/models/three-shops.glb'), texture: require('../../../assets/textures/three-shops.rgba'), images: require('../../../assets/textures/three-shops.json'), name: 'three shops', size: 2.8, axis: 'y' as const, x: 7.7, z: -2.2, rotation: -Math.PI / 2, rawScale: false },
+          { id: require('../../../assets/runtime_models/three-shops.glb'), texture: require('../../../assets/textures/three-shops.rgba'), images: require('../../../assets/textures/three-shops.json'), name: 'three shops', size: 2.8, axis: 'y' as const, x: 7.7, z: -2.2, rotation: -Math.PI / 2, rawScale: false },
         ];
         for (const item of roomAssets) {
           try {
@@ -344,7 +376,7 @@ export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; a
         if (roomKind === 'tea') {
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const treeId = require('../../../assets/models/maple-tree.glb');
+            const treeId = require('../../../assets/runtime_models/maple-tree.glb');
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const textureId = require('../../../assets/textures/maple-tree.rgba');
             const images = require('../../../assets/textures/maple-tree.json');
@@ -406,6 +438,50 @@ export function GameRoom({ roomKind, avatar, onPortal }: { roomKind: RoomKind; a
         if (!active || !renderer || !world) return;
         try {
           const delta = Math.min(clock.getDelta(), 0.05);
+          const now = Date.now();
+          const currentPosition = { x: room.player.position.x, z: room.player.position.z, yaw: room.avatarMount.rotation.y };
+          const moved = Math.hypot(currentPosition.x - lastSentPosition.x, currentPosition.z - lastSentPosition.z) > 0.025 ||
+            Math.abs(currentPosition.yaw - lastSentPosition.yaw) > 0.035;
+          if (now - lastPositionSent > 150 && (moved || now - lastPositionSent > 2000)) {
+            lastPositionSent = now;
+            lastSentPosition = currentPosition;
+            positionRef.current?.(currentPosition.x, currentPosition.z, currentPosition.yaw);
+          }
+          const present = new Set(peersRef.current.map(peer => peer.userId));
+          for (const [id, entry] of remoteAvatars) if (!present.has(id)) { room.scene.remove(entry.mount); remoteAvatars.delete(id); }
+          for (const peer of peersRef.current) {
+            let entry = remoteAvatars.get(peer.userId);
+            if (entry?.body !== peer.avatar) {
+              if (entry) room.scene.remove(entry.mount);
+              const mount = new THREE.Group();
+              mount.add(fallbackAvatar());
+              entry = { mount, body: peer.avatar, lastMovingAt: 0, initialized: false };
+              room.scene.add(mount);
+              remoteAvatars.set(peer.userId, entry);
+              loadRemoteAvatar(peer.userId, entry);
+            }
+            const distance = Math.hypot(entry.mount.position.x - peer.x, entry.mount.position.z - peer.z);
+            if (!entry.initialized || distance > 5) {
+              entry.mount.position.set(peer.x, 0, peer.z);
+              entry.mount.rotation.y = peer.yaw;
+              entry.initialized = true;
+            } else {
+              if (distance > 0.055) entry.lastMovingAt = now;
+              // Smooth network snapshots while keeping local input independent of packet timing.
+              const blend = 1 - Math.exp(-12 * delta);
+              entry.mount.position.x += (peer.x - entry.mount.position.x) * blend;
+              entry.mount.position.z += (peer.z - entry.mount.position.z) * blend;
+              const angle = THREE.MathUtils.euclideanModulo(peer.yaw - entry.mount.rotation.y + Math.PI, Math.PI * 2) - Math.PI;
+              entry.mount.rotation.y += angle * blend;
+            }
+            const wanted = now - entry.lastMovingAt < 260 ? entry.walk ?? entry.idle : entry.idle ?? entry.walk;
+            if (wanted && wanted !== entry.playing) {
+              entry.playing?.fadeOut(0.18);
+              wanted.reset().fadeIn(0.18).play();
+              entry.playing = wanted;
+            }
+            entry.mixer?.update(delta);
+          }
           const width = gl.drawingBufferWidth;
           const height = gl.drawingBufferHeight;
           if (width > 0 && height > 0 && (renderer.domElement.width !== width || renderer.domElement.height !== height)) {

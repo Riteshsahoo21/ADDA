@@ -12,12 +12,12 @@ const items = [
   { id: 'you', label: 'You', Icon: UserRound },
 ] as const;
 
-export function BottomNav({ active, onSelect }: { active: HubTab; onSelect: (tab: HubTab) => void }) {
+export function BottomNav({ active, onSelect, updateCount = 0 }: { active: HubTab; onSelect: (tab: HubTab) => void; updateCount?: number }) {
   return <View style={styles.bar}>
     {items.map(({ id, label, Icon }) => {
       const selected = active === id;
       return <Pressable key={id} accessibilityRole="tab" accessibilityState={{ selected }} onPress={() => onSelect(id)} style={styles.item}>
-        <View style={[styles.icon, selected && styles.iconSelected]}><Icon size={23} strokeWidth={selected ? 2.4 : 1.9} color={selected ? colors.primaryDark : colors.muted} /></View>
+        <View style={[styles.icon, selected && styles.iconSelected]}><Icon size={23} strokeWidth={selected ? 2.4 : 1.9} color={selected ? colors.primaryDark : colors.muted} />{id === 'updates' && updateCount > 0 && <View style={styles.badge}><Text style={styles.badgeText}>{updateCount > 9 ? '9+' : updateCount}</Text></View>}</View>
         <Text style={[styles.label, selected && styles.labelSelected]}>{label}</Text>
       </Pressable>;
     })}
@@ -31,4 +31,6 @@ const styles = StyleSheet.create({
   iconSelected: { backgroundColor: colors.primarySoft },
   label: { color: colors.muted, fontSize: 11, fontWeight: '600' },
   labelSelected: { color: colors.primaryDark, fontWeight: '800' },
+  badge: { position: 'absolute', right: 4, top: -4, minWidth: 19, height: 19, borderRadius: 10, paddingHorizontal: 3, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.amber },
+  badgeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800' },
 });

@@ -9,14 +9,35 @@
       "package": "com.adda.virtualhangout",
       "versionCode": 1,
       "predictiveBackGestureEnabled": false,
-      "usesCleartextTraffic": true
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "plugins": [
       "expo-router",
       "expo-screen-orientation",
       "expo-secure-store",
-      ["expo-camera", { "cameraPermission": "Allow ADDA to scan a friend's QR code.", "recordAudioAndroid": false }],
-      "@react-native-google-signin/google-signin"
+      "expo-notifications",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow ADDA to scan a friend's QR code.",
+          "recordAudioAndroid": false
+        }
+      ],
+      "@react-native-google-signin/google-signin",
+      "@config-plugins/react-native-webrtc",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "useLegacyPackaging": true,
+            "enableBundleCompression": true
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

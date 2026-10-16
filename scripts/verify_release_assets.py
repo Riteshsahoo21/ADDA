@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APK = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "android/app/build/outputs/apk/release/app-release.apk"
 
 source_text = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src").rglob("*.ts*"))
-models = sorted(set(re.findall(r"assets/models/([A-Za-z0-9_.-]+\.glb)", source_text)))
+models = sorted(set(re.findall(r"assets/runtime_models/([A-Za-z0-9_.-]+\.glb)", source_text)))
 textures = sorted(set(re.findall(r"assets/textures/([A-Za-z0-9_.-]+\.rgba)", source_text)))
 if not models or not textures:
     raise SystemExit("No referenced GLB assets found; cannot verify release APK")
@@ -31,7 +31,7 @@ with zipfile.ZipFile(APK) as apk:
     }
 
 stale = []
-for folder, names, extension in (("models", models, ".glb"), ("textures", textures, ".rgba")):
+for folder, names, extension in (("runtime_models", models, ".glb"), ("textures", textures, ".rgba")):
     required_hashes = set()
     for name in names:
         source = ROOT / "assets" / folder / name

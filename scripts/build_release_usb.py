@@ -3,6 +3,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from install_release_apk import connected_devices, install_all
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,18 +32,18 @@ if GENERATED_RAW.exists():
     print(f"Cleared {removed} generated 3D assets before Metro bundling.", flush=True)
 
 # Force the bundle task, then rebuild the APK and compare referenced assets.
+run(sys.executable, str(ROOT / "scripts/prepare_runtime_models.py"))
+run("node", str(ROOT / "scripts/verify_native_glb.mjs"))
 run(GRADLE, ":app:createBundleReleaseJsAndAssets", "--rerun-tasks", ABI, cwd=ANDROID)
 run(GRADLE, ":app:assembleRelease", ABI, cwd=ANDROID)
 run(sys.executable, str(ROOT / "scripts/verify_release_assets.py"), str(APK))
-devices_out = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
-print(devices_out.strip())
-has_device = any(line.strip() and not line.startswith("List of") for line in devices_out.strip().splitlines())
-if has_device:
-    run("adb", "install", "-r", str(APK))
-    print("Installed verified ADDA release APK over USB.")
+devices = connected_devices()
+if devices:
+    if install_all(APK) != 0:
+        raise SystemExit("The release APK did not install on every connected device.")
 else:
     print(f"Verified release APK built successfully at {APK}.")
-    print("No ADB device currently attached; connect phone over USB and run adb install to update.")
+    print("No authorized ADB device currently attached; connect phones and run python scripts/install_release_apk.py.")
 import shutil
 root_apk = ROOT.parent / "ADDA-release.apk"
 shutil.copy2(APK, root_apk)

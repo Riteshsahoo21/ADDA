@@ -4,6 +4,7 @@ export type PublicProfile = { id: string; name: string; username: string; lastMe
 export type OwnProfile = PublicProfile & { friendCode: string };
 export type ChatGroup = { id: string; name: string; memberCount: number; createdAt: string; lastMessage?: string | null; lastAt?: string | null };
 export type ChatMessage = { id: string; body: string; senderId: string; senderName: string; createdAt: string };
+export type FriendRequest = { id: string; senderId: string; recipientId: string; senderName: string; senderUsername: string; recipientName: string; recipientUsername: string; createdAt: string; status: 'pending' };
 
 export async function socialApi<T>(path: string, method: 'GET' | 'POST' | 'PATCH' = 'GET', body?: object): Promise<T> {
   const token = await authStorage.getAccessToken();

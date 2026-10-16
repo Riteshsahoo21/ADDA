@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Image,
   KeyboardAvoidingView,
   Platform,
@@ -121,10 +122,8 @@ export default function LoginScreen() {
 
     try {
       await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
-      // Clear an account retained by an older build before showing Google's picker.
-      if (GoogleSignin.hasPreviousSignIn()) {
-        await GoogleSignin.signOut();
-      }
+      // Always release the previous native account before asking Google to sign in.
+      await GoogleSignin.signOut().catch(() => {});
       const signInResult = await GoogleSignin.signIn();
 
       if (signInResult.type === 'cancelled') {
@@ -142,6 +141,16 @@ export default function LoginScreen() {
       if (!idToken) {
         throw new Error('Google did not return an identity token. Please ensure Google Play Services are up to date.');
       }
+      const chosenEmail = userProfile?.email?.trim().toLowerCase();
+      if (!chosenEmail) throw new Error('Google did not return an email address. Please choose an account again.');
+      const confirmed = await new Promise<boolean>(resolve => {
+        Alert.alert('Use this Google account?', chosenEmail, [
+          { text: 'Choose another', style: 'cancel', onPress: () => resolve(false) },
+          { text: 'Continue', onPress: () => resolve(true) },
+        ], { cancelable: true, onDismiss: () => resolve(false) });
+      });
+      if (!confirmed) { await GoogleSignin.signOut(); return; }
+      await authStorage.clearTokens();
 
       // Authenticate with Better Auth backend via ID token
       try {
@@ -154,6 +163,12 @@ export default function LoginScreen() {
 
         if (result.error) {
           throw new Error(result.error.message || 'Google sign-in verification failed on server');
+        }
+        const signedInEmail = result.data && 'user' in result.data ? result.data.user?.email?.toLowerCase() : undefined;
+        if (!signedInEmail || signedInEmail !== chosenEmail) {
+          await authStorage.clearTokens();
+          await GoogleSignin.signOut();
+          throw new Error('Google returned a different account than the one selected. Please choose again.');
         }
 
         let authenticatedName = displayNameFromGoogle;

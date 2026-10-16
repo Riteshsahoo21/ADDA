@@ -44,3 +44,7 @@ example
 # generated native folders
 /ios
 /android
+/assets/runtime_models/
+*service-account*.json
+*firebase-admin*.json
+client_secret_*.json

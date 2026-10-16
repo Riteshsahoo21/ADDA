@@ -20,12 +20,12 @@ export default function ScanScreen() {
   };
   return <SafeAreaView style={styles.safe}>
     <View style={styles.header}><Pressable accessibilityLabel="Back" onPress={() => router.back()} style={styles.back}><ArrowLeft size={24} color={colors.text} /></Pressable><Text style={styles.title}>Scan friend QR</Text></View>
-    <Text style={styles.copy}>Point your camera at an ADDA friend QR. Scanning adds that person to your contacts.</Text>
+    <Text style={styles.copy}>Point your camera at an ADDA friend QR. They can accept your request in Updates.</Text>
     {!permission && <Text style={styles.message}>Checking camera access…</Text>}
     {permission && !permission.granted && <View style={styles.permission}><ScanLine size={44} color={colors.primary} /><Text style={styles.message}>Camera access is needed to scan a friend QR.</Text><Pressable onPress={() => void requestPermission()} style={styles.button}><Text style={styles.buttonText}>Allow camera</Text></Pressable></View>}
     {permission?.granted && <View style={styles.cameraWrap}><CameraView style={styles.camera} facing="back" barcodeScannerSettings={{ barcodeTypes: ['qr'] }} onBarcodeScanned={added ? undefined : ({ data }) => { void onScan(data); }} /><View pointerEvents="none" style={styles.frame} /></View>}
     {!!error && <Text style={styles.error}>{error}</Text>}
-    {added && <View style={styles.result}><Text style={styles.resultTitle}>Friend added</Text><Text style={styles.resultCopy}>{added.name} · @{added.username}</Text><Pressable style={styles.button} onPress={() => router.replace('/home')}><Text style={styles.buttonText}>Done</Text></Pressable></View>}
+    {added && <View style={styles.result}><Text style={styles.resultTitle}>Friend request sent</Text><Text style={styles.resultCopy}>{added.name} · @{added.username}</Text><Pressable style={styles.button} onPress={() => router.replace('/home')}><Text style={styles.buttonText}>Done</Text></Pressable></View>}
   </SafeAreaView>;
 }
 

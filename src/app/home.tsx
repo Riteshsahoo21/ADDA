@@ -1,13 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
-import { CirclePlus, DoorOpen, EllipsisVertical, MessageCircle, Plus, QrCode, Search, UserPlus, UsersRound, X } from 'lucide-react-native';
+import { CirclePlus, DoorOpen, EllipsisVertical, MessageCircle, Phone, Plus, QrCode, Search, UserPlus, UsersRound, Video, X } from 'lucide-react-native';
 import { BottomNav, type HubTab } from '@/components/ui/BottomNav';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
-import { socialApi, type ChatGroup, type OwnProfile, type PublicProfile } from '@/lib/social-api';
+import { socialApi, type ChatGroup, type FriendRequest, type OwnProfile, type PublicProfile } from '@/lib/social-api';
+import { getRealtimeSocket } from '@/lib/realtime';
+import type { TypingEvent } from '@/lib/realtime';
+import { TypingDots } from '@/components/ui/TypingDots';
+import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { type AvatarBody } from '@/three/player/avatarStyle';
 
 const avatars: { body: AvatarBody; label: string }[] = [
@@ -27,6 +31,7 @@ export default function HomeScreen() {
   const [contacts, setContacts] = useState<PublicProfile[]>([]);
   const [people, setPeople] = useState<PublicProfile[]>([]);
   const [groups, setGroups] = useState<ChatGroup[]>([]);
+  const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
   const [search, setSearch] = useState('');
   const [sheet, setSheet] = useState<Sheet>(null);
   const [room, setRoom] = useState<Room>('loft');
@@ -37,6 +42,8 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [sheetError, setSheetError] = useState('');
+  const [typing, setTyping] = useState<Record<string, Record<string, string>>>({});
+  const typingExpiry = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   useEffect(() => { void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP); }, []);
   useEffect(() => { if (!username) router.replace('/login'); }, [username]);
@@ -44,16 +51,60 @@ export default function HomeScreen() {
   const refresh = useCallback(async () => {
     if (!username) return;
     try {
-      const [me, friends, suggested, joined] = await Promise.all([
+      const [me, friends, suggested, joined, requests] = await Promise.all([
         socialApi<OwnProfile>('/me'), socialApi<PublicProfile[]>('/contacts'),
         socialApi<PublicProfile[]>('/people'), socialApi<ChatGroup[]>('/groups'),
+        socialApi<FriendRequest[]>('/friend-requests'),
       ]);
-      setProfile(me); setContacts(friends); setPeople(suggested); setGroups(joined); setError('');
+      setProfile(me); setContacts(friends); setPeople(suggested); setGroups(joined); setFriendRequests(requests); setError('');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not load ADDA.');
     } finally { setLoading(false); }
   }, [username]);
   useFocusEffect(useCallback(() => { void refresh(); }, [refresh]));
+  useEffect(() => {
+    if (!username) return;
+    let active = true;
+    let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
+    const onUpdate = () => { void refresh(); };
+    const onTyping = (event: TypingEvent) => {
+      if (event.userId === profile?.id) return;
+      const key = `${event.kind}:${event.id}`;
+      const timerKey = `${key}:${event.userId}`;
+      const old = typingExpiry.current.get(timerKey);
+      if (old) clearTimeout(old);
+      typingExpiry.current.delete(timerKey);
+      const update = (name?: string) => setTyping(current => {
+        const members = { ...current[key] };
+        if (name) members[event.userId] = name;
+        else delete members[event.userId];
+        const next = { ...current };
+        if (Object.keys(members).length) next[key] = members;
+        else delete next[key];
+        return next;
+      });
+      update(event.typing ? event.name : undefined);
+      if (event.typing) typingExpiry.current.set(timerKey, setTimeout(() => {
+        typingExpiry.current.delete(timerKey);
+        update();
+      }, 4000));
+    };
+    const clearTyping = () => {
+      for (const timer of typingExpiry.current.values()) clearTimeout(timer);
+      typingExpiry.current.clear();
+      setTyping({});
+    };
+    void getRealtimeSocket().then(value => {
+      if (!active) return;
+      live = value;
+      value.on('chat:message', onUpdate);
+      value.on('friends:updated', onUpdate);
+      value.on('connect', onUpdate);
+      value.on('disconnect', clearTyping);
+      value.on('chat:typing', onTyping);
+    }).catch(() => {});
+    return () => { active = false; clearTyping(); live?.off('chat:message', onUpdate); live?.off('friends:updated', onUpdate); live?.off('connect', onUpdate); live?.off('disconnect', clearTyping); live?.off('chat:typing', onTyping); };
+  }, [username, refresh, profile?.id]);
 
   const visibleContacts = useMemo(() => contacts.filter((item) => `${item.name} ${item.username}`.toLowerCase().includes(search.toLowerCase())), [contacts, search]);
   const visibleGroups = useMemo(() => groups.filter((item) => item.name.toLowerCase().includes(search.toLowerCase())), [groups, search]);
@@ -78,6 +129,13 @@ export default function HomeScreen() {
     } catch (cause) { setSheetError(cause instanceof Error ? cause.message : 'Could not create group.'); }
     finally { setBusy(false); }
   };
+  const respondToFriend = async (id: string, decision: 'accept' | 'decline') => {
+    if (busy) return;
+    setBusy(true); setError('');
+    try { await socialApi(`/friend-requests/${encodeURIComponent(id)}/respond`, 'POST', { decision }); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not respond to request.'); }
+    finally { setBusy(false); }
+  };
   const handleLogout = async () => { setSheet(null); await logout(); router.replace('/login'); };
   const selectTab = (next: HubTab) => { if (next === 'you') router.push('/profile' as Href); else setTab(next); };
   const joinRoom = (body: AvatarBody) => {
@@ -86,6 +144,15 @@ export default function HomeScreen() {
   };
   const openConversation = (kind: 'direct' | 'group', id: string, name: string) => {
     router.push(`/conversation?kind=${kind}&id=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}` as Href);
+  };
+  const startCall = async (kind: 'direct' | 'group', id: string, name: string, media: CallMedia) => {
+    if (busy) return;
+    setBusy(true); setError('');
+    try {
+      const call = await callRequest<CallInfo>('call:start', { target: { kind, id }, media });
+      router.push({ pathname: '/call', params: { callId: call.id, role: call.callerId === profile?.id ? 'caller' : 'callee', name } } as unknown as Href);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not start call.'); }
+    finally { setBusy(false); }
   };
 
   if (!username) return null;
@@ -102,10 +169,10 @@ export default function HomeScreen() {
         {loading && <ActivityIndicator color={colors.primary} style={styles.loader} />}
         {!!error && <View style={styles.errorBox}><Text style={styles.errorText}>{error}</Text><Pressable onPress={() => { if (error.toLowerCase().includes('sign in')) void handleLogout(); else { setLoading(true); void refresh(); } }}><Text style={styles.retry}>{error.toLowerCase().includes('sign in') ? 'Sign in again' : 'Retry'}</Text></Pressable></View>}
         {!loading && !error && <>
-          {visibleGroups.length > 0 && <><Text style={styles.section}>Groups</Text>{visibleGroups.map((item) => <PersonRow key={item.id} name={item.name} detail={item.lastMessage || `${item.memberCount} members`} time={item.lastAt} group onPress={() => openConversation('group', item.id, item.name)} />)}</>}
-          {visibleContacts.length > 0 && <><Text style={styles.section}>Contacts</Text>{visibleContacts.map((item) => <PersonRow key={item.id} name={item.name} detail={item.lastMessage || `@${item.username}`} time={item.lastAt} onPress={() => openConversation('direct', item.id, item.name)} />)}</>}
+          {visibleGroups.length > 0 && <><Text style={styles.section}>Groups</Text>{visibleGroups.map((item) => <PersonRow key={item.id} name={item.name} detail={item.lastMessage || `${item.memberCount} members`} time={item.lastAt} typingNames={Object.values(typing[`group:${item.id}`] ?? {})} group onPress={() => openConversation('group', item.id, item.name)} />)}</>}
+          {visibleContacts.length > 0 && <><Text style={styles.section}>Contacts</Text>{visibleContacts.map((item) => <PersonRow key={item.id} name={item.name} detail={item.lastMessage || `@${item.username}`} time={item.lastAt} typingNames={Object.values(typing[`direct:${item.id}`] ?? {})} onPress={() => openConversation('direct', item.id, item.name)} />)}</>}
           {visibleGroups.length === 0 && visibleContacts.length === 0 && <View style={styles.empty}><MessageCircle size={34} color={colors.primary} /><Text style={styles.emptyTitle}>{search ? 'No matches' : 'Your chats start here'}</Text><Text style={styles.emptyCopy}>{search ? 'Try another name or username.' : 'Add a friend or create a group to get started.'}</Text></View>}
-          {visiblePeople.length > 0 && <><Text style={styles.section}>People on ADDA</Text>{visiblePeople.map((item) => <PersonRow key={item.id} name={item.name} detail={`@${item.username}`} action={<Pressable accessibilityLabel={`Add ${item.name}`} onPress={() => void addFriend(item.username)} style={styles.addSmall}><UserPlus size={19} color={colors.primary} /></Pressable>} />)}</>}
+          {visiblePeople.length > 0 && <><Text style={styles.section}>People on ADDA</Text>{visiblePeople.map((item) => <PersonRow key={item.id} name={item.name} detail={friendRequests.some(request => request.senderId === profile?.id && request.recipientId === item.id) ? 'Request sent' : `@${item.username}`} action={friendRequests.some(request => request.senderId === profile?.id && request.recipientId === item.id) ? undefined : <Pressable accessibilityLabel={`Request ${item.name}`} onPress={() => void addFriend(item.username)} style={styles.addSmall}><UserPlus size={19} color={colors.primary} /></Pressable>} />)}</>}
         </>}
       </>}
 
@@ -116,12 +183,28 @@ export default function HomeScreen() {
         <Pressable style={styles.roomCard} onPress={() => { setRoom('tea'); openSheet('room'); }}><View style={[styles.roomIcon, styles.teaIcon]}><Text style={styles.teaEmoji}>☕</Text></View><View style={styles.fill}><Text style={styles.cardTitle}>Tea Party</Text><Text style={styles.cardSub}>Meet at the roadside adda</Text></View><Text style={styles.chevron}>›</Text></Pressable>
       </>}
 
-      {tab === 'updates' && <InfoPage title="Updates" copy="Updates from your contacts will appear here." />}
-      {tab === 'calls' && <InfoPage title="Calls" copy="Your ADDA calls will appear here." />}
+      {tab === 'updates' && <>
+        <Text style={styles.pageTitle}>Updates</Text>
+        <Text style={styles.pageCopy}>Friend requests appear here.</Text>
+        {!!error && <Text style={styles.errorText}>{error}</Text>}
+        {friendRequests.filter(item => item.recipientId === profile?.id).map(item => <View key={item.id} style={styles.requestCard}>
+          <Text style={styles.personName}>{item.senderName}</Text><Text style={styles.personDetail}>@{item.senderUsername} sent you a friend request</Text>
+          <View style={styles.requestActions}><Pressable disabled={busy} onPress={() => void respondToFriend(item.id, 'accept')} style={styles.acceptButton}><Text style={styles.acceptText}>Accept</Text></Pressable><Pressable disabled={busy} onPress={() => void respondToFriend(item.id, 'decline')} style={styles.declineButton}><Text style={styles.declineText}>Decline</Text></Pressable></View>
+        </View>)}
+        {friendRequests.filter(item => item.senderId === profile?.id).map(item => <View key={item.id} style={styles.requestCard}><Text style={styles.personName}>{item.recipientName}</Text><Text style={styles.personDetail}>Request sent to @{item.recipientUsername}</Text></View>)}
+        {friendRequests.length === 0 && <View style={styles.empty}><Text style={styles.emptyTitle}>No friend requests</Text><Text style={styles.emptyCopy}>Requests you send or receive will appear here.</Text></View>}
+      </>}
+      {tab === 'calls' && <>
+        <Text style={styles.pageTitle}>Calls</Text><Text style={styles.pageCopy}>Start a voice or video call with your contacts or groups.</Text>
+        {!!error && <Text style={styles.errorText}>{error}</Text>}
+        {groups.map(item => <PersonRow key={item.id} name={item.name} detail={`${item.memberCount} members`} group action={<View style={styles.callActions}><Pressable disabled={busy} accessibilityLabel={`Voice call ${item.name}`} onPress={() => void startCall('group', item.id, item.name, 'audio')} style={styles.callSmall}><Phone size={19} color={colors.primary} /></Pressable><Pressable disabled={busy} accessibilityLabel={`Video call ${item.name}`} onPress={() => void startCall('group', item.id, item.name, 'video')} style={styles.callSmall}><Video size={20} color={colors.primary} /></Pressable></View>} />)}
+        {contacts.map(item => <PersonRow key={item.id} name={item.name} detail={`@${item.username}`} action={<View style={styles.callActions}><Pressable disabled={busy} accessibilityLabel={`Voice call ${item.name}`} onPress={() => void startCall('direct', item.id, item.name, 'audio')} style={styles.callSmall}><Phone size={19} color={colors.primary} /></Pressable><Pressable disabled={busy} accessibilityLabel={`Video call ${item.name}`} onPress={() => void startCall('direct', item.id, item.name, 'video')} style={styles.callSmall}><Video size={20} color={colors.primary} /></Pressable></View>} />)}
+        {groups.length === 0 && contacts.length === 0 && <View style={styles.empty}><Text style={styles.emptyTitle}>No one to call yet</Text><Text style={styles.emptyCopy}>Add a contact or create a group in Chats.</Text></View>}
+      </>}
     </ScrollView>
 
     {tab === 'chats' && <Pressable accessibilityLabel="Add contact or group" onPress={() => openSheet('add')} style={styles.fab}><Plus size={30} strokeWidth={2.4} color="#FFFFFF" /></Pressable>}
-    <BottomNav active={tab} onSelect={selectTab} />
+    <BottomNav active={tab} onSelect={selectTab} updateCount={friendRequests.filter(item => item.recipientId === profile?.id).length} />
 
     <Modal visible={sheet !== null} transparent animationType="fade" onRequestClose={() => setSheet(null)}>
       <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -158,12 +241,9 @@ export default function HomeScreen() {
   </SafeAreaView>;
 }
 
-function PersonRow({ name, detail, time, group, action, onPress }: { name: string; detail: string; time?: string | null; group?: boolean; action?: React.ReactNode; onPress?: () => void }) {
-  const content = <><View style={[styles.personAvatar, group && styles.groupAvatar]}>{group ? <UsersRound size={23} color={colors.primaryDark} /> : <Text style={styles.personInitial}>{name[0]?.toUpperCase()}</Text>}</View><View style={styles.personText}><Text style={styles.personName}>{name}</Text><Text numberOfLines={1} style={styles.personDetail}>{detail}</Text></View>{time ? <Text style={styles.time}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text> : action}</>;
+function PersonRow({ name, detail, time, group, action, onPress, typingNames = [] }: { name: string; detail: string; time?: string | null; group?: boolean; action?: React.ReactNode; onPress?: () => void; typingNames?: string[] }) {
+  const content = <><View style={[styles.personAvatar, group && styles.groupAvatar]}>{group ? <UsersRound size={23} color={colors.primaryDark} /> : <Text style={styles.personInitial}>{name[0]?.toUpperCase()}</Text>}</View><View style={styles.personText}><Text style={styles.personName}>{name}</Text>{typingNames.length ? <View style={styles.typingRow}><Text numberOfLines={1} style={styles.typingText}>{group ? `${typingNames.slice(0, 2).join(', ')} typing` : 'typing'}</Text><TypingDots /></View> : <Text numberOfLines={1} style={styles.personDetail}>{detail}</Text>}</View>{!typingNames.length && time ? <Text style={styles.time}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text> : action}</>;
   return onPress ? <Pressable onPress={onPress} style={styles.personRow}>{content}</Pressable> : <View style={styles.personRow}>{content}</View>;
-}
-function InfoPage({ title, copy }: { title: string; copy: string }) {
-  return <View><Text style={styles.pageTitle}>{title}</Text><View style={styles.empty}><Text style={styles.emptyTitle}>Nothing here yet</Text><Text style={styles.emptyCopy}>{copy}</Text></View></View>;
 }
 function MenuAction({ Icon, label, onPress }: { Icon: typeof QrCode; label: string; onPress: () => void }) {
   return <Pressable onPress={onPress} style={styles.menuAction}><Icon size={21} color={colors.primary} /><Text style={styles.menuText}>{label}</Text></Pressable>;
@@ -182,8 +262,14 @@ const styles = StyleSheet.create({
   personAvatar: { width: 52, height: 52, borderRadius: 26, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center' }, groupAvatar: { backgroundColor: colors.amberSoft },
   personInitial: { color: colors.primaryDark, fontSize: 22, fontWeight: '800' }, personText: { flex: 1, marginLeft: 14 },
   personName: { color: colors.text, fontSize: 16, fontWeight: '700' }, personDetail: { color: colors.muted, fontSize: 13, marginTop: 4 },
+  typingRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 }, typingText: { color: colors.primary, fontSize: 13, fontWeight: '700', flexShrink: 1 },
   time: { color: colors.muted, fontSize: 11, alignSelf: 'flex-start', marginTop: 18 },
   addSmall: { padding: 10, borderRadius: 22, backgroundColor: colors.primarySoft },
+  callActions: { flexDirection: 'row', gap: 5 }, callSmall: { padding: 10, borderRadius: 22, backgroundColor: colors.primarySoft },
+  requestCard: { backgroundColor: colors.surface, borderRadius: 16, padding: 16, marginBottom: 12 },
+  requestActions: { flexDirection: 'row', gap: 10, marginTop: 14 },
+  acceptButton: { backgroundColor: colors.primary, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 20 }, acceptText: { color: '#FFFFFF', fontWeight: '800' },
+  declineButton: { backgroundColor: colors.surfaceRaised, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 20 }, declineText: { color: colors.text, fontWeight: '800' },
   empty: { alignItems: 'center', paddingVertical: 43, paddingHorizontal: 25, gap: 9 }, emptyTitle: { color: colors.text, fontSize: 18, fontWeight: '800' }, emptyCopy: { color: colors.muted, fontSize: 13, textAlign: 'center', lineHeight: 20 },
   errorBox: { marginTop: 20, padding: 16, backgroundColor: colors.errorSoft, borderRadius: 16, gap: 9 }, errorText: { color: colors.error }, retry: { color: colors.primary, fontWeight: '800' },
   fab: { position: 'absolute', right: 24, bottom: 85, width: 62, height: 62, borderRadius: 20, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center', elevation: 5, shadowColor: colors.primary, shadowOpacity: 0.2, shadowRadius: 8 },

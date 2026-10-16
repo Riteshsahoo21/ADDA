@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 for (const name of ['loft16', 'school-rooftop', 'chai-stall', 'three-shops', 'tea-ground', 'maple-tree', 'avatar-man', 'avatar-uncle', 'avatar-photo-boy', 'avatar-self', 'avatar-woman', 'avatar-chinese-woman', 'avatar-nepali-woman', 'avatar-white-top-woman']) {
-  const path = `assets/models/${name}`;
+  const path = `assets/runtime_models/${name}`;
   const texPath = `assets/textures/${name}`;
   const data = fs.readFileSync(`${path}.glb`);
   const manifest = JSON.parse(fs.readFileSync(`${texPath}.json`, 'utf8'));

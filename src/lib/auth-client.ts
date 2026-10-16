@@ -1,9 +1,8 @@
 import { createAuthClient } from 'better-auth/react';
 import * as SecureStore from 'expo-secure-store';
 
-// On Android connected over USB or emulator, localhost:3000 connects via adb reverse
 export const API_BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL || 'http://localhost:3000';
+  process.env.EXPO_PUBLIC_API_URL || 'https://api.ritzla.in';
 
 const ACCESS_TOKEN_KEY = 'adda_bearer_session_v2';
 const LEGACY_TOKEN_KEY = 'adda_jwt_access_token';

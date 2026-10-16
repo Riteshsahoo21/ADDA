@@ -5,7 +5,7 @@ import { loadBundledGlb } from '@/three/loaders/loadBundledGlb';
 export function loadAvatar(style: AvatarStyle) {
   if (style.body === 'white_top_woman') {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return loadBundledGlb(require('../../../assets/models/avatar-white-top-woman.glb'), {
+    return loadBundledGlb(require('../../../assets/runtime_models/avatar-white-top-woman.glb'), {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       moduleId: require('../../../assets/textures/avatar-white-top-woman.rgba'),
       images: require('../../../assets/textures/avatar-white-top-woman.json'),
@@ -13,7 +13,7 @@ export function loadAvatar(style: AvatarStyle) {
   }
   if (style.body === 'nepali_woman') {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return loadBundledGlb(require('../../../assets/models/avatar-nepali-woman.glb'), {
+    return loadBundledGlb(require('../../../assets/runtime_models/avatar-nepali-woman.glb'), {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       moduleId: require('../../../assets/textures/avatar-nepali-woman.rgba'),
       images: require('../../../assets/textures/avatar-nepali-woman.json'),
@@ -21,7 +21,7 @@ export function loadAvatar(style: AvatarStyle) {
   }
   if (style.body === 'chinese_woman') {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return loadBundledGlb(require('../../../assets/models/avatar-chinese-woman.glb'), {
+    return loadBundledGlb(require('../../../assets/runtime_models/avatar-chinese-woman.glb'), {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       moduleId: require('../../../assets/textures/avatar-chinese-woman.rgba'),
       images: require('../../../assets/textures/avatar-chinese-woman.json'),
@@ -29,7 +29,7 @@ export function loadAvatar(style: AvatarStyle) {
   }
   if (style.body === 'woman') {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return loadBundledGlb(require('../../../assets/models/avatar-woman.glb'), {
+    return loadBundledGlb(require('../../../assets/runtime_models/avatar-woman.glb'), {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       moduleId: require('../../../assets/textures/avatar-woman.rgba'),
       images: require('../../../assets/textures/avatar-woman.json'),
@@ -37,7 +37,7 @@ export function loadAvatar(style: AvatarStyle) {
   }
   if (style.body === 'self') {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return loadBundledGlb(require('../../../assets/models/avatar-self.glb'), {
+    return loadBundledGlb(require('../../../assets/runtime_models/avatar-self.glb'), {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       moduleId: require('../../../assets/textures/avatar-self.rgba'),
       images: require('../../../assets/textures/avatar-self.json'),
@@ -45,7 +45,7 @@ export function loadAvatar(style: AvatarStyle) {
   }
   if (style.body === 'photo_boy') {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return loadBundledGlb(require('../../../assets/models/avatar-photo-boy.glb'), {
+    return loadBundledGlb(require('../../../assets/runtime_models/avatar-photo-boy.glb'), {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       moduleId: require('../../../assets/textures/avatar-photo-boy.rgba'),
       images: require('../../../assets/textures/avatar-photo-boy.json'),
@@ -53,14 +53,14 @@ export function loadAvatar(style: AvatarStyle) {
   }
   if (style.body === 'uncle') {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return loadBundledGlb(require('../../../assets/models/avatar-uncle.glb'), {
+    return loadBundledGlb(require('../../../assets/runtime_models/avatar-uncle.glb'), {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       moduleId: require('../../../assets/textures/avatar-uncle.rgba'),
       images: require('../../../assets/textures/avatar-uncle.json'),
     });
   }
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return loadBundledGlb(require('../../../assets/models/avatar-man.glb'), {
+  return loadBundledGlb(require('../../../assets/runtime_models/avatar-man.glb'), {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     moduleId: require('../../../assets/textures/avatar-man.rgba'),
     images: require('../../../assets/textures/avatar-man.json'),
