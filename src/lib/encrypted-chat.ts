@@ -165,7 +165,7 @@ export async function sendEncryptedMessage(target: ChatTarget, body: string, sen
   return sendEncryptedContent(target, body, senderName, existingId);
 }
 
-async function sendEncryptedContent(target: ChatTarget, body: string, senderName: string, existingId?: string): Promise<LocalMessage> {
+async function sendEncryptedContent(target: ChatTarget, body: string, senderName: string, existingId?: string, prefetchedKeys?: KeyList): Promise<LocalMessage> {
   const me = identity();
   const messageId = existingId ?? Crypto.randomUUID();
   const existing = existingId ? await me.db.getFirstAsync<LocalMessage>('SELECT * FROM message WHERE id = ?', existingId) : null;
@@ -173,7 +173,7 @@ async function sendEncryptedContent(target: ChatTarget, body: string, senderName
   const message: LocalMessage = { id: messageId, kind: target.kind, targetId: target.id, senderId: me.userId, senderName, body, createdAt, status: 'queued' };
   await me.db.runAsync('INSERT OR IGNORE INTO message VALUES (?, ?, ?, ?, ?, ?, ?, ?)', message.id, message.kind, message.targetId, message.senderId, message.senderName, message.body, message.createdAt, message.status);
   changed();
-  const keyList = await socialApi<KeyList>(`/chat/keys/${target.kind}/${encodeURIComponent(target.id)}`);
+  const keyList = prefetchedKeys ?? await socialApi<KeyList>(`/chat/keys/${target.kind}/${encodeURIComponent(target.id)}`);
   await pinKeys(keyList.devices);
   const contentKey = nacl.randomBytes(nacl.secretbox.keyLength);
   const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
@@ -204,8 +204,14 @@ export async function sendEncryptedMedia(target: ChatTarget, uri: string, mediaK
   const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
   const sourceBytes = await source.bytes();
   const encrypted = nacl.secretbox(sourceBytes, nonce, key);
-  const upload = await socialApi<{ mediaId: string; url: string; contentType: string }>('/chat/media/upload', 'POST',
-    { target, mediaKind, contentLength: encrypted.byteLength });
+
+  // In parallel: obtain upload URL and fetch recipient public keys
+  const [upload, keyList] = await Promise.all([
+    socialApi<{ mediaId: string; url: string; contentType: string }>('/chat/media/upload', 'POST',
+      { target, mediaKind, contentLength: encrypted.byteLength }),
+    socialApi<KeyList>(`/chat/keys/${target.kind}/${encodeURIComponent(target.id)}`)
+  ]);
+
   encryptedMediaFile(upload.mediaId).write(encrypted);
 
   // Cache decrypted file immediately so sender sees preview with zero delay
@@ -221,14 +227,15 @@ export async function sendEncryptedMedia(target: ChatTarget, uri: string, mediaK
   } finally { encryptedFile.delete(); }
   const media: EncryptedMedia = { type: 'media', mediaId: upload.mediaId, mediaKind, key: bytesToBase64(key), nonce: bytesToBase64(nonce), mimeType,
     createdAt: new Date().toISOString(), senderName };
-  return sendEncryptedContent(target, mediaPrefix + JSON.stringify(media), senderName);
+  return sendEncryptedContent(target, mediaPrefix + JSON.stringify(media), senderName, undefined, keyList);
 }
 
 export async function openEncryptedMedia(media: EncryptedMedia): Promise<string> {
   const destination = new File(Paths.cache, `adda-media-${media.mediaId}.${media.mediaKind === 'image' ? 'jpg' : 'mp4'}`);
-  if (destination.exists) return destination.uri;
+  if (destination.exists && destination.size > 0) return destination.uri;
   const encryptedFile = encryptedMediaFile(media.mediaId);
   if (!encryptedFile.exists) await saveEncryptedMedia(media);
+  if (destination.exists && destination.size > 0) return destination.uri;
   const plain = nacl.secretbox.open(await encryptedFile.bytes(), base64ToBytes(media.nonce), base64ToBytes(media.key));
   if (!plain) throw new Error('Could not verify encrypted media.');
   destination.write(plain);
@@ -248,15 +255,20 @@ function clearDecryptedMediaCache() {
 
 async function saveEncryptedMedia(media: EncryptedMedia) {
   const destination = encryptedMediaFile(media.mediaId);
+  const decryptedCache = new File(Paths.cache, `adda-media-${media.mediaId}.${media.mediaKind === 'image' ? 'jpg' : 'mp4'}`);
   if (destination.exists) {
     const existing = nacl.secretbox.open(await destination.bytes(), base64ToBytes(media.nonce), base64ToBytes(media.key));
-    if (existing) return;
+    if (existing) {
+      if (!decryptedCache.exists || decryptedCache.size === 0) decryptedCache.write(existing);
+      return;
+    }
     destination.delete();
   }
   const { url } = await socialApi<{ url: string }>(`/chat/media/${encodeURIComponent(media.mediaId)}/download`);
   await File.downloadFileAsync(url, destination, { idempotent: true });
   const verified = nacl.secretbox.open(await destination.bytes(), base64ToBytes(media.nonce), base64ToBytes(media.key));
   if (!verified) { destination.delete(); throw new Error('Could not verify encrypted media.'); }
+  decryptedCache.write(verified);
 }
 
 export async function syncEncryptedChat(): Promise<void> {
@@ -289,8 +301,18 @@ async function doSync() {
       if (content.type === 'media') {
         const media = mediaFromBody(body);
         if (!media) throw new Error('Invalid encrypted media.');
-        // Keep a verified encrypted copy on the device before acknowledging server deletion.
-        await saveEncryptedMedia(media);
+        try {
+          // Keep a verified encrypted copy on the device before acknowledging server deletion.
+          await saveEncryptedMedia(media);
+        } catch (cause) {
+          console.warn('[ADDA] Media save warning during sync:', cause);
+          // If media is permanently unavailable on the server (e.g. 404), do not block sync forever
+          if (cause instanceof Error && cause.message.includes('unavailable')) {
+            // continue so the message is saved locally and server delivery is acknowledged
+          } else {
+            throw cause;
+          }
+        }
       }
       const targetId = envelope.kind === 'direct' ? (envelope.senderId === me.userId ? envelope.targetId : envelope.senderId) : envelope.targetId;
       await me.db.withExclusiveTransactionAsync(async tx => {

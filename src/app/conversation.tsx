@@ -15,6 +15,7 @@ import { TypingDots } from '@/components/ui/TypingDots';
 export default function ConversationScreen() {
   const { kind, id, name } = useLocalSearchParams<{ kind?: string; id?: string; name?: string }>();
   const [selfId, setSelfId] = useState('');
+  const [selfName, setSelfName] = useState('');
   const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
@@ -34,10 +35,11 @@ export default function ConversationScreen() {
       const me = await socialApi<OwnProfile>('/me');
       await initEncryptedChat(me.id);
       setSelfId(me.id);
+      setSelfName(me.name);
       setMessages(await localMessages(target));
-      await syncEncryptedChat();
+      try { await syncEncryptedChat(); } catch (e) { console.warn('Sync warning:', e); }
       setMessages(await localMessages(target));
-      await markChatRead(target);
+      await markChatRead(target).catch(() => {});
       setError('');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not load messages.'); }
   }, [target]);
@@ -117,8 +119,8 @@ export default function ConversationScreen() {
     if (!target || !body || sending) return;
     setSending(true); setError('');
     try {
-      const me = await socialApi<OwnProfile>('/me');
-      const message = await sendEncryptedMessage(target, body, me.name);
+      const senderName = selfName || (await socialApi<OwnProfile>('/me')).name;
+      const message = await sendEncryptedMessage(target, body, senderName);
       setMessages(current => current.some(item => item.id === message.id) ? current : [...current, message]);
       onDraftChange('');
     }
@@ -132,8 +134,8 @@ export default function ConversationScreen() {
     const asset = selection.assets[0];
     setSending(true); setError('');
     try {
-      const me = await socialApi<OwnProfile>('/me');
-      const sent = await sendEncryptedMedia(target, asset.uri, asset.type === 'video' ? 'video' : 'image', asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg'), me.name);
+      const senderName = selfName || (await socialApi<OwnProfile>('/me')).name;
+      const sent = await sendEncryptedMedia(target, asset.uri, asset.type === 'video' ? 'video' : 'image', asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg'), senderName);
       setMessages(current => current.some(item => item.id === sent.id) ? current : [...current, sent]);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not share encrypted media.'); }
     finally { setSending(false); }
@@ -205,7 +207,16 @@ function MediaMessage({ media }: { media: EncryptedMedia }) {
 
   if (uri) {
     return media.mediaKind === 'image' ? (
-      <Image source={{ uri }} style={styles.mediaImage} resizeMode="cover" />
+      <Image
+        source={{ uri }}
+        style={styles.mediaImage}
+        resizeMode="cover"
+        onError={(e) => {
+          console.warn('Image render failed:', e.nativeEvent);
+          setError('Could not display image.');
+          setUri(null);
+        }}
+      />
     ) : (
       <InlineVideo uri={uri} />
     );
