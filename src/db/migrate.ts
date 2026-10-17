@@ -5,6 +5,7 @@ import { createRealtimeTablesSql } from './migrations/003_realtime.js';
 import { createFriendRequestTablesSql } from './migrations/004_friend_requests.js';
 import { createPushDevicesSql } from './migrations/005_push_devices.js';
 import { createEncryptedChatTablesSql } from './migrations/006_encrypted_chat.js';
+import { createChatSpoolTableSql } from './migrations/007_chat_spool.js';
 import { ensureProfile } from '../modules/social/profile.js';
 
 async function migrate() {
@@ -16,6 +17,7 @@ async function migrate() {
     await pool.query(createFriendRequestTablesSql);
     await pool.query(createPushDevicesSql);
     await pool.query(createEncryptedChatTablesSql);
+    await pool.query(createChatSpoolTableSql);
     const users = await pool.query<{ id: string }>('SELECT id FROM "user" WHERE username IS NULL OR "friendCode" IS NULL');
     for (const user of users.rows) await ensureProfile(user.id);
     console.log('[ADDA Migration] Auth and social tables are ready.');

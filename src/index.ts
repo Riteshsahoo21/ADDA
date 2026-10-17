@@ -9,10 +9,10 @@ const server = createServer(app);
 attachRealtime(server);
 server.listen(env.port, env.host, () => {
   console.log(`ADDA backend listening on port ${env.port}`);
-  void retryDeliveredMediaCleanup().catch(error => console.warn('[ADDA] Media cleanup retry failed:', error));
+  void retryDeliveredMediaCleanup().catch((error: unknown) => console.warn('[ADDA] Media cleanup retry failed:', error));
 });
 const mediaCleanupTimer = setInterval(() => {
-  void retryDeliveredMediaCleanup().catch(error => console.warn('[ADDA] Media cleanup retry failed:', error));
+  void retryDeliveredMediaCleanup().catch((error: unknown) => console.warn('[ADDA] Media cleanup retry failed:', error));
 }, 10 * 60_000);
 
 function shutdown() {

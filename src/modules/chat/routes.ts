@@ -2,14 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { Router, type RequestHandler } from 'express';
 import { auth } from '../auth/auth.js';
 import { pool } from '../../db/pool.js';
-import { publishEncryptedChatUpdate, publishEncryptedEnvelope } from '../realtime/server.js';
 import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { env } from '../../config/env.js';
-import { sendEncryptedChatPush } from '../realtime/push.js';
+import { invalidateUserDeviceCache } from '../realtime/cache.js';
 
 type Target = { kind: 'direct' | 'group'; id: string };
-type KeyEnvelope = { deviceId: string; wrappedKey: string; wrapNonce: string };
 const idPattern = /^[a-zA-Z0-9_-]{8,100}$/;
 const base64Pattern = /^[A-Za-z0-9+/]+={0,2}$/;
 const validBase64 = (value: unknown, max: number): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && base64Pattern.test(value);
@@ -61,6 +59,7 @@ chatRoutes.post('/devices', run(async (request, response) => {
     if (Number(count.rows[0].count) >= 5) { response.status(409).json({ error: 'This account has five chat devices. Remove an old device in Profile first.' }); return; }
     await pool.query('INSERT INTO chat_device (id, "userId", "publicKey") VALUES ($1, $2, $3)', [deviceId, response.locals.userId, publicKey]);
   }
+  invalidateUserDeviceCache(response.locals.userId);
   response.json({ deviceId });
 }));
 
@@ -72,332 +71,20 @@ chatRoutes.get('/devices', run(async (_request, response) => {
 chatRoutes.delete('/devices/:id', run(async (request, response) => {
   const deviceId = request.params.id;
   if (!validId(deviceId)) { response.status(400).json({ error: 'Invalid device.' }); return; }
-  const client = await pool.connect();
-  let released: string[] = [];
-  try {
-    await client.query('BEGIN');
-    const revoked = await client.query('UPDATE chat_device SET "revokedAt" = now() WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL RETURNING id', [deviceId, response.locals.userId]);
-    if (!revoked.rowCount) { await client.query('ROLLBACK'); response.status(404).json({ error: 'Device unavailable.' }); return; }
-    const pending = await client.query<{ messageId: string }>('DELETE FROM chat_pending_key WHERE "recipientDeviceId" = $1 RETURNING "messageId"', [deviceId]);
-    released = [...new Set(pending.rows.map(row => row.messageId))];
-    await client.query('DELETE FROM chat_receipt_event WHERE "recipientDeviceId" = $1', [deviceId]);
-    for (const messageId of released) {
-      await client.query('DELETE FROM chat_pending_payload p WHERE p."messageId" = $1 AND NOT EXISTS (SELECT 1 FROM chat_pending_key k WHERE k."messageId" = p."messageId")', [messageId]);
-    }
-    await client.query('COMMIT');
-  } catch (error) { await client.query('ROLLBACK'); throw error; }
-  finally { client.release(); }
+  await pool.query('UPDATE chat_device SET "revokedAt" = now() WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL', [deviceId, response.locals.userId]);
+  await pool.query('DELETE FROM chat_spool WHERE "recipientDeviceId" = $1', [deviceId]);
+  invalidateUserDeviceCache(response.locals.userId);
   response.json({ ok: true });
-  for (const messageId of released) void cleanupDeliveredMedia(messageId).catch(error => console.warn('[ADDA] Encrypted media cleanup failed:', error));
 }));
 
 chatRoutes.get('/keys/:kind/:id', run(async (request, response) => {
-  const target = { kind: request.params.kind, id: request.params.id };
+  const target = { kind: request.params.kind as Target['kind'], id: request.params.id };
   if (!validTarget(target)) { response.status(400).json({ error: 'Invalid chat.' }); return; }
   const members = await memberIds(response.locals.userId, target);
   if (!members) { response.status(403).json({ error: 'Chat unavailable.' }); return; }
   const result = await pool.query<{ deviceId: string; userId: string; publicKey: string }>(
     'SELECT id AS "deviceId", "userId", "publicKey" FROM chat_device WHERE "userId" = ANY($1::text[]) AND "revokedAt" IS NULL ORDER BY "userId", id', [members]);
   response.json({ members, devices: result.rows });
-}));
-
-const userRateLimits = new Map<string, { count: number; resetAt: number }>();
-function checkRateLimit(userId: string): boolean {
-  const now = Date.now();
-  let entry = userRateLimits.get(userId);
-  if (!entry || now > entry.resetAt) {
-    entry = { count: 0, resetAt: now + 60_000 };
-    userRateLimits.set(userId, entry);
-  }
-  entry.count++;
-  return entry.count <= 120;
-}
-
-chatRoutes.post('/send', run(async (request, response) => {
-  const { messageId, senderDeviceId, target, ciphertext, nonce, keys, mediaIds = [] } = request.body ?? {};
-  if (!validId(messageId) || !validId(senderDeviceId) || !validTarget(target) ||
-      !validBase64(ciphertext, 8192) || Buffer.from(ciphertext, 'base64').length < 17 || !validBytes(nonce, 24) ||
-      !Array.isArray(mediaIds) || mediaIds.length > 4 || !mediaIds.every(validId) ||
-      !Array.isArray(keys) || keys.length > 256 || !keys.every((key: KeyEnvelope) =>
-        key && validId(key.deviceId) && validBytes(key.wrappedKey, 48) && validBytes(key.wrapNonce, 24))) {
-    response.status(400).json({ error: 'Invalid encrypted message.' }); return;
-  }
-  const senderId = response.locals.userId as string;
-  if (!checkRateLimit(senderId)) {
-    response.status(429).json({ error: 'Too many messages. Please slow down.' }); return;
-  }
-
-  let senderPublicKey = '';
-  let senderName = 'ADDA';
-  let groupName = 'Group';
-  let members: string[] = [];
-  let devices: Array<{ deviceId: string; userId: string; publicKey: string }> = [];
-
-  if (target.kind === 'direct') {
-    const v = await pool.query<{
-      sender_public_key: string | null;
-      sender_name: string | null;
-      is_contact: number | null;
-      devices: Array<{ deviceId: string; userId: string; publicKey: string }> | null;
-    }>(`
-      SELECT 
-        (SELECT d."publicKey" FROM chat_device d WHERE d.id = $1 AND d."userId" = $2 AND d."revokedAt" IS NULL) AS sender_public_key,
-        (SELECT u.name FROM "user" u WHERE u.id = $2) AS sender_name,
-        (SELECT 1 FROM contact WHERE "userA" = LEAST($2, $3) AND "userB" = GREATEST($2, $3)) AS is_contact,
-        (SELECT json_agg(json_build_object('deviceId', d.id, 'userId', d."userId", 'publicKey', d."publicKey"))
-         FROM chat_device d WHERE d."userId" IN ($2, $3) AND d."revokedAt" IS NULL) AS devices
-    `, [senderDeviceId, senderId, target.id]);
-
-    const row = v.rows[0];
-    if (!row?.is_contact) { response.status(403).json({ error: 'Chat unavailable.' }); return; }
-    if (!row.sender_public_key) { response.status(403).json({ error: 'Register this device first.' }); return; }
-    senderPublicKey = row.sender_public_key;
-    senderName = row.sender_name ?? 'ADDA';
-    members = [senderId, target.id];
-    devices = row.devices ?? [];
-  } else {
-    const v = await pool.query<{
-      sender_public_key: string | null;
-      sender_name: string | null;
-      group_name: string | null;
-      is_member: number | null;
-      members: string[] | null;
-      devices: Array<{ deviceId: string; userId: string; publicKey: string }> | null;
-    }>(`
-      SELECT 
-        (SELECT d."publicKey" FROM chat_device d WHERE d.id = $1 AND d."userId" = $2 AND d."revokedAt" IS NULL) AS sender_public_key,
-        (SELECT u.name FROM "user" u WHERE u.id = $2) AS sender_name,
-        (SELECT g.name FROM "chat_group" g WHERE g.id = $3) AS group_name,
-        (SELECT 1 FROM "chat_group_member" WHERE "groupId" = $3 AND "userId" = $2) AS is_member,
-        (SELECT json_agg("userId") FROM "chat_group_member" WHERE "groupId" = $3) AS members,
-        (SELECT json_agg(json_build_object('deviceId', d.id, 'userId', d."userId", 'publicKey', d."publicKey"))
-         FROM chat_device d
-         WHERE d."userId" IN (SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $3) AND d."revokedAt" IS NULL) AS devices
-    `, [senderDeviceId, senderId, target.id]);
-
-    const row = v.rows[0];
-    if (!row?.is_member) { response.status(403).json({ error: 'Chat unavailable.' }); return; }
-    if (!row.sender_public_key) { response.status(403).json({ error: 'Register this device first.' }); return; }
-    senderPublicKey = row.sender_public_key;
-    senderName = row.sender_name ?? 'ADDA';
-    groupName = row.group_name ?? 'Group';
-    members = row.members ?? [];
-    devices = row.devices ?? [];
-  }
-
-  const expected = devices.filter(row => row.deviceId !== senderDeviceId);
-  const actualIds = keys.map((key: KeyEnvelope) => key.deviceId);
-  if (new Set(actualIds).size !== expected.length || expected.some(row => !actualIds.includes(row.deviceId))) {
-    response.status(409).json({ error: 'Device keys changed. Refresh keys and encrypt this message again.' }); return;
-  }
-
-  if (target.kind === 'direct') {
-    if (members.some(id => id !== senderId && !devices.some(row => row.userId === id))) {
-      response.status(409).json({ error: 'A recipient must open the updated app before encrypted messages can be sent.' }); return;
-    }
-  } else {
-    const otherMembersWithDevices = devices.some(row => row.userId !== senderId);
-    if (!otherMembersWithDevices) {
-      response.status(409).json({ error: 'No group members have registered a device to receive encrypted messages yet.' }); return;
-    }
-  }
-
-  const activeRecipients = [...new Set(expected.map(row => row.userId))];
-  const envelopesToPublish: Array<{ userId: string; envelope: any }> = [];
-  const nowIso = new Date().toISOString();
-
-  const keyDeliveryIds: string[] = [];
-  const keyRecipientIds: string[] = [];
-  const keyRecipientDevIds: string[] = [];
-  const keyWrappedKeys: string[] = [];
-  const keyWrapNonces: string[] = [];
-
-  for (const key of keys as KeyEnvelope[]) {
-    const device = expected.find(row => row.deviceId === key.deviceId)!;
-    const deliveryId = randomUUID();
-    keyDeliveryIds.push(deliveryId);
-    keyRecipientIds.push(device.userId);
-    keyRecipientDevIds.push(device.deviceId);
-    keyWrappedKeys.push(key.wrappedKey);
-    keyWrapNonces.push(key.wrapNonce);
-
-    envelopesToPublish.push({
-      userId: device.userId,
-      envelope: {
-        deliveryId,
-        messageId,
-        senderId,
-        senderDeviceId,
-        senderPublicKey,
-        senderName,
-        kind: target.kind,
-        targetId: target.id,
-        ciphertext,
-        nonce,
-        wrappedKey: key.wrappedKey,
-        wrapNonce: key.wrapNonce,
-        recipientDeviceId: device.deviceId,
-        createdAt: nowIso,
-      }
-    });
-  }
-
-  const client = await pool.connect();
-  try {
-    if (mediaIds.length) {
-      const media = await client.query<{ id: string }>(
-        'SELECT id FROM chat_media WHERE id = ANY($1::text[]) AND "ownerId" = $2 AND kind = $3 AND "targetId" = $4 AND confirmed = true AND "messageId" IS NULL FOR UPDATE',
-        [mediaIds, senderId, target.kind, target.id]);
-      if (media.rowCount !== mediaIds.length || new Set(mediaIds).size !== mediaIds.length) {
-        response.status(409).json({ error: 'Encrypted media upload is unavailable or already sent.' }); return;
-      }
-    }
-
-    if (expected.length) {
-      await client.query(`
-        WITH s AS (
-          INSERT INTO chat_sent_id ("messageId", "senderId") VALUES ($1, $2) ON CONFLICT ("messageId") DO NOTHING
-        ),
-        p AS (
-          INSERT INTO chat_pending_payload ("messageId", "senderId", "senderDeviceId", kind, "targetId", ciphertext, nonce)
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ),
-        d AS (
-          INSERT INTO chat_delivery_state ("messageId", "senderId", "recipientId")
-          SELECT $1, $2, unnest($8::text[])
-        ),
-        m AS (
-          UPDATE chat_media SET "messageId" = $1 WHERE id = ANY($14::text[])
-        )
-        INSERT INTO chat_pending_key (id, "messageId", "recipientId", "recipientDeviceId", "wrappedKey", "wrapNonce")
-        SELECT unnest($9::text[]), $1, unnest($10::text[]), unnest($11::text[]), unnest($12::text[]), unnest($13::text[])
-      `, [
-        messageId, senderId, senderDeviceId, target.kind, target.id, ciphertext, nonce,
-        activeRecipients, keyDeliveryIds, keyRecipientIds, keyRecipientDevIds, keyWrappedKeys, keyWrapNonces, mediaIds
-      ]);
-    } else {
-      await client.query('INSERT INTO chat_sent_id ("messageId", "senderId") VALUES ($1, $2) ON CONFLICT ("messageId") DO NOTHING', [messageId, senderId]);
-      if (mediaIds.length) await client.query('UPDATE chat_media SET "messageId" = $1 WHERE id = ANY($2::text[])', [messageId, mediaIds]);
-    }
-  } finally {
-    client.release();
-  }
-
-  response.status(201).json({ messageId, recipients: activeRecipients });
-  for (const item of envelopesToPublish) {
-    publishEncryptedEnvelope(item.userId, item.envelope);
-  }
-  publishEncryptedChatUpdate(activeRecipients);
-
-  void (async () => {
-    if (!activeRecipients.length) return;
-    if (target.kind === 'direct') {
-      await sendEncryptedChatPush(activeRecipients, { kind: 'direct', id: senderId, name: senderName }, senderName);
-    } else {
-      await sendEncryptedChatPush(activeRecipients, { kind: 'group', id: target.id, name: groupName }, senderName, groupName);
-    }
-  })().catch(error => console.warn('[ADDA] Chat push failed:', error));
-}));
-
-chatRoutes.get('/pending', run(async (request, response) => {
-  const deviceId = request.query.deviceId;
-  if (!validId(deviceId)) { response.status(400).json({ error: 'Invalid device.' }); return; }
-  const selfId = response.locals.userId as string;
-  const device = await pool.query('SELECT 1 FROM chat_device WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL', [deviceId, selfId]);
-  if (!device.rowCount) { response.status(403).json({ error: 'Device unavailable.' }); return; }
-  const messages = await pool.query(
-    `SELECT k.id AS "deliveryId", p."messageId", p."senderId", p."senderDeviceId", d."publicKey" AS "senderPublicKey", u.name AS "senderName",
-      p.kind, p."targetId", p.ciphertext, p.nonce, p."createdAt", k."wrappedKey", k."wrapNonce"
-     FROM chat_pending_key k JOIN chat_pending_payload p ON p."messageId" = k."messageId"
-     JOIN chat_device d ON d.id = p."senderDeviceId" JOIN "user" u ON u.id = p."senderId"
-     WHERE k."recipientDeviceId" = $1 ORDER BY p."createdAt", k.id LIMIT 100`, [deviceId]);
-  const receipts = await pool.query(
-    'SELECT id, "messageId", "actorId", kind, "createdAt" FROM chat_receipt_event WHERE "recipientDeviceId" = $1 ORDER BY "createdAt", id LIMIT 100', [deviceId]);
-  response.json({ messages: messages.rows, receipts: receipts.rows, hasMore: messages.rowCount === 100 || receipts.rowCount === 100 });
-}));
-
-chatRoutes.post('/ack', run(async (request, response) => {
-  const { deviceId, deliveryId } = request.body ?? {};
-  if (!validId(deviceId) || !validId(deliveryId)) { response.status(400).json({ error: 'Invalid delivery.' }); return; }
-  const selfId = response.locals.userId as string;
-  const client = await pool.connect();
-  let senderId: string | undefined;
-  let deletedMessageId: string | undefined;
-  try {
-    await client.query('BEGIN');
-    const delivered = await client.query<{ messageId: string; senderId: string }>(
-      `DELETE FROM chat_pending_key k USING chat_pending_payload p, chat_device d
-       WHERE k.id = $1 AND k."recipientDeviceId" = $2 AND k."recipientId" = $3 AND p."messageId" = k."messageId"
-       AND d.id = k."recipientDeviceId" AND d."revokedAt" IS NULL
-       RETURNING k."messageId", p."senderId"`, [deliveryId, deviceId, selfId]);
-    if (delivered.rowCount) {
-      const row = delivered.rows[0]; senderId = row.senderId;
-      await client.query('UPDATE chat_delivery_state SET "deliveredAt" = COALESCE("deliveredAt", now()) WHERE "messageId" = $1 AND "recipientId" = $2', [row.messageId, selfId]);
-      if (selfId !== senderId) {
-        const senderDevices = await client.query<{ id: string }>('SELECT id FROM chat_device WHERE "userId" = $1 AND "revokedAt" IS NULL', [senderId]);
-        for (const device of senderDevices.rows) {
-          await client.query('INSERT INTO chat_receipt_event (id, "messageId", "recipientId", "recipientDeviceId", "actorId", kind) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING',
-            [randomUUID(), row.messageId, senderId, device.id, selfId, 'delivered']);
-        }
-      }
-      const removed = await client.query('DELETE FROM chat_pending_payload p WHERE p."messageId" = $1 AND NOT EXISTS (SELECT 1 FROM chat_pending_key k WHERE k."messageId" = p."messageId") RETURNING p."messageId"', [row.messageId]);
-      if (removed.rowCount) deletedMessageId = row.messageId;
-    }
-    await client.query('COMMIT');
-  } catch (error) { await client.query('ROLLBACK'); throw error; }
-  finally { client.release(); }
-  response.json({ ok: true });
-  if (senderId) publishEncryptedChatUpdate([senderId]);
-  if (deletedMessageId) void cleanupDeliveredMedia(deletedMessageId).catch(error => console.warn('[ADDA] Encrypted media cleanup failed:', error));
-}));
-
-async function cleanupDeliveredMedia(messageId: string) {
-  if (!r2) return;
-  const media = await pool.query<{ id: string; objectKey: string }>(
-    'SELECT id, "objectKey" FROM chat_media WHERE "messageId" = $1 AND NOT EXISTS (SELECT 1 FROM chat_pending_payload WHERE "messageId" = $1)', [messageId]);
-  for (const item of media.rows) {
-    await r2.send(new DeleteObjectCommand({ Bucket: env.r2Bucket, Key: item.objectKey }));
-    await pool.query('DELETE FROM chat_media WHERE id = $1', [item.id]);
-  }
-}
-
-export async function retryDeliveredMediaCleanup() {
-  if (!r2) return;
-  const waiting = await pool.query<{ messageId: string }>(
-    'SELECT DISTINCT m."messageId" FROM chat_media m WHERE m."messageId" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM chat_pending_payload p WHERE p."messageId" = m."messageId") LIMIT 100');
-  for (const item of waiting.rows) await cleanupDeliveredMedia(item.messageId);
-}
-
-chatRoutes.post('/read', run(async (request, response) => {
-  const { deviceId, messageIds } = request.body ?? {};
-  if (!validId(deviceId) || !Array.isArray(messageIds) || messageIds.length > 100 || !messageIds.every(validId)) {
-    response.status(400).json({ error: 'Invalid read receipts.' }); return;
-  }
-  const selfId = response.locals.userId as string;
-  const device = await pool.query('SELECT 1 FROM chat_device WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL', [deviceId, selfId]);
-  if (!device.rowCount) { response.status(403).json({ error: 'Device unavailable.' }); return; }
-  // Delivery state proves that this user received the message even after the sender ACKs its receipt event.
-  const eligible = await pool.query<{ messageId: string; senderId: string; senderDeviceId: string }>(
-    `SELECT DISTINCT s."messageId", s."senderId", e.id AS "senderDeviceId"
-     FROM chat_delivery_state s JOIN chat_device e ON e."userId" = s."senderId" AND e."revokedAt" IS NULL
-     WHERE s."messageId" = ANY($2::text[]) AND s."recipientId" = $1 AND s."deliveredAt" IS NOT NULL`, [selfId, messageIds]);
-  await pool.query('UPDATE chat_delivery_state SET "readAt" = COALESCE("readAt", now()) WHERE "messageId" = ANY($1::text[]) AND "recipientId" = $2 AND "deliveredAt" IS NOT NULL', [messageIds, selfId]);
-  for (const item of eligible.rows) {
-    await pool.query('INSERT INTO chat_receipt_event (id, "messageId", "recipientId", "recipientDeviceId", "actorId", kind) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING',
-      [randomUUID(), item.messageId, item.senderId, item.senderDeviceId, selfId, 'read']);
-  }
-  response.json({ ok: true });
-  publishEncryptedChatUpdate([...new Set(eligible.rows.map(row => row.senderId))]);
-}));
-
-chatRoutes.post('/receipt-ack', run(async (request, response) => {
-  const { deviceId, receiptIds } = request.body ?? {};
-  if (!validId(deviceId) || !Array.isArray(receiptIds) || receiptIds.length > 100 || !receiptIds.every(validId)) {
-    response.status(400).json({ error: 'Invalid receipt acknowledgement.' }); return;
-  }
-  await pool.query('DELETE FROM chat_receipt_event WHERE id = ANY($1::text[]) AND "recipientDeviceId" = $2 AND "recipientId" = $3',
-    [receiptIds, deviceId, response.locals.userId]);
-  response.json({ ok: true });
 }));
 
 chatRoutes.post('/media/upload', run(async (request, response) => {
@@ -446,3 +133,20 @@ chatRoutes.get('/media/:id/download', run(async (request, response) => {
   const url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: env.r2Bucket, Key: item.objectKey }), { expiresIn: 300 });
   response.json({ url });
 }));
+
+export async function retryDeliveredMediaCleanup(): Promise<void> {
+  if (!r2) return;
+  try {
+    const stale = await pool.query<{ id: string; objectKey: string }>(
+      `SELECT id, "objectKey" FROM chat_media 
+       WHERE confirmed = false AND "createdAt" < now() - INTERVAL '24 hours' LIMIT 50`
+    );
+    for (const item of stale.rows) {
+      await r2.send(new DeleteObjectCommand({ Bucket: env.r2Bucket, Key: item.objectKey })).catch(() => {});
+      await pool.query('DELETE FROM chat_media WHERE id = $1', [item.id]);
+    }
+  } catch (e) {
+    console.warn('[ADDA] Media cleanup warning:', e);
+  }
+}
+
