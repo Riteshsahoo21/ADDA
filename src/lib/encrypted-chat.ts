@@ -21,11 +21,21 @@ type Receipt = { id: string; messageId: string; actorId: string; kind: 'delivere
 type Pending = { messages: Envelope[]; receipts: Receipt[]; hasMore: boolean };
 type Identity = { userId: string; deviceId: string; secretKey: Uint8Array; publicKey: string; db: SQLite.SQLiteDatabase };
 export type EncryptedMedia = { type: 'media'; mediaId: string; mediaKind: 'image' | 'video'; key: string; nonce: string; mimeType: string; createdAt: string; senderName: string };
-const mediaPrefix = '\u0000adda-media:';
+const mediaPrefix = '__adda_media__:';
 export function mediaFromBody(body: string): EncryptedMedia | null {
-  if (!body.startsWith(mediaPrefix)) return null;
+  if (!body) return null;
+  let jsonStr = '';
+  if (body.startsWith('__adda_media__:')) {
+    jsonStr = body.slice('__adda_media__:'.length);
+  } else if (body.startsWith('[adda-media]:')) {
+    jsonStr = body.slice('[adda-media]:'.length);
+  } else if (body.startsWith('\u0000adda-media:')) {
+    jsonStr = body.slice('\u0000adda-media:'.length);
+  } else {
+    return null;
+  }
   try {
-    const data: EncryptedMedia = JSON.parse(body.slice(mediaPrefix.length));
+    const data: EncryptedMedia = JSON.parse(jsonStr);
     return data.type === 'media' && typeof data.mediaId === 'string' && (data.mediaKind === 'image' || data.mediaKind === 'video') ? data : null;
   } catch { return null; }
 }

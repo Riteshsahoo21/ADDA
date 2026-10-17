@@ -198,7 +198,17 @@ export default function ConversationScreen() {
         {messages.length === 0 && !error && <View style={styles.empty}><Text style={styles.emptyTitle}>Start the conversation</Text><Text style={styles.emptyText}>New messages are encrypted and saved on this phone.</Text></View>}
         {messages.map((item) => {
           const mine = item.senderId === selfId;
-          return <View key={item.id} style={[styles.bubble, mine ? styles.myBubble : styles.theirBubble]}>{kind === 'group' && !mine && <Text style={styles.sender}>{item.senderName}</Text>}{mediaFromBody(item.body) ? <MediaMessage media={mediaFromBody(item.body)!} /> : <Text style={styles.body}>{item.body}</Text>}<View style={styles.messageFooter}><Text style={styles.messageTime}>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>{mine && <Text accessibilityLabel={item.status === 'read' ? 'Read' : item.status === 'delivered' ? 'Delivered' : item.status === 'sent' ? 'Sent' : 'Pending'} style={[styles.tick, item.status === 'read' && styles.readTick]}>{item.status === 'read' || item.status === 'delivered' ? '✓✓' : item.status === 'sent' ? '✓' : '○'}</Text>}</View></View>;
+          const media = mediaFromBody(item.body);
+          return (
+            <View key={item.id} style={[styles.bubble, mine ? styles.myBubble : styles.theirBubble, media && styles.mediaBubble]}>
+              {kind === 'group' && !mine && <Text style={styles.sender}>{item.senderName}</Text>}
+              {media ? <MediaMessage media={media} /> : <Text style={styles.body}>{item.body}</Text>}
+              <View style={[styles.messageFooter, media && styles.mediaFooter]}>
+                <Text style={styles.messageTime}>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>
+                {mine && <Text accessibilityLabel={item.status === 'read' ? 'Read' : item.status === 'delivered' ? 'Delivered' : item.status === 'sent' ? 'Sent' : 'Pending'} style={[styles.tick, item.status === 'read' && styles.readTick]}>{item.status === 'read' || item.status === 'delivered' ? '✓✓' : item.status === 'sent' ? '✓' : '○'}</Text>}
+              </View>
+            </View>
+          );
         })}
         {Object.keys(typingNames).length > 0 && <View style={styles.typingBubble}><TypingDots /></View>}
       </ScrollView>
@@ -286,7 +296,9 @@ const styles = StyleSheet.create({
   bubble: { maxWidth: '83%', borderRadius: 17, paddingHorizontal: 13, paddingVertical: 10, minWidth: 90 }, myBubble: { backgroundColor: colors.primarySoft, alignSelf: 'flex-end', borderBottomRightRadius: 4 }, theirBubble: { backgroundColor: colors.surface, alignSelf: 'flex-start', borderBottomLeftRadius: 4, borderWidth: 1, borderColor: colors.border }, sender: { color: colors.primaryDark, fontWeight: '800', fontSize: 12, marginBottom: 4 }, body: { color: colors.text, fontSize: 15, lineHeight: 20 }, messageTime: { color: colors.muted, fontSize: 10, alignSelf: 'flex-end', marginTop: 4 },
   typingBubble: { alignSelf: 'flex-start', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 17, borderBottomLeftRadius: 4, paddingHorizontal: 15, paddingVertical: 12 },
   error: { color: colors.error, paddingHorizontal: 17, paddingVertical: 6 }, composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 10, paddingHorizontal: 14, paddingVertical: 10, backgroundColor: colors.surface }, attach: { width: 34, height: 44, alignItems: 'center', justifyContent: 'center' }, input: { flex: 1, minHeight: 44, maxHeight: 120, borderRadius: 22, paddingHorizontal: 17, paddingVertical: 10, backgroundColor: colors.surfaceRaised, color: colors.text, fontSize: 15 }, send: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' }, disabled: { opacity: 0.45 },
-  messageFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 4, marginTop: 4 }, tick: { color: colors.muted, fontSize: 12, fontWeight: '800' }, readTick: { color: '#2897D5' }, mediaButton: { minWidth: 160, minHeight: 80, justifyContent: 'center', alignItems: 'center' }, mediaLabel: { color: colors.primary, fontSize: 13, fontWeight: '700' }, mediaImage: { width: 220, height: 220, borderRadius: 12, backgroundColor: '#111827' },
-  mediaLoading: { width: 220, height: 160, borderRadius: 12, backgroundColor: colors.surfaceRaised, justifyContent: 'center', alignItems: 'center', gap: 8 },
+  messageFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 4, marginTop: 4 }, tick: { color: colors.muted, fontSize: 12, fontWeight: '800' }, readTick: { color: '#2897D5' }, mediaButton: { minWidth: 160, minHeight: 80, justifyContent: 'center', alignItems: 'center' }, mediaLabel: { color: colors.primary, fontSize: 13, fontWeight: '700' }, mediaImage: { width: 230, height: 230, borderRadius: 13, backgroundColor: '#111827' },
+  mediaLoading: { width: 230, height: 160, borderRadius: 13, backgroundColor: colors.surfaceRaised, justifyContent: 'center', alignItems: 'center', gap: 8 },
   mediaLoadingText: { color: colors.muted, fontSize: 12, fontWeight: '600' },
+  mediaBubble: { paddingHorizontal: 6, paddingTop: 6, paddingBottom: 6 },
+  mediaFooter: { marginRight: 6, marginTop: 4 },
 });
