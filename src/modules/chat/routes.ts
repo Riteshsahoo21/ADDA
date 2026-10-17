@@ -101,6 +101,18 @@ chatRoutes.get('/keys/:kind/:id', run(async (request, response) => {
   response.json({ members, devices: result.rows });
 }));
 
+const userRateLimits = new Map<string, { count: number; resetAt: number }>();
+function checkRateLimit(userId: string): boolean {
+  const now = Date.now();
+  let entry = userRateLimits.get(userId);
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 0, resetAt: now + 60_000 };
+    userRateLimits.set(userId, entry);
+  }
+  entry.count++;
+  return entry.count <= 120;
+}
+
 chatRoutes.post('/send', run(async (request, response) => {
   const { messageId, senderDeviceId, target, ciphertext, nonce, keys, mediaIds = [] } = request.body ?? {};
   if (!validId(messageId) || !validId(senderDeviceId) || !validTarget(target) ||
@@ -111,110 +123,180 @@ chatRoutes.post('/send', run(async (request, response) => {
     response.status(400).json({ error: 'Invalid encrypted message.' }); return;
   }
   const senderId = response.locals.userId as string;
-  const members = await memberIds(senderId, target);
-  if (!members) { response.status(403).json({ error: 'Chat unavailable.' }); return; }
+  if (!checkRateLimit(senderId)) {
+    response.status(429).json({ error: 'Too many messages. Please slow down.' }); return;
+  }
+
+  let senderPublicKey = '';
+  let senderName = 'ADDA';
+  let groupName = 'Group';
+  let members: string[] = [];
+  let devices: Array<{ deviceId: string; userId: string; publicKey: string }> = [];
+
+  if (target.kind === 'direct') {
+    const v = await pool.query<{
+      sender_public_key: string | null;
+      sender_name: string | null;
+      is_contact: number | null;
+      devices: Array<{ deviceId: string; userId: string; publicKey: string }> | null;
+    }>(`
+      SELECT 
+        (SELECT d."publicKey" FROM chat_device d WHERE d.id = $1 AND d."userId" = $2 AND d."revokedAt" IS NULL) AS sender_public_key,
+        (SELECT u.name FROM "user" u WHERE u.id = $2) AS sender_name,
+        (SELECT 1 FROM contact WHERE "userA" = LEAST($2, $3) AND "userB" = GREATEST($2, $3)) AS is_contact,
+        (SELECT json_agg(json_build_object('deviceId', d.id, 'userId', d."userId", 'publicKey', d."publicKey"))
+         FROM chat_device d WHERE d."userId" IN ($2, $3) AND d."revokedAt" IS NULL) AS devices
+    `, [senderDeviceId, senderId, target.id]);
+
+    const row = v.rows[0];
+    if (!row?.is_contact) { response.status(403).json({ error: 'Chat unavailable.' }); return; }
+    if (!row.sender_public_key) { response.status(403).json({ error: 'Register this device first.' }); return; }
+    senderPublicKey = row.sender_public_key;
+    senderName = row.sender_name ?? 'ADDA';
+    members = [senderId, target.id];
+    devices = row.devices ?? [];
+  } else {
+    const v = await pool.query<{
+      sender_public_key: string | null;
+      sender_name: string | null;
+      group_name: string | null;
+      is_member: number | null;
+      members: string[] | null;
+      devices: Array<{ deviceId: string; userId: string; publicKey: string }> | null;
+    }>(`
+      SELECT 
+        (SELECT d."publicKey" FROM chat_device d WHERE d.id = $1 AND d."userId" = $2 AND d."revokedAt" IS NULL) AS sender_public_key,
+        (SELECT u.name FROM "user" u WHERE u.id = $2) AS sender_name,
+        (SELECT g.name FROM "chat_group" g WHERE g.id = $3) AS group_name,
+        (SELECT 1 FROM "chat_group_member" WHERE "groupId" = $3 AND "userId" = $2) AS is_member,
+        (SELECT json_agg("userId") FROM "chat_group_member" WHERE "groupId" = $3) AS members,
+        (SELECT json_agg(json_build_object('deviceId', d.id, 'userId', d."userId", 'publicKey', d."publicKey"))
+         FROM chat_device d
+         WHERE d."userId" IN (SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $3) AND d."revokedAt" IS NULL) AS devices
+    `, [senderDeviceId, senderId, target.id]);
+
+    const row = v.rows[0];
+    if (!row?.is_member) { response.status(403).json({ error: 'Chat unavailable.' }); return; }
+    if (!row.sender_public_key) { response.status(403).json({ error: 'Register this device first.' }); return; }
+    senderPublicKey = row.sender_public_key;
+    senderName = row.sender_name ?? 'ADDA';
+    groupName = row.group_name ?? 'Group';
+    members = row.members ?? [];
+    devices = row.devices ?? [];
+  }
+
+  const expected = devices.filter(row => row.deviceId !== senderDeviceId);
+  const actualIds = keys.map((key: KeyEnvelope) => key.deviceId);
+  if (new Set(actualIds).size !== expected.length || expected.some(row => !actualIds.includes(row.deviceId))) {
+    response.status(409).json({ error: 'Device keys changed. Refresh keys and encrypt this message again.' }); return;
+  }
+
+  if (target.kind === 'direct') {
+    if (members.some(id => id !== senderId && !devices.some(row => row.userId === id))) {
+      response.status(409).json({ error: 'A recipient must open the updated app before encrypted messages can be sent.' }); return;
+    }
+  } else {
+    const otherMembersWithDevices = devices.some(row => row.userId !== senderId);
+    if (!otherMembersWithDevices) {
+      response.status(409).json({ error: 'No group members have registered a device to receive encrypted messages yet.' }); return;
+    }
+  }
+
+  const activeRecipients = [...new Set(expected.map(row => row.userId))];
+  const envelopesToPublish: Array<{ userId: string; envelope: any }> = [];
+  const nowIso = new Date().toISOString();
+
+  const keyDeliveryIds: string[] = [];
+  const keyRecipientIds: string[] = [];
+  const keyRecipientDevIds: string[] = [];
+  const keyWrappedKeys: string[] = [];
+  const keyWrapNonces: string[] = [];
+
+  for (const key of keys as KeyEnvelope[]) {
+    const device = expected.find(row => row.deviceId === key.deviceId)!;
+    const deliveryId = randomUUID();
+    keyDeliveryIds.push(deliveryId);
+    keyRecipientIds.push(device.userId);
+    keyRecipientDevIds.push(device.deviceId);
+    keyWrappedKeys.push(key.wrappedKey);
+    keyWrapNonces.push(key.wrapNonce);
+
+    envelopesToPublish.push({
+      userId: device.userId,
+      envelope: {
+        deliveryId,
+        messageId,
+        senderId,
+        senderDeviceId,
+        senderPublicKey,
+        senderName,
+        kind: target.kind,
+        targetId: target.id,
+        ciphertext,
+        nonce,
+        wrappedKey: key.wrappedKey,
+        wrapNonce: key.wrapNonce,
+        recipientDeviceId: device.deviceId,
+        createdAt: nowIso,
+      }
+    });
+  }
+
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
-    const sender = await client.query<{ publicKey: string; name: string }>(
-      'SELECT d."publicKey", u.name FROM chat_device d JOIN "user" u ON u.id = d."userId" WHERE d.id = $1 AND d."userId" = $2 AND d."revokedAt" IS NULL',
-      [senderDeviceId, senderId]
-    );
-    if (!sender.rowCount) { await client.query('ROLLBACK'); response.status(403).json({ error: 'Register this device first.' }); return; }
-    const prior = await client.query<{ senderId: string }>('SELECT "senderId" FROM chat_sent_id WHERE "messageId" = $1', [messageId]);
-    if (prior.rowCount) {
-      await client.query('ROLLBACK');
-      response.status(prior.rows[0].senderId === senderId ? 200 : 409).json(prior.rows[0].senderId === senderId ? { messageId, duplicate: true, recipients: members.filter(id => id !== senderId) } : { error: 'Message ID belongs to another user.' });
-      return;
-    }
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [senderId]);
-    const recent = await client.query<{ minute: string; day: string }>(
-      `SELECT COUNT(*) FILTER (WHERE "createdAt" > now() - interval '1 minute') AS minute,
-       COUNT(*) AS day FROM chat_sent_id WHERE "senderId" = $1 AND "createdAt" > now() - interval '1 day'`, [senderId]);
-    if (Number(recent.rows[0].minute) >= 60 || Number(recent.rows[0].day) >= 1000) {
-      await client.query('ROLLBACK'); response.status(429).json({ error: 'Too many messages. Please slow down.' }); return;
-    }
-    const devices = await client.query<{ deviceId: string; userId: string }>(
-      'SELECT id AS "deviceId", "userId" FROM chat_device WHERE "userId" = ANY($1::text[]) AND "revokedAt" IS NULL ORDER BY id FOR SHARE', [members]);
-    const expected = devices.rows.filter(row => row.deviceId !== senderDeviceId);
-    const actualIds = keys.map((key: KeyEnvelope) => key.deviceId);
-    if (new Set(actualIds).size !== expected.length || expected.some(row => !actualIds.includes(row.deviceId))) {
-      await client.query('ROLLBACK'); response.status(409).json({ error: 'Device keys changed. Refresh keys and encrypt this message again.' }); return;
-    }
-    if (target.kind === 'direct') {
-      if (members.some(id => id !== senderId && !devices.rows.some(row => row.userId === id))) {
-        await client.query('ROLLBACK'); response.status(409).json({ error: 'A recipient must open the updated app before encrypted messages can be sent.' }); return;
-      }
-    } else {
-      const otherMembersWithDevices = devices.rows.some(row => row.userId !== senderId);
-      if (!otherMembersWithDevices) {
-        await client.query('ROLLBACK'); response.status(409).json({ error: 'No group members have registered a device to receive encrypted messages yet.' }); return;
-      }
-    }
     if (mediaIds.length) {
-      const media = await client.query<{ id: string }>('SELECT id FROM chat_media WHERE id = ANY($1::text[]) AND "ownerId" = $2 AND kind = $3 AND "targetId" = $4 AND confirmed = true AND "messageId" IS NULL FOR UPDATE',
+      const media = await client.query<{ id: string }>(
+        'SELECT id FROM chat_media WHERE id = ANY($1::text[]) AND "ownerId" = $2 AND kind = $3 AND "targetId" = $4 AND confirmed = true AND "messageId" IS NULL FOR UPDATE',
         [mediaIds, senderId, target.kind, target.id]);
       if (media.rowCount !== mediaIds.length || new Set(mediaIds).size !== mediaIds.length) {
-        await client.query('ROLLBACK'); response.status(409).json({ error: 'Encrypted media upload is unavailable or already sent.' }); return;
+        response.status(409).json({ error: 'Encrypted media upload is unavailable or already sent.' }); return;
       }
     }
-    await client.query('INSERT INTO chat_sent_id ("messageId", "senderId") VALUES ($1, $2) ON CONFLICT ("messageId") DO NOTHING', [messageId, senderId]);
-    if (mediaIds.length) await client.query('UPDATE chat_media SET "messageId" = $1 WHERE id = ANY($2::text[])', [messageId, mediaIds]);
-    const activeRecipients = [...new Set(expected.map(row => row.userId))];
-    for (const recipientId of activeRecipients) {
-      await client.query('INSERT INTO chat_delivery_state ("messageId", "senderId", "recipientId") VALUES ($1, $2, $3)', [messageId, senderId, recipientId]);
-    }
-    const envelopesToPublish: Array<{ userId: string; envelope: any }> = [];
-    const senderPublicKey = sender.rows[0]?.publicKey ?? '';
-    const senderName = sender.rows[0]?.name ?? 'ADDA';
-    const nowIso = new Date().toISOString();
+
     if (expected.length) {
-      await client.query('INSERT INTO chat_pending_payload ("messageId", "senderId", "senderDeviceId", kind, "targetId", ciphertext, nonce) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-        [messageId, senderId, senderDeviceId, target.kind, target.id, ciphertext, nonce]);
-      for (const key of keys as KeyEnvelope[]) {
-        const device = expected.find(row => row.deviceId === key.deviceId)!;
-        const deliveryId = randomUUID();
-        await client.query('INSERT INTO chat_pending_key (id, "messageId", "recipientId", "recipientDeviceId", "wrappedKey", "wrapNonce") VALUES ($1, $2, $3, $4, $5, $6)',
-          [deliveryId, messageId, device.userId, device.deviceId, key.wrappedKey, key.wrapNonce]);
-        envelopesToPublish.push({
-          userId: device.userId,
-          envelope: {
-            deliveryId,
-            messageId,
-            senderId,
-            senderDeviceId,
-            senderPublicKey,
-            senderName,
-            kind: target.kind,
-            targetId: target.id,
-            ciphertext,
-            nonce,
-            wrappedKey: key.wrappedKey,
-            wrapNonce: key.wrapNonce,
-            recipientDeviceId: device.deviceId,
-            createdAt: nowIso,
-          }
-        });
-      }
+      await client.query(`
+        WITH s AS (
+          INSERT INTO chat_sent_id ("messageId", "senderId") VALUES ($1, $2) ON CONFLICT ("messageId") DO NOTHING
+        ),
+        p AS (
+          INSERT INTO chat_pending_payload ("messageId", "senderId", "senderDeviceId", kind, "targetId", ciphertext, nonce)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ),
+        d AS (
+          INSERT INTO chat_delivery_state ("messageId", "senderId", "recipientId")
+          SELECT $1, $2, unnest($8::text[])
+        ),
+        m AS (
+          UPDATE chat_media SET "messageId" = $1 WHERE id = ANY($14::text[])
+        )
+        INSERT INTO chat_pending_key (id, "messageId", "recipientId", "recipientDeviceId", "wrappedKey", "wrapNonce")
+        SELECT unnest($9::text[]), $1, unnest($10::text[]), unnest($11::text[]), unnest($12::text[]), unnest($13::text[])
+      `, [
+        messageId, senderId, senderDeviceId, target.kind, target.id, ciphertext, nonce,
+        activeRecipients, keyDeliveryIds, keyRecipientIds, keyRecipientDevIds, keyWrappedKeys, keyWrapNonces, mediaIds
+      ]);
+    } else {
+      await client.query('INSERT INTO chat_sent_id ("messageId", "senderId") VALUES ($1, $2) ON CONFLICT ("messageId") DO NOTHING', [messageId, senderId]);
+      if (mediaIds.length) await client.query('UPDATE chat_media SET "messageId" = $1 WHERE id = ANY($2::text[])', [messageId, mediaIds]);
     }
-    await client.query('COMMIT');
-    response.status(201).json({ messageId, recipients: activeRecipients });
-    for (const item of envelopesToPublish) {
-      publishEncryptedEnvelope(item.userId, item.envelope);
+  } finally {
+    client.release();
+  }
+
+  response.status(201).json({ messageId, recipients: activeRecipients });
+  for (const item of envelopesToPublish) {
+    publishEncryptedEnvelope(item.userId, item.envelope);
+  }
+  publishEncryptedChatUpdate(activeRecipients);
+
+  void (async () => {
+    if (!activeRecipients.length) return;
+    if (target.kind === 'direct') {
+      await sendEncryptedChatPush(activeRecipients, { kind: 'direct', id: senderId, name: senderName }, senderName);
+    } else {
+      await sendEncryptedChatPush(activeRecipients, { kind: 'group', id: target.id, name: groupName }, senderName, groupName);
     }
-    publishEncryptedChatUpdate(activeRecipients);
-    void (async () => {
-      if (!activeRecipients.length) return;
-      if (target.kind === 'direct') {
-        await sendEncryptedChatPush(activeRecipients, { kind: 'direct', id: senderId, name: senderName }, senderName);
-      } else {
-        const group = await pool.query<{ name: string }>('SELECT name FROM "chat_group" WHERE id = $1', [target.id]);
-        const groupName = group.rows[0]?.name ?? 'Group';
-        await sendEncryptedChatPush(activeRecipients, { kind: 'group', id: target.id, name: groupName }, senderName, groupName);
-      }
-    })().catch(error => console.warn('[ADDA] Chat push failed:', error));
-  } catch (error) { await client.query('ROLLBACK'); throw error; }
-  finally { client.release(); }
+  })().catch(error => console.warn('[ADDA] Chat push failed:', error));
 }));
 
 chatRoutes.get('/pending', run(async (request, response) => {
