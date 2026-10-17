@@ -19,7 +19,7 @@
       "expo-router",
       "expo-screen-orientation",
       "expo-secure-store",
-      ["expo-sqlite", { "useSQLCipher": true }],
+      "expo-sqlite",
       "expo-notifications",
       [
         "expo-camera",

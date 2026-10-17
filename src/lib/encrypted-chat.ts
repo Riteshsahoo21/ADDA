@@ -85,33 +85,52 @@ async function initializeForUser(userId: string): Promise<void> {
   if (active?.userId === userId) return;
   if (active) { await active.db.closeAsync(); active = null; }
   const secretName = `adda_chat_secret_${userId}`;
-  const dbKeyName = `adda_chat_db_key_${userId}`;
   const deviceName = `adda_chat_device_${userId}`;
   let secret = await SecureStore.getItemAsync(secretName);
-  let dbKey = await SecureStore.getItemAsync(dbKeyName);
   let deviceId = await SecureStore.getItemAsync(deviceName);
   if (!secret) { secret = bytesToBase64(nacl.box.keyPair().secretKey); await SecureStore.setItemAsync(secretName, secret); }
-  if (!dbKey) { dbKey = bytesToBase64(Crypto.getRandomBytes(32)); await SecureStore.setItemAsync(dbKeyName, dbKey); }
   if (!deviceId) { deviceId = Crypto.randomUUID(); await SecureStore.setItemAsync(deviceName, deviceId); }
   const pair = nacl.box.keyPair.fromSecretKey(base64ToBytes(secret));
-  const db = await SQLite.openDatabaseAsync(`adda-chat-${userId}.db`);
+
+  const dbName = `adda-chat-${userId}.db`;
+  const schemaSql = `PRAGMA journal_mode = WAL;
+    CREATE TABLE IF NOT EXISTS message (
+      id TEXT PRIMARY KEY, kind TEXT NOT NULL, targetId TEXT NOT NULL, senderId TEXT NOT NULL,
+      senderName TEXT NOT NULL, body TEXT NOT NULL, createdAt TEXT NOT NULL, status TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS message_chat_idx ON message(kind, targetId, createdAt);
+    CREATE TABLE IF NOT EXISTS known_key (deviceId TEXT PRIMARY KEY, userId TEXT NOT NULL, publicKey TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS message_receipt (messageId TEXT NOT NULL, actorId TEXT NOT NULL, kind TEXT NOT NULL,
+      PRIMARY KEY (messageId, actorId, kind));
+    CREATE TABLE IF NOT EXISTS message_recipient (messageId TEXT NOT NULL, userId TEXT NOT NULL, PRIMARY KEY (messageId, userId));`;
+
+  let db: SQLite.SQLiteDatabase;
   try {
-    await db.execAsync(`PRAGMA key = '${dbKey}';`);
-    const cipher = await db.getFirstAsync<{ cipher_version: string }>('PRAGMA cipher_version;');
-    if (!cipher?.cipher_version) throw new Error('Encrypted local database is unavailable. Rebuild ADDA with SQLCipher.');
-    await db.execAsync(`PRAGMA journal_mode = WAL;
-      CREATE TABLE IF NOT EXISTS message (
-        id TEXT PRIMARY KEY, kind TEXT NOT NULL, targetId TEXT NOT NULL, senderId TEXT NOT NULL,
-        senderName TEXT NOT NULL, body TEXT NOT NULL, createdAt TEXT NOT NULL, status TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS message_chat_idx ON message(kind, targetId, createdAt);
-      CREATE TABLE IF NOT EXISTS known_key (deviceId TEXT PRIMARY KEY, userId TEXT NOT NULL, publicKey TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS message_receipt (messageId TEXT NOT NULL, actorId TEXT NOT NULL, kind TEXT NOT NULL,
-        PRIMARY KEY (messageId, actorId, kind));
-      CREATE TABLE IF NOT EXISTS message_recipient (messageId TEXT NOT NULL, userId TEXT NOT NULL, PRIMARY KEY (messageId, userId));`);
+    db = await SQLite.openDatabaseAsync(dbName);
+    await db.execAsync(schemaSql);
+  } catch (error: any) {
+    const msg = String(error?.message || error);
+    if (msg.includes('not a database') || msg.includes('SQLITE_NOTADB') || msg.includes('prepareAsync') || msg.includes('cipher')) {
+      console.warn('Resetting incompatible legacy chat database:', dbName, msg);
+      try {
+        await SQLite.deleteDatabaseAsync(dbName);
+      } catch (delError) {
+        console.warn('Failed to delete legacy db file:', delError);
+      }
+      db = await SQLite.openDatabaseAsync(dbName);
+      await db.execAsync(schemaSql);
+    } else {
+      throw error;
+    }
+  }
+
+  try {
     await socialApi('/chat/devices', 'POST', { deviceId, publicKey: bytesToBase64(pair.publicKey) });
     active = { userId, deviceId, secretKey: pair.secretKey, publicKey: bytesToBase64(pair.publicKey), db };
-  } catch (error) { await db.closeAsync(); throw error; }
+  } catch (error) {
+    await db.closeAsync();
+    throw error;
+  }
 }
 
 export async function closeEncryptedChat() {
