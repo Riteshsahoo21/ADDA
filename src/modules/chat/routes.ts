@@ -116,7 +116,10 @@ chatRoutes.post('/send', run(async (request, response) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const sender = await client.query<{ publicKey: string }>('SELECT "publicKey" FROM chat_device WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL', [senderDeviceId, senderId]);
+    const sender = await client.query<{ publicKey: string; name: string }>(
+      'SELECT d."publicKey", u.name FROM chat_device d JOIN "user" u ON u.id = d."userId" WHERE d.id = $1 AND d."userId" = $2 AND d."revokedAt" IS NULL',
+      [senderDeviceId, senderId]
+    );
     if (!sender.rowCount) { await client.query('ROLLBACK'); response.status(403).json({ error: 'Register this device first.' }); return; }
     const prior = await client.query<{ senderId: string }>('SELECT "senderId" FROM chat_sent_id WHERE "messageId" = $1', [messageId]);
     if (prior.rowCount) {
@@ -163,6 +166,7 @@ chatRoutes.post('/send', run(async (request, response) => {
     }
     const envelopesToPublish: Array<{ userId: string; envelope: any }> = [];
     const senderPublicKey = sender.rows[0]?.publicKey ?? '';
+    const senderName = sender.rows[0]?.name ?? 'ADDA';
     const nowIso = new Date().toISOString();
     if (expected.length) {
       await client.query('INSERT INTO chat_pending_payload ("messageId", "senderId", "senderDeviceId", kind, "targetId", ciphertext, nonce) VALUES ($1, $2, $3, $4, $5, $6, $7)',
@@ -180,7 +184,7 @@ chatRoutes.post('/send', run(async (request, response) => {
             senderId,
             senderDeviceId,
             senderPublicKey,
-            senderName: '',
+            senderName,
             kind: target.kind,
             targetId: target.id,
             ciphertext,
@@ -195,23 +199,20 @@ chatRoutes.post('/send', run(async (request, response) => {
     }
     await client.query('COMMIT');
     response.status(201).json({ messageId, recipients: activeRecipients });
+    for (const item of envelopesToPublish) {
+      publishEncryptedEnvelope(item.userId, item.envelope);
+    }
     publishEncryptedChatUpdate(activeRecipients);
-    void pool.query<{ name: string }>('SELECT name FROM "user" WHERE id = $1', [senderId])
-      .then(async result => {
-        const senderName = result.rows[0]?.name ?? 'ADDA';
-        for (const item of envelopesToPublish) {
-          publishEncryptedEnvelope(item.userId, { ...item.envelope, senderName });
-        }
-        if (!activeRecipients.length) return;
-        if (target.kind === 'direct') {
-          await sendEncryptedChatPush(activeRecipients, { kind: 'direct', id: senderId, name: senderName }, senderName);
-        } else {
-          const group = await pool.query<{ name: string }>('SELECT name FROM "chat_group" WHERE id = $1', [target.id]);
-          const groupName = group.rows[0]?.name ?? 'Group';
-          await sendEncryptedChatPush(activeRecipients, { kind: 'group', id: target.id, name: groupName }, senderName, groupName);
-        }
-      })
-      .catch(error => console.warn('[ADDA] Chat push failed:', error));
+    void (async () => {
+      if (!activeRecipients.length) return;
+      if (target.kind === 'direct') {
+        await sendEncryptedChatPush(activeRecipients, { kind: 'direct', id: senderId, name: senderName }, senderName);
+      } else {
+        const group = await pool.query<{ name: string }>('SELECT name FROM "chat_group" WHERE id = $1', [target.id]);
+        const groupName = group.rows[0]?.name ?? 'Group';
+        await sendEncryptedChatPush(activeRecipients, { kind: 'group', id: target.id, name: groupName }, senderName, groupName);
+      }
+    })().catch(error => console.warn('[ADDA] Chat push failed:', error));
   } catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
 }));
