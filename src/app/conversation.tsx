@@ -1,16 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import * as Sharing from 'expo-sharing';
+import * as MediaLibrary from 'expo-media-library';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
-import { ArrowLeft, LockKeyhole, Paperclip, Phone, Send, Video } from 'lucide-react-native';
+import { ArrowLeft, Download, EllipsisVertical, LockKeyhole, Paperclip, Phone, Send, Share2, Trash2, Video, X } from 'lucide-react-native';
 import { colors } from '@/constants/theme';
 import { socialApi, type ChatGroup, type OwnProfile, type PublicProfile } from '@/lib/social-api';
 import { getRealtimeSocket, type ChatTarget, type TypingEvent } from '@/lib/realtime';
-import { chatSafetyCode, initEncryptedChat, localMessages, markChatRead, mediaFromBody, onChatChanged, openEncryptedMedia, releaseDecryptedMedia, sendEncryptedMedia, sendEncryptedMessage, syncEncryptedChat, type EncryptedMedia, type LocalMessage } from '@/lib/encrypted-chat';
+import { chatSafetyCode, deleteLocalMessage, initEncryptedChat, localMessages, markChatRead, mediaFromBody, onChatChanged, openEncryptedMedia, releaseDecryptedMedia, sendEncryptedMedia, sendEncryptedMessage, syncEncryptedChat, type EncryptedMedia, type LocalMessage } from '@/lib/encrypted-chat';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { TypingDots } from '@/components/ui/TypingDots';
+
+type ViewerState = {
+  uri: string;
+  media: EncryptedMedia;
+  messageId: string;
+  senderName: string;
+  createdAt: string;
+  mine: boolean;
+} | null;
 
 export default function ConversationScreen() {
   const { kind, id, name } = useLocalSearchParams<{ kind?: string; id?: string; name?: string }>();
@@ -21,6 +32,8 @@ export default function ConversationScreen() {
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
   const [sending, setSending] = useState(false);
+  const [viewerMedia, setViewerMedia] = useState<ViewerState>(null);
+  const [showMenu, setShowMenu] = useState(false);
   const [typingNames, setTypingNames] = useState<Record<string, string>>({});
   const list = useRef<ScrollView>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -191,6 +204,57 @@ export default function ConversationScreen() {
       Alert.alert('Compare chat keys', `${code}\n\nCompare this code with the other people in this chat through a trusted channel. If it differs, do not share sensitive messages.`);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not check chat keys.'); }
   };
+  const handleDownload = async (fileUri: string) => {
+    try {
+      const permission = await MediaLibrary.requestPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Permission needed', 'Please allow gallery access to save photos to your phone.');
+        return;
+      }
+      await MediaLibrary.saveToLibraryAsync(fileUri);
+      Alert.alert('Saved', 'Photo saved to your gallery!');
+    } catch (error) {
+      Alert.alert('Download failed', error instanceof Error ? error.message : 'Could not save photo.');
+    }
+  };
+
+  const handleShare = async (fileUri: string) => {
+    try {
+      const isAvailable = await Sharing.isAvailableAsync();
+      if (!isAvailable) {
+        Alert.alert('Sharing unavailable', 'Sharing is not supported on this device.');
+        return;
+      }
+      await Sharing.shareAsync(fileUri);
+    } catch (error) {
+      Alert.alert('Share failed', error instanceof Error ? error.message : 'Could not share photo.');
+    }
+  };
+
+  const handleDelete = (messageId: string) => {
+    Alert.alert(
+      'Delete message',
+      'Are you sure you want to delete this photo?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteLocalMessage(messageId);
+              setMessages(current => current.filter(m => m.id !== messageId));
+              setViewerMedia(null);
+              setShowMenu(false);
+            } catch (error) {
+              Alert.alert('Delete failed', error instanceof Error ? error.message : 'Could not delete message.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
   return <SafeAreaView style={styles.safe}>
     <View style={styles.top}><Pressable accessibilityLabel="Back" onPress={handleBack} style={styles.back}><ArrowLeft size={24} color={colors.text} /></Pressable><View style={styles.avatar}><Text style={styles.initial}>{activeTitle[0]?.toUpperCase() || '?'}</Text></View><View style={styles.titleWrap}><Text style={styles.title}>{activeTitle}</Text><View style={styles.subtitleRow}><Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]}>{Object.keys(typingNames).length ? `${Object.values(typingNames).slice(0, 2).join(', ')} typing` : kind === 'group' ? 'Group' : 'Contact'}</Text>{Object.keys(typingNames).length > 0 && <TypingDots />}</View></View><Pressable accessibilityLabel="Compare encryption keys" onPress={() => void showSafetyCode()} style={styles.callAction}><LockKeyhole size={19} color={colors.primary} /></Pressable><Pressable accessibilityLabel="Voice call" onPress={() => void startCall('audio')} style={styles.callAction}><Phone size={20} color={colors.primary} /></Pressable><Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}><Video size={22} color={colors.primary} /></Pressable></View>
     <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 20 : 0}>
@@ -202,7 +266,23 @@ export default function ConversationScreen() {
           return (
             <View key={item.id} style={[styles.bubble, mine ? styles.myBubble : styles.theirBubble, media && styles.mediaBubble]}>
               {kind === 'group' && !mine && <Text style={styles.sender}>{item.senderName}</Text>}
-              {media ? <MediaMessage media={media} /> : <Text style={styles.body}>{item.body}</Text>}
+              {media ? (
+                <MediaMessage
+                  media={media}
+                  onPress={(mediaUri) =>
+                    setViewerMedia({
+                      uri: mediaUri,
+                      media,
+                      messageId: item.id,
+                      senderName: item.senderName,
+                      createdAt: item.createdAt,
+                      mine,
+                    })
+                  }
+                />
+              ) : (
+                <Text style={styles.body}>{item.body}</Text>
+              )}
               <View style={[styles.messageFooter, media && styles.mediaFooter]}>
                 <Text style={styles.messageTime}>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>
                 {mine && <Text accessibilityLabel={item.status === 'read' ? 'Read' : item.status === 'delivered' ? 'Delivered' : item.status === 'sent' ? 'Sent' : 'Pending'} style={[styles.tick, item.status === 'read' && styles.readTick]}>{item.status === 'read' || item.status === 'delivered' ? '✓✓' : item.status === 'sent' ? '✓' : '○'}</Text>}
@@ -215,10 +295,79 @@ export default function ConversationScreen() {
       {!!error && <Text style={styles.error}>{error}</Text>}
       <View style={styles.composer}><Pressable accessibilityLabel="Attach photo or video" disabled={sending} onPress={() => void attach()} style={styles.attach}><Paperclip size={23} color={colors.primary} /></Pressable><TextInput style={styles.input} placeholder="Message" placeholderTextColor={colors.muted} value={draft} onChangeText={onDraftChange} multiline maxLength={2000} /><Pressable accessibilityLabel="Send message" disabled={!draft.trim() || sending} onPress={() => void send()} style={[styles.send, (!draft.trim() || sending) && styles.disabled]}><Send size={20} color="#FFFFFF" /></Pressable></View>
     </KeyboardAvoidingView>
+
+    {viewerMedia && (
+      <Modal visible={!!viewerMedia} transparent={false} animationType="fade" onRequestClose={() => { setViewerMedia(null); setShowMenu(false); }}>
+        <SafeAreaView style={styles.viewerContainer}>
+          <View style={styles.viewerHeader}>
+            <Pressable onPress={() => { setViewerMedia(null); setShowMenu(false); }} style={styles.viewerHeaderBtn} accessibilityLabel="Back">
+              <ArrowLeft size={24} color="#FFFFFF" />
+            </Pressable>
+            <View style={styles.viewerTitleWrap}>
+              <Text style={styles.viewerTitle}>{viewerMedia.mine ? 'You' : (viewerMedia.senderName || activeTitle)}</Text>
+              <Text style={styles.viewerSubtitle}>
+                {new Date(viewerMedia.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}{' at '}{new Date(viewerMedia.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+              </Text>
+            </View>
+            <View style={styles.viewerActions}>
+              <Pressable onPress={() => void handleDownload(viewerMedia.uri)} style={styles.viewerActionBtn} accessibilityLabel="Save to device">
+                <Download size={22} color="#FFFFFF" />
+              </Pressable>
+              <Pressable onPress={() => void handleShare(viewerMedia.uri)} style={styles.viewerActionBtn} accessibilityLabel="Share">
+                <Share2 size={22} color="#FFFFFF" />
+              </Pressable>
+              <Pressable onPress={() => setShowMenu(true)} style={styles.viewerActionBtn} accessibilityLabel="More options">
+                <EllipsisVertical size={22} color="#FFFFFF" />
+              </Pressable>
+            </View>
+          </View>
+
+          <View style={styles.viewerBody}>
+            {viewerMedia.media.mediaKind === 'image' ? (
+              <Image source={{ uri: viewerMedia.uri }} style={styles.viewerImage} resizeMode="contain" />
+            ) : (
+              <InlineVideo uri={viewerMedia.uri} />
+            )}
+          </View>
+
+          {showMenu && (
+            <Modal visible={showMenu} transparent animationType="fade" onRequestClose={() => setShowMenu(false)}>
+              <Pressable style={styles.menuBackdrop} onPress={() => setShowMenu(false)}>
+                <View style={styles.menuCard}>
+                  <Text style={styles.menuHeading}>Photo Options</Text>
+                  <Pressable style={styles.menuOption} onPress={() => { setShowMenu(false); void handleDownload(viewerMedia.uri); }}>
+                    <View style={styles.menuIconWrap}><Download size={20} color={colors.primary} /></View>
+                    <View style={styles.menuTextWrap}>
+                      <Text style={styles.menuText}>Save to Gallery</Text>
+                      <Text style={styles.menuSubtext}>Save photo to your phone</Text>
+                    </View>
+                  </Pressable>
+                  <Pressable style={styles.menuOption} onPress={() => { setShowMenu(false); void handleShare(viewerMedia.uri); }}>
+                    <View style={styles.menuIconWrap}><Share2 size={20} color={colors.primary} /></View>
+                    <View style={styles.menuTextWrap}>
+                      <Text style={styles.menuText}>Share</Text>
+                      <Text style={styles.menuSubtext}>Send via WhatsApp, Telegram, etc.</Text>
+                    </View>
+                  </Pressable>
+                  <View style={styles.menuSeparator} />
+                  <Pressable style={styles.menuOption} onPress={() => { setShowMenu(false); handleDelete(viewerMedia.messageId); }}>
+                    <View style={[styles.menuIconWrap, { backgroundColor: '#FEE2E2' }]}><Trash2 size={20} color={colors.error} /></View>
+                    <View style={styles.menuTextWrap}>
+                      <Text style={[styles.menuText, { color: colors.error }]}>Delete</Text>
+                      <Text style={styles.menuSubtext}>Delete from this conversation</Text>
+                    </View>
+                  </Pressable>
+                </View>
+              </Pressable>
+            </Modal>
+          )}
+        </SafeAreaView>
+      </Modal>
+    )}
   </SafeAreaView>;
 }
 
-function MediaMessage({ media }: { media: EncryptedMedia }) {
+function MediaMessage({ media, onPress }: { media: EncryptedMedia; onPress: (uri: string) => void }) {
   const [uri, setUri] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -252,19 +401,23 @@ function MediaMessage({ media }: { media: EncryptedMedia }) {
   }
 
   if (uri) {
-    return media.mediaKind === 'image' ? (
-      <Image
-        source={{ uri }}
-        style={styles.mediaImage}
-        resizeMode="cover"
-        onError={(e) => {
-          console.warn('Image render failed:', e.nativeEvent);
-          setError('Could not display image.');
-          setUri(null);
-        }}
-      />
-    ) : (
-      <InlineVideo uri={uri} />
+    return (
+      <Pressable onPress={() => onPress(uri)} style={styles.mediaPressable}>
+        {media.mediaKind === 'image' ? (
+          <Image
+            source={{ uri }}
+            style={styles.mediaImage}
+            resizeMode="cover"
+            onError={(e) => {
+              console.warn('Image render failed:', e.nativeEvent);
+              setError('Could not display image.');
+              setUri(null);
+            }}
+          />
+        ) : (
+          <InlineVideo uri={uri} />
+        )}
+      </Pressable>
     );
   }
 
@@ -301,4 +454,24 @@ const styles = StyleSheet.create({
   mediaLoadingText: { color: colors.muted, fontSize: 12, fontWeight: '600' },
   mediaBubble: { paddingHorizontal: 6, paddingTop: 6, paddingBottom: 6 },
   mediaFooter: { marginRight: 6, marginTop: 4 },
+  mediaPressable: { borderRadius: 13, overflow: 'hidden' },
+  viewerContainer: { flex: 1, backgroundColor: '#000000' },
+  viewerHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 10, backgroundColor: 'rgba(0, 0, 0, 0.88)' },
+  viewerHeaderBtn: { padding: 8 },
+  viewerTitleWrap: { flex: 1, marginHorizontal: 12 },
+  viewerTitle: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
+  viewerSubtitle: { color: '#9CA3AF', fontSize: 12, marginTop: 2 },
+  viewerActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  viewerActionBtn: { padding: 8 },
+  viewerBody: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000000' },
+  viewerImage: { width: '100%', height: '100%' },
+  menuBackdrop: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.65)', justifyContent: 'flex-end' },
+  menuCard: { backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 20, paddingTop: 18, paddingBottom: Platform.OS === 'ios' ? 36 : 24 },
+  menuHeading: { color: colors.muted, fontSize: 12, fontWeight: '700', textTransform: 'uppercase', marginBottom: 14, letterSpacing: 0.5 },
+  menuOption: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, gap: 14 },
+  menuIconWrap: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center' },
+  menuTextWrap: { flex: 1 },
+  menuText: { color: colors.text, fontSize: 16, fontWeight: '600' },
+  menuSubtext: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  menuSeparator: { height: 1, backgroundColor: colors.border, marginVertical: 6 },
 });

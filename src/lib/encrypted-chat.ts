@@ -368,3 +368,25 @@ export async function markChatRead(target: ChatTarget) {
   const rows = await me.db.getAllAsync<{ id: string }>('SELECT id FROM message WHERE kind = ? AND targetId = ? AND senderId <> ? ORDER BY createdAt DESC LIMIT 100', target.kind, target.id, me.userId);
   if (rows.length) await socialApi('/chat/read', 'POST', { deviceId: me.deviceId, messageIds: rows.map(row => row.id) });
 }
+
+export async function deleteLocalMessage(messageId: string): Promise<void> {
+  const me = identity();
+  const row = await me.db.getFirstAsync<LocalMessage>('SELECT body FROM message WHERE id = ?', messageId);
+  if (row) {
+    const media = mediaFromBody(row.body);
+    if (media) {
+      try {
+        const encryptedFile = encryptedMediaFile(media.mediaId);
+        if (encryptedFile.exists) encryptedFile.delete();
+        const decryptedCache = new File(Paths.cache, `adda-media-${media.mediaId}.${media.mediaKind === 'image' ? 'jpg' : 'mp4'}`);
+        if (decryptedCache.exists) decryptedCache.delete();
+      } catch (e) {
+        console.warn('Could not clean up media files on delete:', e);
+      }
+    }
+  }
+  await me.db.runAsync('DELETE FROM message WHERE id = ?', messageId);
+  await me.db.runAsync('DELETE FROM message_receipt WHERE messageId = ?', messageId);
+  await me.db.runAsync('DELETE FROM message_recipient WHERE messageId = ?', messageId);
+  changed();
+}

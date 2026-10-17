@@ -21,6 +21,14 @@
       "expo-secure-store",
       "expo-sqlite",
       "expo-notifications",
+      "expo-sharing",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow ADDA to save photos to your gallery.",
+          "savePhotosPermission": "Allow ADDA to save photos to your gallery."
+        }
+      ],
       [
         "expo-camera",
         {
