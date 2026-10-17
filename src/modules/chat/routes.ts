@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Router, type RequestHandler } from 'express';
 import { auth } from '../auth/auth.js';
 import { pool } from '../../db/pool.js';
-import { publishEncryptedChatUpdate } from '../realtime/server.js';
+import { publishEncryptedChatUpdate, publishEncryptedEnvelope } from '../realtime/server.js';
 import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { env } from '../../config/env.js';
@@ -116,7 +116,7 @@ chatRoutes.post('/send', run(async (request, response) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const sender = await client.query('SELECT 1 FROM chat_device WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL', [senderDeviceId, senderId]);
+    const sender = await client.query<{ publicKey: string }>('SELECT "publicKey" FROM chat_device WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL', [senderDeviceId, senderId]);
     if (!sender.rowCount) { await client.query('ROLLBACK'); response.status(403).json({ error: 'Register this device first.' }); return; }
     const prior = await client.query<{ senderId: string }>('SELECT "senderId" FROM chat_sent_id WHERE "messageId" = $1', [messageId]);
     if (prior.rowCount) {
@@ -155,19 +155,42 @@ chatRoutes.post('/send', run(async (request, response) => {
         await client.query('ROLLBACK'); response.status(409).json({ error: 'Encrypted media upload is unavailable or already sent.' }); return;
       }
     }
-    await client.query('INSERT INTO chat_sent_id ("messageId", "senderId") VALUES ($1, $2)', [messageId, senderId]);
+    await client.query('INSERT INTO chat_sent_id ("messageId", "senderId") VALUES ($1, $2) ON CONFLICT ("messageId") DO NOTHING', [messageId, senderId]);
     if (mediaIds.length) await client.query('UPDATE chat_media SET "messageId" = $1 WHERE id = ANY($2::text[])', [messageId, mediaIds]);
     const activeRecipients = [...new Set(expected.map(row => row.userId))];
     for (const recipientId of activeRecipients) {
       await client.query('INSERT INTO chat_delivery_state ("messageId", "senderId", "recipientId") VALUES ($1, $2, $3)', [messageId, senderId, recipientId]);
     }
+    const envelopesToPublish: Array<{ userId: string; envelope: any }> = [];
+    const senderPublicKey = sender.rows[0]?.publicKey ?? '';
+    const nowIso = new Date().toISOString();
     if (expected.length) {
       await client.query('INSERT INTO chat_pending_payload ("messageId", "senderId", "senderDeviceId", kind, "targetId", ciphertext, nonce) VALUES ($1, $2, $3, $4, $5, $6, $7)',
         [messageId, senderId, senderDeviceId, target.kind, target.id, ciphertext, nonce]);
       for (const key of keys as KeyEnvelope[]) {
         const device = expected.find(row => row.deviceId === key.deviceId)!;
+        const deliveryId = randomUUID();
         await client.query('INSERT INTO chat_pending_key (id, "messageId", "recipientId", "recipientDeviceId", "wrappedKey", "wrapNonce") VALUES ($1, $2, $3, $4, $5, $6)',
-          [randomUUID(), messageId, device.userId, device.deviceId, key.wrappedKey, key.wrapNonce]);
+          [deliveryId, messageId, device.userId, device.deviceId, key.wrappedKey, key.wrapNonce]);
+        envelopesToPublish.push({
+          userId: device.userId,
+          envelope: {
+            deliveryId,
+            messageId,
+            senderId,
+            senderDeviceId,
+            senderPublicKey,
+            senderName: '',
+            kind: target.kind,
+            targetId: target.id,
+            ciphertext,
+            nonce,
+            wrappedKey: key.wrappedKey,
+            wrapNonce: key.wrapNonce,
+            recipientDeviceId: device.deviceId,
+            createdAt: nowIso,
+          }
+        });
       }
     }
     await client.query('COMMIT');
@@ -176,6 +199,9 @@ chatRoutes.post('/send', run(async (request, response) => {
     void pool.query<{ name: string }>('SELECT name FROM "user" WHERE id = $1', [senderId])
       .then(async result => {
         const senderName = result.rows[0]?.name ?? 'ADDA';
+        for (const item of envelopesToPublish) {
+          publishEncryptedEnvelope(item.userId, { ...item.envelope, senderName });
+        }
         if (!activeRecipients.length) return;
         if (target.kind === 'direct') {
           await sendEncryptedChatPush(activeRecipients, { kind: 'direct', id: senderId, name: senderName }, senderName);

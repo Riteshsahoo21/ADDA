@@ -54,6 +54,10 @@ export function publishEncryptedChatUpdate(userIds: string[]): void {
   if (userIds.length) io?.to([...new Set(userIds)].map(userRoom)).emit('chat:encrypted:update');
 }
 
+export function publishEncryptedEnvelope(userId: string, envelope: unknown): void {
+  io?.to(userRoom(userId)).emit('chat:encrypted:envelope', envelope);
+}
+
 export function attachRealtime(httpServer: HttpServer): Server {
   io = new Server(httpServer, {
     cors: { origin: env.corsOrigins, credentials: true },
