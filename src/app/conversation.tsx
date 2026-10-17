@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Sharing from 'expo-sharing';
-import * as MediaLibrary from 'expo-media-library';
+import * as MediaLibrary from 'expo-media-library/legacy';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
-import { ArrowLeft, Download, EllipsisVertical, LockKeyhole, Paperclip, Phone, Send, Share2, Trash2, Video, X } from 'lucide-react-native';
+import { ArrowLeft, Download, EllipsisVertical, LockKeyhole, Paperclip, Phone, Play, Send, Share2, Trash2, Video, X } from 'lucide-react-native';
 import { colors } from '@/constants/theme';
 import { socialApi, type ChatGroup, type OwnProfile, type PublicProfile } from '@/lib/social-api';
 import { getRealtimeSocket, type ChatTarget, type TypingEvent } from '@/lib/realtime';
@@ -204,17 +204,17 @@ export default function ConversationScreen() {
       Alert.alert('Compare chat keys', `${code}\n\nCompare this code with the other people in this chat through a trusted channel. If it differs, do not share sensitive messages.`);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not check chat keys.'); }
   };
-  const handleDownload = async (fileUri: string) => {
+  const handleDownload = async (fileUri: string, mediaKind: 'image' | 'video' = 'image') => {
     try {
       const permission = await MediaLibrary.requestPermissionsAsync();
       if (!permission.granted) {
-        Alert.alert('Permission needed', 'Please allow gallery access to save photos to your phone.');
+        Alert.alert('Permission needed', 'Please allow gallery access to save media to your phone.');
         return;
       }
       await MediaLibrary.saveToLibraryAsync(fileUri);
-      Alert.alert('Saved', 'Photo saved to your gallery!');
+      Alert.alert('Saved', `${mediaKind === 'video' ? 'Video' : 'Photo'} saved to your gallery!`);
     } catch (error) {
-      Alert.alert('Download failed', error instanceof Error ? error.message : 'Could not save photo.');
+      Alert.alert('Download failed', error instanceof Error ? error.message : 'Could not save media.');
     }
   };
 
@@ -227,14 +227,14 @@ export default function ConversationScreen() {
       }
       await Sharing.shareAsync(fileUri);
     } catch (error) {
-      Alert.alert('Share failed', error instanceof Error ? error.message : 'Could not share photo.');
+      Alert.alert('Share failed', error instanceof Error ? error.message : 'Could not share media.');
     }
   };
 
-  const handleDelete = (messageId: string) => {
+  const handleDelete = (messageId: string, mediaKind: 'image' | 'video' = 'image') => {
     Alert.alert(
       'Delete message',
-      'Are you sure you want to delete this photo?',
+      `Are you sure you want to delete this ${mediaKind === 'video' ? 'video' : 'photo'}?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -310,7 +310,7 @@ export default function ConversationScreen() {
               </Text>
             </View>
             <View style={styles.viewerActions}>
-              <Pressable onPress={() => void handleDownload(viewerMedia.uri)} style={styles.viewerActionBtn} accessibilityLabel="Save to device">
+              <Pressable onPress={() => void handleDownload(viewerMedia.uri, viewerMedia.media.mediaKind)} style={styles.viewerActionBtn} accessibilityLabel="Save to device">
                 <Download size={22} color="#FFFFFF" />
               </Pressable>
               <Pressable onPress={() => void handleShare(viewerMedia.uri)} style={styles.viewerActionBtn} accessibilityLabel="Share">
@@ -326,7 +326,7 @@ export default function ConversationScreen() {
             {viewerMedia.media.mediaKind === 'image' ? (
               <Image source={{ uri: viewerMedia.uri }} style={styles.viewerImage} resizeMode="contain" />
             ) : (
-              <InlineVideo uri={viewerMedia.uri} />
+              <FullScreenVideo uri={viewerMedia.uri} />
             )}
           </View>
 
@@ -334,12 +334,12 @@ export default function ConversationScreen() {
             <Modal visible={showMenu} transparent animationType="fade" onRequestClose={() => setShowMenu(false)}>
               <Pressable style={styles.menuBackdrop} onPress={() => setShowMenu(false)}>
                 <View style={styles.menuCard}>
-                  <Text style={styles.menuHeading}>Photo Options</Text>
-                  <Pressable style={styles.menuOption} onPress={() => { setShowMenu(false); void handleDownload(viewerMedia.uri); }}>
+                  <Text style={styles.menuHeading}>{viewerMedia.media.mediaKind === 'video' ? 'Video Options' : 'Photo Options'}</Text>
+                  <Pressable style={styles.menuOption} onPress={() => { setShowMenu(false); void handleDownload(viewerMedia.uri, viewerMedia.media.mediaKind); }}>
                     <View style={styles.menuIconWrap}><Download size={20} color={colors.primary} /></View>
                     <View style={styles.menuTextWrap}>
                       <Text style={styles.menuText}>Save to Gallery</Text>
-                      <Text style={styles.menuSubtext}>Save photo to your phone</Text>
+                      <Text style={styles.menuSubtext}>Save {viewerMedia.media.mediaKind === 'video' ? 'video' : 'photo'} to your phone</Text>
                     </View>
                   </Pressable>
                   <Pressable style={styles.menuOption} onPress={() => { setShowMenu(false); void handleShare(viewerMedia.uri); }}>
@@ -350,7 +350,7 @@ export default function ConversationScreen() {
                     </View>
                   </Pressable>
                   <View style={styles.menuSeparator} />
-                  <Pressable style={styles.menuOption} onPress={() => { setShowMenu(false); handleDelete(viewerMedia.messageId); }}>
+                  <Pressable style={styles.menuOption} onPress={() => { setShowMenu(false); handleDelete(viewerMedia.messageId, viewerMedia.media.mediaKind); }}>
                     <View style={[styles.menuIconWrap, { backgroundColor: '#FEE2E2' }]}><Trash2 size={20} color={colors.error} /></View>
                     <View style={styles.menuTextWrap}>
                       <Text style={[styles.menuText, { color: colors.error }]}>Delete</Text>
@@ -415,7 +415,7 @@ function MediaMessage({ media, onPress }: { media: EncryptedMedia; onPress: (uri
             }}
           />
         ) : (
-          <InlineVideo uri={uri} />
+          <VideoThumbnailBubble uri={uri} />
         )}
       </Pressable>
     );
@@ -438,9 +438,42 @@ function MediaMessage({ media, onPress }: { media: EncryptedMedia; onPress: (uri
   );
 }
 
-function InlineVideo({ uri }: { uri: string }) {
-  const player = useVideoPlayer(uri);
-  return <VideoView player={player} nativeControls style={styles.mediaImage} />;
+function VideoThumbnailBubble({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri, p => {
+    p.loop = false;
+    p.pause();
+  });
+
+  return (
+    <View style={styles.videoBubbleContainer} pointerEvents="none">
+      <VideoView
+        player={player}
+        nativeControls={false}
+        contentFit="cover"
+        style={styles.mediaImage}
+      />
+      <View style={styles.videoPlayOverlay}>
+        <View style={styles.videoPlayBtn}>
+          <Play size={24} color="#FFFFFF" fill="#FFFFFF" style={{ marginLeft: 3 }} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function FullScreenVideo({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri, p => {
+    p.loop = false;
+    p.play();
+  });
+  return (
+    <VideoView
+      player={player}
+      nativeControls
+      contentFit="contain"
+      style={styles.viewerVideo}
+    />
+  );
 }
 
 const styles = StyleSheet.create({
@@ -465,6 +498,10 @@ const styles = StyleSheet.create({
   viewerActionBtn: { padding: 8 },
   viewerBody: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000000' },
   viewerImage: { width: '100%', height: '100%' },
+  viewerVideo: { width: '100%', height: '100%' },
+  videoBubbleContainer: { width: 230, height: 230, borderRadius: 13, overflow: 'hidden', position: 'relative', backgroundColor: '#111827' },
+  videoPlayOverlay: { ...(StyleSheet.absoluteFill as object), justifyContent: 'center', alignItems: 'center' },
+  videoPlayBtn: { width: 52, height: 52, borderRadius: 26, backgroundColor: 'rgba(0, 0, 0, 0.58)', justifyContent: 'center', alignItems: 'center', borderWidth: 1.5, borderColor: 'rgba(255, 255, 255, 0.45)' },
   menuBackdrop: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.65)', justifyContent: 'flex-end' },
   menuCard: { backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 20, paddingTop: 18, paddingBottom: Platform.OS === 'ios' ? 36 : 24 },
   menuHeading: { color: colors.muted, fontSize: 12, fontWeight: '700', textTransform: 'uppercase', marginBottom: 14, letterSpacing: 0.5 },
