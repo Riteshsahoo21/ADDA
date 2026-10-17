@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -127,13 +127,14 @@ export default function ConversationScreen() {
   };
   const attach = async () => {
     if (!target || sending) return;
-    const selection = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images', 'videos'], allowsMultipleSelection: false, quality: 0.85 });
+    const selection = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images', 'videos'], allowsMultipleSelection: false, quality: 0.65 });
     if (selection.canceled || !selection.assets[0]) return;
     const asset = selection.assets[0];
     setSending(true); setError('');
     try {
       const me = await socialApi<OwnProfile>('/me');
-      await sendEncryptedMedia(target, asset.uri, asset.type === 'video' ? 'video' : 'image', asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg'), me.name);
+      const sent = await sendEncryptedMedia(target, asset.uri, asset.type === 'video' ? 'video' : 'image', asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg'), me.name);
+      setMessages(current => current.some(item => item.id === sent.id) ? current : [...current, sent]);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not share encrypted media.'); }
     finally { setSending(false); }
   };
@@ -171,12 +172,60 @@ export default function ConversationScreen() {
 
 function MediaMessage({ media }: { media: EncryptedMedia }) {
   const [uri, setUri] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  useEffect(() => () => { if (uri) releaseDecryptedMedia(uri); }, [uri]);
-  if (uri) return media.mediaKind === 'image' ? <Image source={{ uri }} style={styles.mediaImage} resizeMode="contain" /> : <InlineVideo uri={uri} />;
-  return <Pressable onPress={() => { void openEncryptedMedia(media).then(setUri).catch(cause => setError(cause instanceof Error ? cause.message : 'Could not open media.')); }} style={styles.mediaButton}>
-    <Text style={styles.mediaLabel}>{error || `Tap to open ${media.mediaKind === 'image' ? 'photo' : 'video'}`}</Text>
-  </Pressable>;
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    openEncryptedMedia(media)
+      .then(fileUri => {
+        if (active) {
+          setUri(fileUri);
+          setLoading(false);
+        }
+      })
+      .catch(cause => {
+        if (active) {
+          setError(cause instanceof Error ? cause.message : 'Could not load media.');
+          setLoading(false);
+        }
+      });
+    return () => { active = false; };
+  }, [media.mediaId]);
+
+  if (loading) {
+    return (
+      <View style={styles.mediaLoading}>
+        <ActivityIndicator size="small" color={colors.primary} />
+        <Text style={styles.mediaLoadingText}>Loading {media.mediaKind}...</Text>
+      </View>
+    );
+  }
+
+  if (uri) {
+    return media.mediaKind === 'image' ? (
+      <Image source={{ uri }} style={styles.mediaImage} resizeMode="cover" />
+    ) : (
+      <InlineVideo uri={uri} />
+    );
+  }
+
+  return (
+    <Pressable
+      onPress={() => {
+        setLoading(true);
+        setError('');
+        openEncryptedMedia(media)
+          .then(setUri)
+          .catch(cause => setError(cause instanceof Error ? cause.message : 'Could not load media.'))
+          .finally(() => setLoading(false));
+      }}
+      style={styles.mediaButton}
+    >
+      <Text style={styles.mediaLabel}>{error || `Tap to retry ${media.mediaKind}`}</Text>
+    </Pressable>
+  );
 }
 
 function InlineVideo({ uri }: { uri: string }) {
@@ -190,5 +239,7 @@ const styles = StyleSheet.create({
   bubble: { maxWidth: '83%', borderRadius: 17, paddingHorizontal: 13, paddingVertical: 10, minWidth: 90 }, myBubble: { backgroundColor: colors.primarySoft, alignSelf: 'flex-end', borderBottomRightRadius: 4 }, theirBubble: { backgroundColor: colors.surface, alignSelf: 'flex-start', borderBottomLeftRadius: 4, borderWidth: 1, borderColor: colors.border }, sender: { color: colors.primaryDark, fontWeight: '800', fontSize: 12, marginBottom: 4 }, body: { color: colors.text, fontSize: 15, lineHeight: 20 }, messageTime: { color: colors.muted, fontSize: 10, alignSelf: 'flex-end', marginTop: 4 },
   typingBubble: { alignSelf: 'flex-start', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 17, borderBottomLeftRadius: 4, paddingHorizontal: 15, paddingVertical: 12 },
   error: { color: colors.error, paddingHorizontal: 17, paddingVertical: 6 }, composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 10, paddingHorizontal: 14, paddingVertical: 10, backgroundColor: colors.surface }, attach: { width: 34, height: 44, alignItems: 'center', justifyContent: 'center' }, input: { flex: 1, minHeight: 44, maxHeight: 120, borderRadius: 22, paddingHorizontal: 17, paddingVertical: 10, backgroundColor: colors.surfaceRaised, color: colors.text, fontSize: 15 }, send: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' }, disabled: { opacity: 0.45 },
-  messageFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 4, marginTop: 4 }, tick: { color: colors.muted, fontSize: 12, fontWeight: '800' }, readTick: { color: '#2897D5' }, mediaButton: { minWidth: 160, minHeight: 80, justifyContent: 'center', alignItems: 'center' }, mediaLabel: { color: colors.primary, fontSize: 13, fontWeight: '700' }, mediaImage: { width: 220, height: 220, borderRadius: 8 },
+  messageFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 4, marginTop: 4 }, tick: { color: colors.muted, fontSize: 12, fontWeight: '800' }, readTick: { color: '#2897D5' }, mediaButton: { minWidth: 160, minHeight: 80, justifyContent: 'center', alignItems: 'center' }, mediaLabel: { color: colors.primary, fontSize: 13, fontWeight: '700' }, mediaImage: { width: 220, height: 220, borderRadius: 12, backgroundColor: '#111827' },
+  mediaLoading: { width: 220, height: 160, borderRadius: 12, backgroundColor: colors.surfaceRaised, justifyContent: 'center', alignItems: 'center', gap: 8 },
+  mediaLoadingText: { color: colors.muted, fontSize: 12, fontWeight: '600' },
 });

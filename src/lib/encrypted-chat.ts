@@ -202,10 +202,16 @@ export async function sendEncryptedMedia(target: ChatTarget, uri: string, mediaK
   if (source.size < 1 || source.size > 25 * 1024 * 1024 - 16) throw new Error('Choose an image or video under 25 MB.');
   const key = nacl.randomBytes(nacl.secretbox.keyLength);
   const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
-  const encrypted = nacl.secretbox(await source.bytes(), nonce, key);
+  const sourceBytes = await source.bytes();
+  const encrypted = nacl.secretbox(sourceBytes, nonce, key);
   const upload = await socialApi<{ mediaId: string; url: string; contentType: string }>('/chat/media/upload', 'POST',
     { target, mediaKind, contentLength: encrypted.byteLength });
   encryptedMediaFile(upload.mediaId).write(encrypted);
+
+  // Cache decrypted file immediately so sender sees preview with zero delay
+  const decryptedCache = new File(Paths.cache, `adda-media-${upload.mediaId}.${mediaKind === 'image' ? 'jpg' : 'mp4'}`);
+  decryptedCache.write(sourceBytes);
+
   const encryptedFile = new File(Paths.cache, `adda-encrypted-upload-${upload.mediaId}`);
   encryptedFile.write(encrypted);
   try {
@@ -230,9 +236,8 @@ export async function openEncryptedMedia(media: EncryptedMedia): Promise<string>
 }
 
 function encryptedMediaFile(mediaId: string) { return new File(Paths.document, `adda-media-${mediaId}.enc`); }
-export function releaseDecryptedMedia(uri: string) {
-  const file = new File(uri);
-  if (file.name.startsWith('adda-media-') && file.exists) file.delete();
+export function releaseDecryptedMedia(_uri: string) {
+  // Retain decrypted file in cache so scrolling through chat doesn't delete and re-decrypt previews
 }
 
 function clearDecryptedMediaCache() {
