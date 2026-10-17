@@ -42,7 +42,7 @@ async function memberIds(userId: string, target: Target): Promise<string[] | nul
     const result = await pool.query('SELECT 1 FROM contact WHERE "userA" = $1 AND "userB" = $2', [a, b]);
     return result.rowCount ? [userId, target.id] : null;
   }
-  const result = await pool.query<{ userId: string }>('SELECT "userId" FROM chat_group_member WHERE "groupId" = $1', [target.id]);
+  const result = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1', [target.id]);
   return result.rows.some(row => row.userId === userId) ? result.rows.map(row => row.userId) : null;
 }
 
@@ -138,8 +138,15 @@ chatRoutes.post('/send', run(async (request, response) => {
     if (new Set(actualIds).size !== expected.length || expected.some(row => !actualIds.includes(row.deviceId))) {
       await client.query('ROLLBACK'); response.status(409).json({ error: 'Device keys changed. Refresh keys and encrypt this message again.' }); return;
     }
-    if (members.some(id => id !== senderId && !devices.rows.some(row => row.userId === id))) {
-      await client.query('ROLLBACK'); response.status(409).json({ error: 'A recipient must open the updated app before encrypted messages can be sent.' }); return;
+    if (target.kind === 'direct') {
+      if (members.some(id => id !== senderId && !devices.rows.some(row => row.userId === id))) {
+        await client.query('ROLLBACK'); response.status(409).json({ error: 'A recipient must open the updated app before encrypted messages can be sent.' }); return;
+      }
+    } else {
+      const otherMembersWithDevices = devices.rows.some(row => row.userId !== senderId);
+      if (!otherMembersWithDevices) {
+        await client.query('ROLLBACK'); response.status(409).json({ error: 'No group members have registered a device to receive encrypted messages yet.' }); return;
+      }
     }
     if (mediaIds.length) {
       const media = await client.query<{ id: string }>('SELECT id FROM chat_media WHERE id = ANY($1::text[]) AND "ownerId" = $2 AND kind = $3 AND "targetId" = $4 AND confirmed = true AND "messageId" IS NULL FOR UPDATE',
@@ -150,7 +157,8 @@ chatRoutes.post('/send', run(async (request, response) => {
     }
     await client.query('INSERT INTO chat_sent_id ("messageId", "senderId") VALUES ($1, $2)', [messageId, senderId]);
     if (mediaIds.length) await client.query('UPDATE chat_media SET "messageId" = $1 WHERE id = ANY($2::text[])', [messageId, mediaIds]);
-    for (const recipientId of members.filter(id => id !== senderId)) {
+    const activeRecipients = [...new Set(expected.map(row => row.userId))];
+    for (const recipientId of activeRecipients) {
       await client.query('INSERT INTO chat_delivery_state ("messageId", "senderId", "recipientId") VALUES ($1, $2, $3)', [messageId, senderId, recipientId]);
     }
     if (expected.length) {
@@ -163,19 +171,18 @@ chatRoutes.post('/send', run(async (request, response) => {
       }
     }
     await client.query('COMMIT');
-    response.status(201).json({ messageId, recipients: members.filter(id => id !== senderId) });
-    publishEncryptedChatUpdate(members);
+    response.status(201).json({ messageId, recipients: activeRecipients });
+    publishEncryptedChatUpdate(activeRecipients);
     void pool.query<{ name: string }>('SELECT name FROM "user" WHERE id = $1', [senderId])
       .then(async result => {
         const senderName = result.rows[0]?.name ?? 'ADDA';
-        const recipients = members.filter(id => id !== senderId);
-        if (!recipients.length) return;
+        if (!activeRecipients.length) return;
         if (target.kind === 'direct') {
-          await sendEncryptedChatPush(recipients, { kind: 'direct', id: senderId, name: senderName }, senderName);
+          await sendEncryptedChatPush(activeRecipients, { kind: 'direct', id: senderId, name: senderName }, senderName);
         } else {
           const group = await pool.query<{ name: string }>('SELECT name FROM "chat_group" WHERE id = $1', [target.id]);
           const groupName = group.rows[0]?.name ?? 'Group';
-          await sendEncryptedChatPush(recipients, { kind: 'group', id: target.id, name: groupName }, senderName, groupName);
+          await sendEncryptedChatPush(activeRecipients, { kind: 'group', id: target.id, name: groupName }, senderName, groupName);
         }
       })
       .catch(error => console.warn('[ADDA] Chat push failed:', error));
@@ -318,10 +325,12 @@ chatRoutes.get('/media/:id/download', run(async (request, response) => {
   if (!item || !item.confirmed) { response.status(404).json({ error: 'Media unavailable.' }); return; }
   const callerId = response.locals.userId as string;
   let allowed = false;
-  if (item.kind === 'direct') {
-    allowed = callerId === item.ownerId || callerId === item.targetId;
+  if (callerId === item.ownerId) {
+    allowed = true;
+  } else if (item.kind === 'direct') {
+    allowed = callerId === item.targetId;
   } else if (item.kind === 'group') {
-    const member = await pool.query('SELECT 1 FROM chat_group_member WHERE "groupId" = $1 AND "userId" = $2', [item.targetId, callerId]);
+    const member = await pool.query('SELECT 1 FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2', [item.targetId, callerId]);
     allowed = (member.rowCount ?? 0) > 0;
   }
   if (!allowed) { response.status(403).json({ error: 'Media unavailable.' }); return; }
