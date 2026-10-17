@@ -42,15 +42,30 @@ export async function sendCallPush(userIds: string[], call: { id: string; caller
   }
 }
 
-export async function sendEncryptedChatPush(userIds: string[], target: { kind: 'direct' | 'group'; id: string }, senderName: string) {
+export async function sendEncryptedChatPush(
+  userIds: string[],
+  target: { kind: 'direct' | 'group'; id: string; name?: string },
+  senderName: string,
+  groupName?: string,
+) {
   if (!enabled || !userIds.length) return;
   const result = await pool.query<{ token: string }>('SELECT token FROM push_device WHERE "userId" = ANY($1::text[])', [userIds]);
+  const chatName = target.name || (target.kind === 'group' ? (groupName || 'Group') : senderName);
+  const title = target.kind === 'group' ? chatName : senderName;
+  const body = target.kind === 'group' ? `${senderName}: New encrypted message` : 'New encrypted message';
   for (let start = 0; start < result.rows.length; start += 500) {
     const tokens = result.rows.slice(start, start + 500).map(row => row.token);
     const sent = await getMessaging().sendEachForMulticast({
       tokens,
-      notification: { title: senderName, body: 'New encrypted message' },
-      data: { kind: 'chat', chatKind: target.kind, chatId: target.id },
+      notification: { title, body },
+      data: {
+        kind: 'chat',
+        chatKind: target.kind,
+        chatId: target.id,
+        chatName,
+        name: chatName,
+        senderName,
+      },
       android: { priority: 'high', notification: { channelId: 'adda_messages', priority: 'high' } },
     });
     const stale = tokens.filter((_token, index) => ['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(sent.responses[index].error?.code ?? ''));

@@ -166,7 +166,18 @@ chatRoutes.post('/send', run(async (request, response) => {
     response.status(201).json({ messageId, recipients: members.filter(id => id !== senderId) });
     publishEncryptedChatUpdate(members);
     void pool.query<{ name: string }>('SELECT name FROM "user" WHERE id = $1', [senderId])
-      .then(result => sendEncryptedChatPush(members.filter(id => id !== senderId), target, result.rows[0]?.name ?? 'ADDA'))
+      .then(async result => {
+        const senderName = result.rows[0]?.name ?? 'ADDA';
+        const recipients = members.filter(id => id !== senderId);
+        if (!recipients.length) return;
+        if (target.kind === 'direct') {
+          await sendEncryptedChatPush(recipients, { kind: 'direct', id: senderId, name: senderName }, senderName);
+        } else {
+          const group = await pool.query<{ name: string }>('SELECT name FROM "chat_group" WHERE id = $1', [target.id]);
+          const groupName = group.rows[0]?.name ?? 'Group';
+          await sendEncryptedChatPush(recipients, { kind: 'group', id: target.id, name: groupName }, senderName, groupName);
+        }
+      })
       .catch(error => console.warn('[ADDA] Chat push failed:', error));
   } catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
