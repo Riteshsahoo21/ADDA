@@ -6,7 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
 import { ArrowLeft, LockKeyhole, Paperclip, Phone, Send, Video } from 'lucide-react-native';
 import { colors } from '@/constants/theme';
-import { socialApi, type OwnProfile } from '@/lib/social-api';
+import { socialApi, type ChatGroup, type OwnProfile, type PublicProfile } from '@/lib/social-api';
 import { getRealtimeSocket, type ChatTarget, type TypingEvent } from '@/lib/realtime';
 import { chatSafetyCode, initEncryptedChat, localMessages, markChatRead, mediaFromBody, onChatChanged, openEncryptedMedia, releaseDecryptedMedia, sendEncryptedMedia, sendEncryptedMessage, syncEncryptedChat, type EncryptedMedia, type LocalMessage } from '@/lib/encrypted-chat';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
@@ -14,6 +14,7 @@ import { TypingDots } from '@/components/ui/TypingDots';
 
 export default function ConversationScreen() {
   const { kind, id, name } = useLocalSearchParams<{ kind?: string; id?: string; name?: string }>();
+  const [chatTitle, setChatTitle] = useState(name || '');
   const [selfId, setSelfId] = useState('');
   const [selfName, setSelfName] = useState('');
   const [messages, setMessages] = useState<LocalMessage[]>([]);
@@ -29,6 +30,11 @@ export default function ConversationScreen() {
   const typingRevision = useRef(0);
   const valid = (kind === 'direct' || kind === 'group') && typeof id === 'string' && id.length > 0;
   const target: ChatTarget | null = useMemo(() => valid ? { kind: kind as ChatTarget['kind'], id: id as string } : null, [valid, kind, id]);
+
+  useEffect(() => {
+    if (name) setChatTitle(name);
+  }, [name]);
+
   const load = useCallback(async () => {
     if (!target) return;
     try {
@@ -36,13 +42,37 @@ export default function ConversationScreen() {
       await initEncryptedChat(me.id);
       setSelfId(me.id);
       setSelfName(me.name);
-      setMessages(await localMessages(target));
+      const local = await localMessages(target);
+      setMessages(local);
+      if (!name) {
+        if (target.kind === 'direct') {
+          const fromOther = local.find(m => m.senderId === target.id && m.senderName);
+          if (fromOther?.senderName) {
+            setChatTitle(fromOther.senderName);
+          } else {
+            void socialApi<PublicProfile[]>('/contacts').then(contacts => {
+              const match = contacts.find(c => c.id === target.id);
+              if (match?.name) setChatTitle(match.name);
+            }).catch(() => {});
+          }
+        } else if (target.kind === 'group') {
+          void socialApi<ChatGroup[]>('/groups').then(groups => {
+            const match = groups.find(g => g.id === target.id);
+            if (match?.name) setChatTitle(match.name);
+          }).catch(() => {});
+        }
+      }
       try { await syncEncryptedChat(); } catch (e) { console.warn('Sync warning:', e); }
-      setMessages(await localMessages(target));
+      const refreshed = await localMessages(target);
+      setMessages(refreshed);
+      if (!name && target.kind === 'direct') {
+        const fromOther = refreshed.find(m => m.senderId === target.id && m.senderName);
+        if (fromOther?.senderName) setChatTitle(fromOther.senderName);
+      }
       await markChatRead(target).catch(() => {});
       setError('');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not load messages.'); }
-  }, [target]);
+  }, [target, name]);
   useFocusEffect(useCallback(() => { void load(); }, [load]));
   useEffect(() => onChatChanged(() => { if (target) void localMessages(target).then(setMessages).catch(() => {}); }), [target]);
   useEffect(() => {
@@ -140,12 +170,18 @@ export default function ConversationScreen() {
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not share encrypted media.'); }
     finally { setSending(false); }
   };
+  const handleBack = () => {
+    if (router.canGoBack()) router.back();
+    else router.replace('/home');
+  };
+  const activeTitle = chatTitle || name || (kind === 'group' ? 'Group' : 'Chat');
+
   const startCall = async (media: CallMedia) => {
     if (!target) return;
     setError('');
     try {
       const call = await callRequest<CallInfo>('call:start', { target, media });
-      router.push({ pathname: '/call', params: { callId: call.id, role: call.callerId === selfId ? 'caller' : 'callee', name: name || 'ADDA call' } } as unknown as Href);
+      router.push({ pathname: '/call', params: { callId: call.id, role: call.callerId === selfId ? 'caller' : 'callee', name: activeTitle } } as unknown as Href);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not start call.'); }
   };
   const showSafetyCode = async () => {
@@ -156,7 +192,7 @@ export default function ConversationScreen() {
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not check chat keys.'); }
   };
   return <SafeAreaView style={styles.safe}>
-    <View style={styles.top}><Pressable accessibilityLabel="Back" onPress={() => router.back()} style={styles.back}><ArrowLeft size={24} color={colors.text} /></Pressable><View style={styles.avatar}><Text style={styles.initial}>{name?.[0]?.toUpperCase() || '?'}</Text></View><View style={styles.titleWrap}><Text style={styles.title}>{name || 'Chat'}</Text><View style={styles.subtitleRow}><Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]}>{Object.keys(typingNames).length ? `${Object.values(typingNames).slice(0, 2).join(', ')} typing` : kind === 'group' ? 'Group' : 'Contact'}</Text>{Object.keys(typingNames).length > 0 && <TypingDots />}</View></View><Pressable accessibilityLabel="Compare encryption keys" onPress={() => void showSafetyCode()} style={styles.callAction}><LockKeyhole size={19} color={colors.primary} /></Pressable><Pressable accessibilityLabel="Voice call" onPress={() => void startCall('audio')} style={styles.callAction}><Phone size={20} color={colors.primary} /></Pressable><Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}><Video size={22} color={colors.primary} /></Pressable></View>
+    <View style={styles.top}><Pressable accessibilityLabel="Back" onPress={handleBack} style={styles.back}><ArrowLeft size={24} color={colors.text} /></Pressable><View style={styles.avatar}><Text style={styles.initial}>{activeTitle[0]?.toUpperCase() || '?'}</Text></View><View style={styles.titleWrap}><Text style={styles.title}>{activeTitle}</Text><View style={styles.subtitleRow}><Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]}>{Object.keys(typingNames).length ? `${Object.values(typingNames).slice(0, 2).join(', ')} typing` : kind === 'group' ? 'Group' : 'Contact'}</Text>{Object.keys(typingNames).length > 0 && <TypingDots />}</View></View><Pressable accessibilityLabel="Compare encryption keys" onPress={() => void showSafetyCode()} style={styles.callAction}><LockKeyhole size={19} color={colors.primary} /></Pressable><Pressable accessibilityLabel="Voice call" onPress={() => void startCall('audio')} style={styles.callAction}><Phone size={20} color={colors.primary} /></Pressable><Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}><Video size={22} color={colors.primary} /></Pressable></View>
     <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 20 : 0}>
       <ScrollView ref={list} contentContainerStyle={styles.messages} onContentSizeChange={() => list.current?.scrollToEnd({ animated: false })}>
         {messages.length === 0 && !error && <View style={styles.empty}><Text style={styles.emptyTitle}>Start the conversation</Text><Text style={styles.emptyText}>New messages are encrypted and saved on this phone.</Text></View>}

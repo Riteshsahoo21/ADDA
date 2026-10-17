@@ -3,6 +3,7 @@ import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { router } from 'expo-router';
+import * as Notifications from 'expo-notifications';
 import { AddaLogo } from '@/components/ui/AddaLogo';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
@@ -37,7 +38,14 @@ export default function WelcomeScreen() {
     animation.start(({ finished }) => {
       if (finished) {
         setPercent(100);
-        navigationTimer = setTimeout(() => router.replace(username ? '/home' : '/login'), 180);
+        navigationTimer = setTimeout(async () => {
+          const last = await Notifications.getLastNotificationResponseAsync().catch(() => null);
+          const data = last?.notification?.request?.content?.data;
+          if (data?.kind === 'chat' || data?.kind === 'call') {
+            return;
+          }
+          router.replace(username ? '/home' : '/login');
+        }, 180);
       }
     });
 

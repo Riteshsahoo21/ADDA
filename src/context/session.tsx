@@ -104,7 +104,19 @@ export function SessionProvider({ children }: PropsWithChildren) {
     const openCall = (response: Notifications.NotificationResponse) => {
       const data = response.notification.request.content.data;
       if (data?.kind === 'chat' && (data.chatKind === 'direct' || data.chatKind === 'group') && typeof data.chatId === 'string') {
-        router.push({ pathname: '/conversation', params: { kind: data.chatKind, id: data.chatId } } as unknown as Href);
+        const chatName = (typeof data.chatName === 'string' && data.chatName) ||
+                         (typeof data.name === 'string' && data.name) ||
+                         (typeof response.notification.request.content.title === 'string' && response.notification.request.content.title !== 'ADDA' ? response.notification.request.content.title : '');
+        void Notifications.clearLastNotificationResponseAsync();
+        router.replace('/home');
+        router.push({
+          pathname: '/conversation',
+          params: {
+            kind: data.chatKind,
+            id: data.chatId,
+            ...(chatName ? { name: chatName } : {}),
+          },
+        } as unknown as Href);
         return;
       }
       if (data?.kind !== 'call' || typeof data.callId !== 'string') return;
@@ -112,6 +124,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
       openedNotificationCall.current = data.callId;
       setIncomingCall(current => current?.id === data.callId ? null : current);
       void Notifications.clearLastNotificationResponseAsync();
+      router.replace('/home');
       router.push({ pathname: '/call', params: { callId: data.callId, role: 'callee', name: typeof data.callerName === 'string' ? data.callerName : 'ADDA call' } } as unknown as Href);
     };
     void Notifications.getLastNotificationResponseAsync().then(response => { if (response) openCall(response); });
