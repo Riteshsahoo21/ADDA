@@ -7,10 +7,12 @@ import * as SecureStore from 'expo-secure-store';
 import { disconnectRealtime, getRealtimeSocket } from '@/lib/realtime';
 import { type CallInfo } from '@/lib/calls';
 import { router, type Href } from 'expo-router';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { AppState, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors } from '@/constants/theme';
 import * as Notifications from 'expo-notifications';
 import { registerCallNotifications, showSocketCallNotification, unregisterCallNotifications } from '@/lib/push-notifications';
+import { closeEncryptedChat, initEncryptedChat, syncEncryptedChat } from '@/lib/encrypted-chat';
+import { socialApi, type OwnProfile } from '@/lib/social-api';
 
 type Session = {
   username: string | null;
@@ -54,6 +56,24 @@ export function SessionProvider({ children }: PropsWithChildren) {
     return () => disconnectRealtime();
   }, [username]);
   useEffect(() => {
+    if (!username) { void closeEncryptedChat(); return; }
+    let active = true;
+    let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
+    const sync = () => { void syncEncryptedChat().catch(error => console.warn('Encrypted chat sync unavailable:', error)); };
+    void socialApi<OwnProfile>('/me').then(async me => {
+      if (!active) return;
+      await initEncryptedChat(me.id);
+      if (!active) return;
+      sync();
+      live = await getRealtimeSocket();
+      if (!active) return;
+      live.on('chat:encrypted:update', sync);
+      live.on('connect', sync);
+    }).catch(error => console.warn('Encrypted chat unavailable:', error));
+    const appState = AppState.addEventListener('change', state => { if (state === 'active') sync(); });
+    return () => { active = false; appState.remove(); live?.off('chat:encrypted:update', sync); live?.off('connect', sync); };
+  }, [username]);
+  useEffect(() => {
     if (!username) return;
     let active = true;
     let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
@@ -83,6 +103,10 @@ export function SessionProvider({ children }: PropsWithChildren) {
     void registerCallNotifications().catch(error => console.warn('Call notifications unavailable:', error));
     const openCall = (response: Notifications.NotificationResponse) => {
       const data = response.notification.request.content.data;
+      if (data?.kind === 'chat' && (data.chatKind === 'direct' || data.chatKind === 'group') && typeof data.chatId === 'string') {
+        router.push({ pathname: '/conversation', params: { kind: data.chatKind, id: data.chatId } } as unknown as Href);
+        return;
+      }
       if (data?.kind !== 'call' || typeof data.callId !== 'string') return;
       if (openedNotificationCall.current === data.callId) return;
       openedNotificationCall.current = data.callId;

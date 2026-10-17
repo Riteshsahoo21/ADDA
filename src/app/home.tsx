@@ -13,6 +13,7 @@ import type { TypingEvent } from '@/lib/realtime';
 import { TypingDots } from '@/components/ui/TypingDots';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { type AvatarBody } from '@/three/player/avatarStyle';
+import { initEncryptedChat, localPreviews, onChatChanged, previewBody } from '@/lib/encrypted-chat';
 
 const avatars: { body: AvatarBody; label: string }[] = [
   { body: 'man', label: 'Indian Man' }, { body: 'uncle', label: 'Uncle' },
@@ -44,6 +45,21 @@ export default function HomeScreen() {
   const [sheetError, setSheetError] = useState('');
   const [typing, setTyping] = useState<Record<string, Record<string, string>>>({});
   const typingExpiry = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const updateLocalPreviews = useCallback(async () => {
+    try {
+      const previews = await localPreviews();
+      const byChat = new Map(previews.map(item => [`${item.kind}:${item.targetId}`, item]));
+      setContacts(current => current.map(item => {
+        const preview = byChat.get(`direct:${item.id}`);
+        return { ...item, lastMessage: preview ? previewBody(preview.body) : null, lastAt: preview?.createdAt ?? null };
+      }));
+      setGroups(current => current.map(item => {
+        const preview = byChat.get(`group:${item.id}`);
+        return { ...item, lastMessage: preview ? previewBody(preview.body) : null, lastAt: preview?.createdAt ?? null };
+      }));
+    } catch { /* Chat storage may still be starting. */ }
+  }, []);
+  useEffect(() => onChatChanged(() => { void updateLocalPreviews(); }), [updateLocalPreviews]);
 
   useEffect(() => { void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP); }, []);
   useEffect(() => { if (!username) router.replace('/login'); }, [username]);
@@ -56,7 +72,14 @@ export default function HomeScreen() {
         socialApi<PublicProfile[]>('/people'), socialApi<ChatGroup[]>('/groups'),
         socialApi<FriendRequest[]>('/friend-requests'),
       ]);
-      setProfile(me); setContacts(friends); setPeople(suggested); setGroups(joined); setFriendRequests(requests); setError('');
+      await initEncryptedChat(me.id);
+      const previews = await localPreviews();
+      const byChat = new Map(previews.map(item => [`${item.kind}:${item.targetId}`, item]));
+      setProfile(me);
+      setContacts(friends.map(item => ({ ...item, lastMessage: byChat.get(`direct:${item.id}`) ? previewBody(byChat.get(`direct:${item.id}`)!.body) : null, lastAt: byChat.get(`direct:${item.id}`)?.createdAt ?? null })));
+      setPeople(suggested);
+      setGroups(joined.map(item => ({ ...item, lastMessage: byChat.get(`group:${item.id}`) ? previewBody(byChat.get(`group:${item.id}`)!.body) : null, lastAt: byChat.get(`group:${item.id}`)?.createdAt ?? null })));
+      setFriendRequests(requests); setError('');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not load ADDA.');
     } finally { setLoading(false); }
@@ -97,13 +120,13 @@ export default function HomeScreen() {
     void getRealtimeSocket().then(value => {
       if (!active) return;
       live = value;
-      value.on('chat:message', onUpdate);
+      value.on('chat:encrypted:update', onUpdate);
       value.on('friends:updated', onUpdate);
       value.on('connect', onUpdate);
       value.on('disconnect', clearTyping);
       value.on('chat:typing', onTyping);
     }).catch(() => {});
-    return () => { active = false; clearTyping(); live?.off('chat:message', onUpdate); live?.off('friends:updated', onUpdate); live?.off('connect', onUpdate); live?.off('disconnect', clearTyping); live?.off('chat:typing', onTyping); };
+    return () => { active = false; clearTyping(); live?.off('chat:encrypted:update', onUpdate); live?.off('friends:updated', onUpdate); live?.off('connect', onUpdate); live?.off('disconnect', clearTyping); live?.off('chat:typing', onTyping); };
   }, [username, refresh, profile?.id]);
 
   const visibleContacts = useMemo(() => contacts.filter((item) => `${item.name} ${item.username}`.toLowerCase().includes(search.toLowerCase())), [contacts, search]);

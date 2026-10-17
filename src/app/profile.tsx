@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect, type Href } from 'expo-router';
 import { QrCode, ScanLine } from 'lucide-react-native';
@@ -8,6 +8,9 @@ import { FriendQr } from '@/components/ui/FriendQr';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
+import { currentChatDeviceId, initEncryptedChat } from '@/lib/encrypted-chat';
+
+type ChatDevice = { id: string; createdAt: string };
 
 export default function ProfileScreen() {
   const { username, login } = useSession();
@@ -17,11 +20,14 @@ export default function ProfileScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
+  const [devices, setDevices] = useState<ChatDevice[]>([]);
 
   useFocusEffect(useCallback(() => {
     if (!username) { router.replace('/login'); return; }
-    void socialApi<OwnProfile>('/me').then((result) => {
+    void socialApi<OwnProfile>('/me').then(async (result) => {
+      await initEncryptedChat(result.id);
       setProfile(result); setName(result.name); setHandle(result.username); setError('');
+      setDevices(await socialApi<ChatDevice[]>('/chat/devices'));
     }).catch((cause) => setError(cause instanceof Error ? cause.message : 'Could not load profile.'));
   }, [username]));
 
@@ -35,6 +41,12 @@ export default function ProfileScreen() {
     finally { setBusy(false); }
   };
   const selectTab = (tab: HubTab) => { if (tab !== 'you') router.replace({ pathname: '/home', params: { tab } }); };
+  const removeDevice = (deviceId: string) => Alert.alert('Remove old device?',
+    'Undelivered encrypted messages queued for that device will be discarded. This cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Remove', style: 'destructive', onPress: () => { void socialApi(`/chat/devices/${encodeURIComponent(deviceId)}`, 'DELETE').then(() =>
+        setDevices(current => current.filter(device => device.id !== deviceId))).catch(cause => setError(cause instanceof Error ? cause.message : 'Could not remove device.')); } },
+    ]);
   if (!username) return null;
 
   return <SafeAreaView style={styles.safe}>
@@ -53,6 +65,9 @@ export default function ProfileScreen() {
         <Text style={styles.qrUsername}>@{profile?.username || '...'}</Text>
         <Pressable onPress={() => router.push('/scan' as Href)} style={styles.scanButton}><ScanLine size={19} color={colors.primaryDark} /><Text style={styles.scanText}>Scan a friend’s QR</Text></Pressable>
       </View>
+      <View style={styles.devicesCard}><Text style={styles.qrTitle}>Encrypted chat devices</Text><Text style={styles.qrCopy}>Messages waiting for an offline device stay encrypted on the server until it receives them. Remove a lost phone here.</Text>
+        {devices.map(device => <View key={device.id} style={styles.deviceRow}><View style={styles.deviceText}><Text style={styles.deviceName}>{device.id === currentChatDeviceId() ? 'This phone' : 'Other phone'}</Text><Text style={styles.deviceId}>{device.id.slice(0, 8)} · {new Date(device.createdAt).toLocaleDateString()}</Text></View>{device.id !== currentChatDeviceId() && <Pressable onPress={() => removeDevice(device.id)}><Text style={styles.removeDevice}>Remove</Text></Pressable>}</View>)}
+      </View>
     </ScrollView>
     <BottomNav active="you" onSelect={selectTab} />
   </SafeAreaView>;
@@ -69,4 +84,5 @@ const styles = StyleSheet.create({
   qrCard: { marginTop: 35, padding: 20, backgroundColor: colors.surface, borderRadius: 22, borderWidth: 1, borderColor: colors.border, alignItems: 'center' }, qrHeading: { flexDirection: 'row', alignItems: 'center', gap: 10, alignSelf: 'flex-start' }, qrTitle: { color: colors.text, fontSize: 18, fontWeight: '800' }, qrCopy: { color: colors.muted, alignSelf: 'flex-start', fontSize: 12, lineHeight: 18, marginTop: 9, marginBottom: 18 },
   qrSurface: { width: 258, height: 258, backgroundColor: '#FFFFFF', borderRadius: 15, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border }, qrUsername: { color: colors.text, fontWeight: '700', marginTop: 12 },
   scanButton: { flexDirection: 'row', gap: 9, alignItems: 'center', marginTop: 21, backgroundColor: colors.primarySoft, paddingHorizontal: 17, paddingVertical: 13, borderRadius: 14 }, scanText: { color: colors.primaryDark, fontWeight: '800' },
+  devicesCard: { marginTop: 20, padding: 20, backgroundColor: colors.surface, borderRadius: 22, borderWidth: 1, borderColor: colors.border }, deviceRow: { flexDirection: 'row', alignItems: 'center', borderTopWidth: 1, borderTopColor: colors.border, paddingVertical: 12 }, deviceText: { flex: 1 }, deviceName: { color: colors.text, fontWeight: '700' }, deviceId: { color: colors.muted, fontSize: 12, marginTop: 2 }, removeDevice: { color: colors.error, fontWeight: '700' },
 });

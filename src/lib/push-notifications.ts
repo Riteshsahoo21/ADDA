@@ -7,7 +7,8 @@ let currentToken: string | null = null;
 Notifications.setNotificationHandler({
   handleNotification: async notification => {
     const data = notification.request.content.data;
-    const show = data?.kind === 'call' && (data.source !== 'socket' || AppState.currentState !== 'active');
+    const show = (data?.kind === 'call' || data?.kind === 'chat') && (data.source !== 'socket' || AppState.currentState !== 'active') &&
+      (data.kind !== 'chat' || AppState.currentState !== 'active');
     return { shouldShowBanner: show, shouldShowList: show, shouldPlaySound: show, shouldSetBadge: false };
   },
 });
@@ -35,6 +36,9 @@ async function submitToken(token: string) {
 
 export async function registerCallNotifications() {
   if (Platform.OS !== 'android') return;
+  await Notifications.setNotificationChannelAsync('adda_messages', {
+    name: 'Messages', importance: Notifications.AndroidImportance.HIGH, sound: 'default',
+  });
   await Notifications.setNotificationChannelAsync('adda_calls', {
     name: 'Incoming calls',
     importance: Notifications.AndroidImportance.MAX,

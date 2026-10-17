@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
-import { ArrowLeft, Phone, Send, Video } from 'lucide-react-native';
+import { ArrowLeft, LockKeyhole, Paperclip, Phone, Send, Video } from 'lucide-react-native';
 import { colors } from '@/constants/theme';
-import { socialApi, type ChatMessage, type OwnProfile } from '@/lib/social-api';
-import { getRealtimeSocket, makeClientMessageId, sendLiveMessage, type ChatTarget, type LiveMessage, type TypingEvent } from '@/lib/realtime';
+import { socialApi, type OwnProfile } from '@/lib/social-api';
+import { getRealtimeSocket, type ChatTarget, type TypingEvent } from '@/lib/realtime';
+import { chatSafetyCode, initEncryptedChat, localMessages, markChatRead, mediaFromBody, onChatChanged, openEncryptedMedia, releaseDecryptedMedia, sendEncryptedMedia, sendEncryptedMessage, syncEncryptedChat, type EncryptedMedia, type LocalMessage } from '@/lib/encrypted-chat';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { TypingDots } from '@/components/ui/TypingDots';
 
 export default function ConversationScreen() {
   const { kind, id, name } = useLocalSearchParams<{ kind?: string; id?: string; name?: string }>();
   const [selfId, setSelfId] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
   const [sending, setSending] = useState(false);
@@ -23,30 +26,30 @@ export default function ConversationScreen() {
   const lastTyping = useRef(0);
   const draftRef = useRef('');
   const typingRevision = useRef(0);
-  const pendingClientId = useRef<string | null>(null);
   const valid = (kind === 'direct' || kind === 'group') && typeof id === 'string' && id.length > 0;
-  const path = `/chats/${kind}/${id}`;
   const target: ChatTarget | null = useMemo(() => valid ? { kind: kind as ChatTarget['kind'], id: id as string } : null, [valid, kind, id]);
   const load = useCallback(async () => {
-    if (!valid) return;
+    if (!target) return;
     try {
-      const [me, items] = await Promise.all([socialApi<OwnProfile>('/me'), socialApi<ChatMessage[]>(path)]);
-      setSelfId(me.id); setMessages(items); setError('');
+      const me = await socialApi<OwnProfile>('/me');
+      await initEncryptedChat(me.id);
+      setSelfId(me.id);
+      setMessages(await localMessages(target));
+      await syncEncryptedChat();
+      setMessages(await localMessages(target));
+      await markChatRead(target);
+      setError('');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not load messages.'); }
-  }, [path, valid]);
+  }, [target]);
   useFocusEffect(useCallback(() => { void load(); }, [load]));
+  useEffect(() => onChatChanged(() => { if (target) void localMessages(target).then(setMessages).catch(() => {}); }), [target]);
   useEffect(() => {
     if (!target) return;
     let active = true;
     let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
     const expiry = typingExpiry.current;
     const revision = typingRevision;
-    const matches = (message: LiveMessage) => message.kind === target.kind && message.targetId === target.id;
-    const onMessage = (message: LiveMessage) => {
-      if (!matches(message)) return;
-      setMessages(current => current.some(item => item.id === message.id) ? current : [...current, message]);
-      setTypingNames(current => { const next = { ...current }; delete next[message.senderId]; return next; });
-    };
+    const onEncryptedUpdate = () => { void syncEncryptedChat().then(() => markChatRead(target)).catch(error => setError(error instanceof Error ? error.message : 'Could not sync chat.')); };
     const onTyping = (event: TypingEvent) => {
       if (event.kind !== target.kind || event.id !== target.id || event.userId === selfId) return;
       const old = typingExpiry.current.get(event.userId);
@@ -72,7 +75,7 @@ export default function ConversationScreen() {
     void getRealtimeSocket().then(value => {
       if (!active) return;
       live = value;
-      value.on('chat:message', onMessage);
+      value.on('chat:encrypted:update', onEncryptedUpdate);
       value.on('chat:typing', onTyping);
       value.on('connect', onConnect);
       value.on('disconnect', onDisconnect);
@@ -86,7 +89,7 @@ export default function ConversationScreen() {
       expiry.clear();
       live?.emit('chat:typing', { target, typing: false });
       live?.emit('chat:leave', target);
-      live?.off('chat:message', onMessage);
+      live?.off('chat:encrypted:update', onEncryptedUpdate);
       live?.off('chat:typing', onTyping);
       live?.off('connect', onConnect);
       live?.off('disconnect', onDisconnect);
@@ -94,7 +97,6 @@ export default function ConversationScreen() {
   }, [target, selfId, load]);
 
   const onDraftChange = (value: string) => {
-    if (value !== draft) pendingClientId.current = null;
     setDraft(value);
     draftRef.current = value;
     const revision = ++typingRevision.current;
@@ -115,13 +117,24 @@ export default function ConversationScreen() {
     if (!target || !body || sending) return;
     setSending(true); setError('');
     try {
-      pendingClientId.current ??= makeClientMessageId();
-      const message = await sendLiveMessage(target, body, pendingClientId.current);
+      const me = await socialApi<OwnProfile>('/me');
+      const message = await sendEncryptedMessage(target, body, me.name);
       setMessages(current => current.some(item => item.id === message.id) ? current : [...current, message]);
-      pendingClientId.current = null;
       onDraftChange('');
     }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not send message.'); }
+    finally { setSending(false); }
+  };
+  const attach = async () => {
+    if (!target || sending) return;
+    const selection = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images', 'videos'], allowsMultipleSelection: false, quality: 0.85 });
+    if (selection.canceled || !selection.assets[0]) return;
+    const asset = selection.assets[0];
+    setSending(true); setError('');
+    try {
+      const me = await socialApi<OwnProfile>('/me');
+      await sendEncryptedMedia(target, asset.uri, asset.type === 'video' ? 'video' : 'image', asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg'), me.name);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not share encrypted media.'); }
     finally { setSending(false); }
   };
   const startCall = async (media: CallMedia) => {
@@ -132,21 +145,43 @@ export default function ConversationScreen() {
       router.push({ pathname: '/call', params: { callId: call.id, role: call.callerId === selfId ? 'caller' : 'callee', name: name || 'ADDA call' } } as unknown as Href);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not start call.'); }
   };
+  const showSafetyCode = async () => {
+    if (!target) return;
+    try {
+      const code = await chatSafetyCode(target);
+      Alert.alert('Compare chat keys', `${code}\n\nCompare this code with the other people in this chat through a trusted channel. If it differs, do not share sensitive messages.`);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not check chat keys.'); }
+  };
   return <SafeAreaView style={styles.safe}>
-    <View style={styles.top}><Pressable accessibilityLabel="Back" onPress={() => router.back()} style={styles.back}><ArrowLeft size={24} color={colors.text} /></Pressable><View style={styles.avatar}><Text style={styles.initial}>{name?.[0]?.toUpperCase() || '?'}</Text></View><View style={styles.titleWrap}><Text style={styles.title}>{name || 'Chat'}</Text><View style={styles.subtitleRow}><Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]}>{Object.keys(typingNames).length ? `${Object.values(typingNames).slice(0, 2).join(', ')} typing` : kind === 'group' ? 'Group' : 'Contact'}</Text>{Object.keys(typingNames).length > 0 && <TypingDots />}</View></View><Pressable accessibilityLabel="Voice call" onPress={() => void startCall('audio')} style={styles.callAction}><Phone size={20} color={colors.primary} /></Pressable><Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}><Video size={22} color={colors.primary} /></Pressable></View>
+    <View style={styles.top}><Pressable accessibilityLabel="Back" onPress={() => router.back()} style={styles.back}><ArrowLeft size={24} color={colors.text} /></Pressable><View style={styles.avatar}><Text style={styles.initial}>{name?.[0]?.toUpperCase() || '?'}</Text></View><View style={styles.titleWrap}><Text style={styles.title}>{name || 'Chat'}</Text><View style={styles.subtitleRow}><Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]}>{Object.keys(typingNames).length ? `${Object.values(typingNames).slice(0, 2).join(', ')} typing` : kind === 'group' ? 'Group' : 'Contact'}</Text>{Object.keys(typingNames).length > 0 && <TypingDots />}</View></View><Pressable accessibilityLabel="Compare encryption keys" onPress={() => void showSafetyCode()} style={styles.callAction}><LockKeyhole size={19} color={colors.primary} /></Pressable><Pressable accessibilityLabel="Voice call" onPress={() => void startCall('audio')} style={styles.callAction}><Phone size={20} color={colors.primary} /></Pressable><Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}><Video size={22} color={colors.primary} /></Pressable></View>
     <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 20 : 0}>
       <ScrollView ref={list} contentContainerStyle={styles.messages} onContentSizeChange={() => list.current?.scrollToEnd({ animated: false })}>
-        {messages.length === 0 && !error && <View style={styles.empty}><Text style={styles.emptyTitle}>Start the conversation</Text><Text style={styles.emptyText}>Messages in this chat are stored in ADDA.</Text></View>}
+        {messages.length === 0 && !error && <View style={styles.empty}><Text style={styles.emptyTitle}>Start the conversation</Text><Text style={styles.emptyText}>New messages are encrypted and saved on this phone.</Text></View>}
         {messages.map((item) => {
           const mine = item.senderId === selfId;
-          return <View key={item.id} style={[styles.bubble, mine ? styles.myBubble : styles.theirBubble]}>{kind === 'group' && !mine && <Text style={styles.sender}>{item.senderName}</Text>}<Text style={styles.body}>{item.body}</Text><Text style={styles.messageTime}>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text></View>;
+          return <View key={item.id} style={[styles.bubble, mine ? styles.myBubble : styles.theirBubble]}>{kind === 'group' && !mine && <Text style={styles.sender}>{item.senderName}</Text>}{mediaFromBody(item.body) ? <MediaMessage media={mediaFromBody(item.body)!} /> : <Text style={styles.body}>{item.body}</Text>}<View style={styles.messageFooter}><Text style={styles.messageTime}>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>{mine && <Text accessibilityLabel={item.status === 'read' ? 'Read' : item.status === 'delivered' ? 'Delivered' : item.status === 'sent' ? 'Sent' : 'Pending'} style={[styles.tick, item.status === 'read' && styles.readTick]}>{item.status === 'read' || item.status === 'delivered' ? '✓✓' : item.status === 'sent' ? '✓' : '○'}</Text>}</View></View>;
         })}
         {Object.keys(typingNames).length > 0 && <View style={styles.typingBubble}><TypingDots /></View>}
       </ScrollView>
       {!!error && <Text style={styles.error}>{error}</Text>}
-      <View style={styles.composer}><TextInput style={styles.input} placeholder="Message" placeholderTextColor={colors.muted} value={draft} onChangeText={onDraftChange} multiline maxLength={2000} /><Pressable accessibilityLabel="Send message" disabled={!draft.trim() || sending} onPress={() => void send()} style={[styles.send, (!draft.trim() || sending) && styles.disabled]}><Send size={20} color="#FFFFFF" /></Pressable></View>
+      <View style={styles.composer}><Pressable accessibilityLabel="Attach photo or video" disabled={sending} onPress={() => void attach()} style={styles.attach}><Paperclip size={23} color={colors.primary} /></Pressable><TextInput style={styles.input} placeholder="Message" placeholderTextColor={colors.muted} value={draft} onChangeText={onDraftChange} multiline maxLength={2000} /><Pressable accessibilityLabel="Send message" disabled={!draft.trim() || sending} onPress={() => void send()} style={[styles.send, (!draft.trim() || sending) && styles.disabled]}><Send size={20} color="#FFFFFF" /></Pressable></View>
     </KeyboardAvoidingView>
   </SafeAreaView>;
+}
+
+function MediaMessage({ media }: { media: EncryptedMedia }) {
+  const [uri, setUri] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => () => { if (uri) releaseDecryptedMedia(uri); }, [uri]);
+  if (uri) return media.mediaKind === 'image' ? <Image source={{ uri }} style={styles.mediaImage} resizeMode="contain" /> : <InlineVideo uri={uri} />;
+  return <Pressable onPress={() => { void openEncryptedMedia(media).then(setUri).catch(cause => setError(cause instanceof Error ? cause.message : 'Could not open media.')); }} style={styles.mediaButton}>
+    <Text style={styles.mediaLabel}>{error || `Tap to open ${media.mediaKind === 'image' ? 'photo' : 'video'}`}</Text>
+  </Pressable>;
+}
+
+function InlineVideo({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri);
+  return <VideoView player={player} nativeControls style={styles.mediaImage} />;
 }
 
 const styles = StyleSheet.create({
@@ -154,5 +189,6 @@ const styles = StyleSheet.create({
   messages: { flexGrow: 1, paddingHorizontal: 15, paddingVertical: 20, justifyContent: 'flex-end', gap: 9 }, empty: { alignItems: 'center', marginBottom: 45 }, emptyTitle: { color: colors.text, fontWeight: '800', fontSize: 18 }, emptyText: { color: colors.muted, marginTop: 7, textAlign: 'center' },
   bubble: { maxWidth: '83%', borderRadius: 17, paddingHorizontal: 13, paddingVertical: 10, minWidth: 90 }, myBubble: { backgroundColor: colors.primarySoft, alignSelf: 'flex-end', borderBottomRightRadius: 4 }, theirBubble: { backgroundColor: colors.surface, alignSelf: 'flex-start', borderBottomLeftRadius: 4, borderWidth: 1, borderColor: colors.border }, sender: { color: colors.primaryDark, fontWeight: '800', fontSize: 12, marginBottom: 4 }, body: { color: colors.text, fontSize: 15, lineHeight: 20 }, messageTime: { color: colors.muted, fontSize: 10, alignSelf: 'flex-end', marginTop: 4 },
   typingBubble: { alignSelf: 'flex-start', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 17, borderBottomLeftRadius: 4, paddingHorizontal: 15, paddingVertical: 12 },
-  error: { color: colors.error, paddingHorizontal: 17, paddingVertical: 6 }, composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 10, paddingHorizontal: 14, paddingVertical: 10, backgroundColor: colors.surface }, input: { flex: 1, minHeight: 44, maxHeight: 120, borderRadius: 22, paddingHorizontal: 17, paddingVertical: 10, backgroundColor: colors.surfaceRaised, color: colors.text, fontSize: 15 }, send: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' }, disabled: { opacity: 0.45 },
+  error: { color: colors.error, paddingHorizontal: 17, paddingVertical: 6 }, composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 10, paddingHorizontal: 14, paddingVertical: 10, backgroundColor: colors.surface }, attach: { width: 34, height: 44, alignItems: 'center', justifyContent: 'center' }, input: { flex: 1, minHeight: 44, maxHeight: 120, borderRadius: 22, paddingHorizontal: 17, paddingVertical: 10, backgroundColor: colors.surfaceRaised, color: colors.text, fontSize: 15 }, send: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' }, disabled: { opacity: 0.45 },
+  messageFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 4, marginTop: 4 }, tick: { color: colors.muted, fontSize: 12, fontWeight: '800' }, readTick: { color: '#2897D5' }, mediaButton: { minWidth: 160, minHeight: 80, justifyContent: 'center', alignItems: 'center' }, mediaLabel: { color: colors.primary, fontSize: 13, fontWeight: '700' }, mediaImage: { width: 220, height: 220, borderRadius: 8 },
 });
