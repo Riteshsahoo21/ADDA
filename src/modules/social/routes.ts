@@ -4,6 +4,7 @@ import { auth } from '../auth/auth.js';
 import { pool } from '../../db/pool.js';
 import { ensureProfile, validUsername } from './profile.js';
 import { publishFriendUpdate } from '../realtime/server.js';
+import { invalidateGroupMembersCache } from '../realtime/cache.js';
 import { env } from '../../config/env.js';
 
 export const socialRoutes = Router();
@@ -194,6 +195,7 @@ socialRoutes.post('/groups', run(async (request, response) => {
       await client.query('INSERT INTO "chat_group_member" ("groupId", "userId") VALUES ($1, $2)', [id, userId]);
     }
     await client.query('COMMIT');
+    invalidateGroupMembersCache(id);
     response.status(201).json({ id, name, memberCount: ids.length + 1 });
   } catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }

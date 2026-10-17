@@ -6,6 +6,7 @@ import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectComm
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { env } from '../../config/env.js';
 import { invalidateUserDeviceCache } from '../realtime/cache.js';
+import { processDeliveryAck, processReadAck } from '../realtime/server.js';
 
 type Target = { kind: 'direct' | 'group'; id: string };
 const idPattern = /^[a-zA-Z0-9_-]{8,100}$/;
@@ -118,7 +119,20 @@ chatRoutes.get('/media/:id/download', run(async (request, response) => {
   const result = await pool.query<{ ownerId: string; kind: Target['kind']; targetId: string; objectKey: string; confirmed: boolean }>(
     'SELECT "ownerId", kind, "targetId", "objectKey", confirmed FROM chat_media WHERE id = $1', [request.params.id]);
   const item = result.rows[0];
-  if (!item || !item.confirmed) { response.status(404).json({ error: 'Media unavailable.' }); return; }
+  if (!item) { response.status(404).json({ error: 'Media unavailable.' }); return; }
+
+  // Auto-confirm if object already exists in R2 (resolves receiver race conditions)
+  if (!item.confirmed) {
+    try {
+      await r2.send(new HeadObjectCommand({ Bucket: env.r2Bucket, Key: item.objectKey }));
+      await pool.query('UPDATE chat_media SET confirmed = true WHERE id = $1', [request.params.id]);
+      item.confirmed = true;
+    } catch {
+      response.status(404).json({ error: 'Media unavailable.' });
+      return;
+    }
+  }
+
   const callerId = response.locals.userId as string;
   let allowed = false;
   if (callerId === item.ownerId) {
@@ -132,6 +146,28 @@ chatRoutes.get('/media/:id/download', run(async (request, response) => {
   if (!allowed) { response.status(403).json({ error: 'Media unavailable.' }); return; }
   const url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: env.r2Bucket, Key: item.objectKey }), { expiresIn: 300 });
   response.json({ url });
+}));
+
+chatRoutes.post('/delivery-ack', run(async (request, response) => {
+  const { messageId, senderId } = request.body ?? {};
+  if (typeof messageId !== 'string' || typeof senderId !== 'string') {
+    response.status(400).json({ error: 'Invalid delivery ack.' });
+    return;
+  }
+  const selfId = response.locals.userId as string;
+  await processDeliveryAck(messageId, selfId, senderId);
+  response.json({ ok: true });
+}));
+
+chatRoutes.post('/read-ack', run(async (request, response) => {
+  const { messageIds, senderId } = request.body ?? {};
+  if (!Array.isArray(messageIds) || typeof senderId !== 'string' || messageIds.length === 0) {
+    response.status(400).json({ error: 'Invalid read ack.' });
+    return;
+  }
+  const selfId = response.locals.userId as string;
+  await processReadAck(messageIds, selfId, senderId);
+  response.json({ ok: true });
 }));
 
 export async function retryDeliveredMediaCleanup(): Promise<void> {

@@ -49,9 +49,10 @@ export async function sendEncryptedChatPush(
   senderId: string,
   previewText?: string,
   groupName?: string,
+  envelopesByUser?: Map<string, any>
 ) {
   if (!enabled || !userIds.length) return;
-  const result = await pool.query<{ token: string }>('SELECT token FROM push_device WHERE "userId" = ANY($1::text[])', [userIds]);
+  const result = await pool.query<{ token: string; userId: string }>('SELECT token, "userId" FROM push_device WHERE "userId" = ANY($1::text[])', [userIds]);
   if (!result.rows.length) return;
 
   const chatName = target.name || (target.kind === 'group' ? (groupName || 'Group') : senderName);
@@ -60,21 +61,38 @@ export async function sendEncryptedChatPush(
   const chatId = target.kind === 'direct' ? senderId : target.id;
 
   for (let start = 0; start < result.rows.length; start += 500) {
-    const tokens = result.rows.slice(start, start + 500).map(row => row.token);
-    const sent = await getMessaging().sendEachForMulticast({
-      tokens,
-      notification: { title, body },
-      data: {
+    const batch = result.rows.slice(start, start + 500);
+    const messages = batch.map(row => {
+      const envObj = envelopesByUser?.get(row.userId);
+      const dataPayload: Record<string, string> = {
         kind: 'chat',
         chatKind: target.kind,
         chatId,
         chatName,
         name: chatName,
         senderName,
-      },
-      android: { priority: 'high', notification: { channelId: 'adda_messages', priority: 'high' } },
+      };
+      if (envObj) {
+        dataPayload.envelope = JSON.stringify(envObj);
+      }
+      return {
+        token: row.token,
+        notification: { title, body },
+        data: dataPayload,
+        android: {
+          priority: 'high' as const,
+          notification: { channelId: 'adda_messages', priority: 'high' as const }
+        },
+      };
     });
-    const stale = tokens.filter((_token, index) => ['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(sent.responses[index].error?.code ?? ''));
+
+    const sent = await getMessaging().sendEach(messages);
+    const stale: string[] = [];
+    sent.responses.forEach((res, index) => {
+      if (!res.success && ['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(res.error?.code ?? '')) {
+        stale.push(batch[index].token);
+      }
+    });
     if (stale.length) await pool.query('DELETE FROM push_device WHERE token = ANY($1::text[])', [stale]);
   }
 }

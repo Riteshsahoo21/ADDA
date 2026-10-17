@@ -7,7 +7,7 @@ import { attachCallHandlers } from './calls.js';
 import { attachMediaHandlers } from './media.js';
 import { attachRoomHandlers } from './rooms.js';
 import { attachPushHandlers, sendEncryptedChatPush } from './push.js';
-import { getRecipientDevices } from './cache.js';
+import { getCachedGroupMembers, getRecipientDevices } from './cache.js';
 
 type ChatKind = 'direct' | 'group';
 type ChatTarget = { kind: ChatKind; id: string };
@@ -251,16 +251,13 @@ export function attachRealtime(httpServer: HttpServer): Server {
         // 1. Return immediate ACK to sender (Single Gray Tick ✓ achieved in < 25ms!)
         ack?.({ ok: true, timestamp: createdAt });
 
-        // 2. Resolve recipient IDs
+        // 2. Resolve recipient IDs via VPS RAM in-memory cache
         const recipientUserIds: string[] = [];
         if (target.kind === 'direct') {
           recipientUserIds.push(target.id);
         } else {
-          const groupMembers = await pool.query<{ userId: string }>(
-            'SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" <> $2',
-            [target.id, selfId]
-          );
-          recipientUserIds.push(...groupMembers.rows.map(r => r.userId));
+          const allMembers = await getCachedGroupMembers(target.id);
+          recipientUserIds.push(...allMembers.filter(uid => uid !== selfId));
         }
 
         if (recipientUserIds.length === 0) return;
@@ -279,9 +276,10 @@ export function attachRealtime(httpServer: HttpServer): Server {
           void pool.query('UPDATE chat_media SET "messageId" = $1 WHERE id = $2 AND "ownerId" = $3', [messageId, mediaId, selfId]).catch(() => {});
         }
 
-        // 4. Memory-first dispatch: Check which recipient devices are online
+        // 4. Memory-first dispatch: Synchronous O(1) check which recipient devices are online
         const spoolRows: any[] = [];
         const pushUserIds = new Set<string>();
+        const offlineEnvelopesByUser = new Map<string, DirectEnvelope>();
 
         for (const dev of devices) {
           const keyEntry = keys.find(k => k.deviceId === dev.deviceId);
@@ -303,14 +301,14 @@ export function attachRealtime(httpServer: HttpServer): Server {
             createdAt,
           };
 
-          const recipientSockets = await io!.in(userRoom(dev.userId)).fetchSockets();
-          const isOnline = recipientSockets.length > 0;
+          // Synchronous O(1) in-memory room check (0.001ms)
+          const isOnline = io!.sockets.adapter.rooms.has(userRoom(dev.userId));
 
           if (isOnline) {
             // RECIPIENT ONLINE: Forward directly down recipient's open socket in 0ms!
             io!.to(userRoom(dev.userId)).emit('chat:envelope', envelope);
 
-            // Also spool with a fast cleanup watchdog in case the socket is a dead/half-open connection
+            // Also spool in case socket connection drops before write to SQLite
             spoolRows.push([
               messageId, selfId, senderDeviceId, dev.userId, dev.deviceId,
               target.kind, target.id, ciphertext, nonce, keyEntry.wrappedKey, keyEntry.wrapNonce,
@@ -324,6 +322,9 @@ export function attachRealtime(httpServer: HttpServer): Server {
               senderPublicKey, socket.data.name || 'ADDA', createdAt
             ]);
             pushUserIds.add(dev.userId);
+            if (!offlineEnvelopesByUser.has(dev.userId)) {
+              offlineEnvelopesByUser.set(dev.userId, envelope);
+            }
           }
         }
 
@@ -349,14 +350,16 @@ export function attachRealtime(httpServer: HttpServer): Server {
           ]).catch(e => console.warn('[ADDA] Spool insert warning:', e));
         }
 
-        // Send FCM push only for truly offline users with actual message/media preview
+        // Send high-priority FCM push with complete envelope payload for instant background SQLite ingestion
         if (pushUserIds.size > 0) {
           void sendEncryptedChatPush(
             [...pushUserIds],
             target,
             socket.data.name || 'ADDA',
             selfId,
-            previewText
+            previewText,
+            undefined,
+            offlineEnvelopesByUser
           ).catch((e) => console.warn('[ADDA] Push send warning:', e));
         }
       } catch (err: any) {
@@ -369,23 +372,7 @@ export function attachRealtime(httpServer: HttpServer): Server {
     // ========================================================
     socket.on('chat:ack_delivery', (data: { messageId: string; senderId: string }) => {
       if (!data?.messageId || !data?.senderId) return;
-
-      // 1. Notify sender over socket immediately
-      io!.to(userRoom(data.senderId)).emit('chat:msg_status', {
-        messageId: data.messageId,
-        status: 'delivered',
-        recipientId: selfId
-      });
-
-      // 2. Ephemeral cleanup: Remove delivered message from PostgreSQL spool
-      void pool.query(
-        'DELETE FROM chat_spool WHERE "messageId" = $1 AND "recipientId" = $2',
-        [data.messageId, selfId]
-      ).then(res => {
-        if (res.rowCount && res.rowCount > 0) {
-          console.log(`[ADDA Spool] Deleted delivered message ${data.messageId} for recipient ${selfId}`);
-        }
-      }).catch(err => console.warn('[ADDA Spool] Delete delivery err:', err));
+      void processDeliveryAck(data.messageId, selfId, data.senderId);
     });
 
     // ========================================================
@@ -393,23 +380,7 @@ export function attachRealtime(httpServer: HttpServer): Server {
     // ========================================================
     socket.on('chat:ack_read', (data: { messageIds: string[]; senderId: string }) => {
       if (!Array.isArray(data?.messageIds) || !data?.senderId || data.messageIds.length === 0) return;
-
-      // Broadcast read receipt to sender socket immediately
-      io!.to(userRoom(data.senderId)).emit('chat:msg_status', {
-        messageIds: data.messageIds,
-        status: 'read',
-        recipientId: selfId
-      });
-
-      // Clean up any lingering spool entries
-      void pool.query(
-        'DELETE FROM chat_spool WHERE "messageId" = ANY($1::text[]) AND "recipientId" = $2',
-        [data.messageIds, selfId]
-      ).then(res => {
-        if (res.rowCount && res.rowCount > 0) {
-          console.log(`[ADDA Spool] Deleted read messages ${data.messageIds.length} for recipient ${selfId}`);
-        }
-      }).catch(err => console.warn('[ADDA Spool] Delete read err:', err));
+      void processReadAck(data.messageIds, selfId, data.senderId);
     });
 
     socket.on('disconnect', () => {
@@ -418,4 +389,57 @@ export function attachRealtime(httpServer: HttpServer): Server {
   });
 
   return io;
+}
+
+export async function processDeliveryAck(messageId: string, recipientId: string, senderId: string): Promise<void> {
+  try {
+    const del = await pool.query<{ senderId: string; kind: string; targetId: string }>(
+      'DELETE FROM chat_spool WHERE "messageId" = $1 AND "recipientId" = $2 RETURNING "senderId", kind, "targetId"',
+      [messageId, recipientId]
+    );
+    const row = del.rows[0];
+    const isGroup = row ? row.kind === 'group' : false;
+
+    if (io) {
+      if (!isGroup) {
+        // Direct chat: recipient wrote message to SQLite, notify sender immediately (✓✓ Double Grey Tick)
+        io.to(userRoom(senderId)).emit('chat:msg_status', {
+          messageId,
+          status: 'delivered',
+          recipientId
+        });
+      } else {
+        // Group chat: check if all group members have received and saved
+        const pending = await pool.query('SELECT 1 FROM chat_spool WHERE "messageId" = $1 LIMIT 1', [messageId]);
+        if ((pending.rowCount ?? 0) === 0) {
+          io.to(userRoom(senderId)).emit('chat:msg_status', {
+            messageId,
+            status: 'delivered'
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[ADDA Spool] processDeliveryAck error:', err);
+  }
+}
+
+export async function processReadAck(messageIds: string[], recipientId: string, senderId: string): Promise<void> {
+  if (messageIds.length === 0) return;
+  try {
+    if (io) {
+      io.to(userRoom(senderId)).emit('chat:msg_status', {
+        messageIds,
+        status: 'read',
+        recipientId
+      });
+    }
+
+    await pool.query(
+      'DELETE FROM chat_spool WHERE "messageId" = ANY($1::text[]) AND "recipientId" = $2',
+      [messageIds, recipientId]
+    );
+  } catch (err) {
+    console.warn('[ADDA Spool] processReadAck error:', err);
+  }
 }

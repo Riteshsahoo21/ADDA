@@ -47,3 +47,27 @@ export async function getRecipientDevices(userIds: string[]): Promise<CachedDevi
 export function invalidateUserDeviceCache(userId: string): void {
   deviceCache.delete(userId);
 }
+
+const groupMembersCache = new Map<string, { members: string[]; expiresAt: number }>();
+
+export async function getCachedGroupMembers(groupId: string): Promise<string[]> {
+  const now = Date.now();
+  const cached = groupMembersCache.get(groupId);
+  if (cached && cached.expiresAt > now) {
+    return cached.members;
+  }
+  const dbRes = await pool.query<{ userId: string }>(
+    'SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1',
+    [groupId]
+  );
+  const members = dbRes.rows.map(r => r.userId);
+  groupMembersCache.set(groupId, {
+    members,
+    expiresAt: now + 5 * 60 * 1000 // 5 minutes cache
+  });
+  return members;
+}
+
+export function invalidateGroupMembersCache(groupId: string): void {
+  groupMembersCache.delete(groupId);
+}
