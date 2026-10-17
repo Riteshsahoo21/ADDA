@@ -92,7 +92,10 @@ async function initializeForUser(userId: string): Promise<void> {
   if (!deviceId) { deviceId = Crypto.randomUUID(); await SecureStore.setItemAsync(deviceName, deviceId); }
   const pair = nacl.box.keyPair.fromSecretKey(base64ToBytes(secret));
 
-  const dbName = `adda-chat-${userId}.db`;
+  // Clean up legacy database file left behind by SQLCipher experiments
+  try { await SQLite.deleteDatabaseAsync(`adda-chat-${userId}.db`); } catch {}
+
+  const dbName = `adda-v2-${userId}.db`;
   const schemaSql = `PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS message (
       id TEXT PRIMARY KEY, kind TEXT NOT NULL, targetId TEXT NOT NULL, senderId TEXT NOT NULL,
@@ -104,25 +107,8 @@ async function initializeForUser(userId: string): Promise<void> {
       PRIMARY KEY (messageId, actorId, kind));
     CREATE TABLE IF NOT EXISTS message_recipient (messageId TEXT NOT NULL, userId TEXT NOT NULL, PRIMARY KEY (messageId, userId));`;
 
-  let db: SQLite.SQLiteDatabase;
-  try {
-    db = await SQLite.openDatabaseAsync(dbName);
-    await db.execAsync(schemaSql);
-  } catch (error: any) {
-    const msg = String(error?.message || error);
-    if (msg.includes('not a database') || msg.includes('SQLITE_NOTADB') || msg.includes('prepareAsync') || msg.includes('cipher')) {
-      console.warn('Resetting incompatible legacy chat database:', dbName, msg);
-      try {
-        await SQLite.deleteDatabaseAsync(dbName);
-      } catch (delError) {
-        console.warn('Failed to delete legacy db file:', delError);
-      }
-      db = await SQLite.openDatabaseAsync(dbName);
-      await db.execAsync(schemaSql);
-    } else {
-      throw error;
-    }
-  }
+  const db = await SQLite.openDatabaseAsync(dbName);
+  await db.execAsync(schemaSql);
 
   try {
     await socialApi('/chat/devices', 'POST', { deviceId, publicKey: bytesToBase64(pair.publicKey) });
