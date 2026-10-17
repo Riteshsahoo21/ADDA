@@ -76,7 +76,7 @@ export function publishEncryptedEnvelope(userId: string, envelope: unknown): voi
   io?.to(userRoom(userId)).emit('chat:encrypted:envelope', envelope);
 }
 
-async function drainOfflineSpool(socket: Socket, deviceId: string) {
+async function drainOfflineSpool(socket: Socket, userId: string, deviceId?: string) {
   try {
     const spooled = await pool.query<{
       id: string;
@@ -98,13 +98,14 @@ async function drainOfflineSpool(socket: Socket, deviceId: string) {
               kind, "targetId", ciphertext, nonce, "wrappedKey", "wrapNonce",
               "recipientDeviceId", "createdAt"
        FROM chat_spool
-       WHERE "recipientDeviceId" = $1
+       WHERE "recipientId" = $1 AND ($2::text IS NULL OR $2 = '' OR "recipientDeviceId" = $2)
        ORDER BY "createdAt" ASC
        LIMIT 300`,
-      [deviceId]
+      [userId, deviceId ?? null]
     );
 
     if (spooled.rowCount && spooled.rowCount > 0) {
+      console.log(`[ADDA Spool] Draining ${spooled.rowCount} messages for user ${userId} (device: ${deviceId || 'any'})`);
       for (const row of spooled.rows) {
         socket.emit('chat:envelope', {
           deliveryId: row.id,
@@ -163,10 +164,15 @@ export function attachRealtime(httpServer: HttpServer): Server {
     attachRoomHandlers(io!, socket);
     attachPushHandlers(socket);
 
-    // Drain pending offline messages for this device upon connection
-    if (selfDeviceId) {
-      void drainOfflineSpool(socket, selfDeviceId);
-    }
+    // Drain pending offline messages for this user/device upon connection
+    void drainOfflineSpool(socket, selfId, selfDeviceId);
+
+    // Allow client to trigger explicit spool drain upon device initialization or reconnect
+    socket.on('chat:drain_spool', (data?: { deviceId?: string }) => {
+      const devId = data?.deviceId || selfDeviceId || (socket.data.deviceId as string | undefined);
+      if (data?.deviceId) socket.data.deviceId = data.deviceId;
+      void drainOfflineSpool(socket, selfId, devId);
+    });
 
     const typingAt = new Map<string, number>();
     const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -229,11 +235,12 @@ export function attachRealtime(httpServer: HttpServer): Server {
         nonce: string;
         keys: Array<{ deviceId: string; wrappedKey: string; wrapNonce: string }>;
         mediaId?: string;
+        previewText?: string;
       },
       ack?: (res: { ok: boolean; timestamp?: string; error?: string }) => void
     ) => {
       try {
-        const { messageId, senderDeviceId, target, ciphertext, nonce, keys, mediaId } = payload;
+        const { messageId, senderDeviceId, target, ciphertext, nonce, keys, mediaId, previewText } = payload;
         if (!messageId || !senderDeviceId || !validTarget(target) || !ciphertext || !nonce || !Array.isArray(keys)) {
           ack?.({ ok: false, error: 'Invalid message structure.' });
           return;
@@ -342,9 +349,15 @@ export function attachRealtime(httpServer: HttpServer): Server {
           ]).catch(e => console.warn('[ADDA] Spool insert warning:', e));
         }
 
-        // Send FCM push only for truly offline users
+        // Send FCM push only for truly offline users with actual message/media preview
         if (pushUserIds.size > 0) {
-          void sendEncryptedChatPush([...pushUserIds], target, socket.data.name || 'ADDA').catch(() => {});
+          void sendEncryptedChatPush(
+            [...pushUserIds],
+            target,
+            socket.data.name || 'ADDA',
+            selfId,
+            previewText
+          ).catch((e) => console.warn('[ADDA] Push send warning:', e));
         }
       } catch (err: any) {
         ack?.({ ok: false, error: err?.message || 'Send error' });
@@ -368,7 +381,11 @@ export function attachRealtime(httpServer: HttpServer): Server {
       void pool.query(
         'DELETE FROM chat_spool WHERE "messageId" = $1 AND "recipientId" = $2',
         [data.messageId, selfId]
-      ).catch(() => {});
+      ).then(res => {
+        if (res.rowCount && res.rowCount > 0) {
+          console.log(`[ADDA Spool] Deleted delivered message ${data.messageId} for recipient ${selfId}`);
+        }
+      }).catch(err => console.warn('[ADDA Spool] Delete delivery err:', err));
     });
 
     // ========================================================
@@ -388,7 +405,11 @@ export function attachRealtime(httpServer: HttpServer): Server {
       void pool.query(
         'DELETE FROM chat_spool WHERE "messageId" = ANY($1::text[]) AND "recipientId" = $2',
         [data.messageIds, selfId]
-      ).catch(() => {});
+      ).then(res => {
+        if (res.rowCount && res.rowCount > 0) {
+          console.log(`[ADDA Spool] Deleted read messages ${data.messageIds.length} for recipient ${selfId}`);
+        }
+      }).catch(err => console.warn('[ADDA Spool] Delete read err:', err));
     });
 
     socket.on('disconnect', () => {

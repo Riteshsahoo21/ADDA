@@ -46,13 +46,19 @@ export async function sendEncryptedChatPush(
   userIds: string[],
   target: { kind: 'direct' | 'group'; id: string; name?: string },
   senderName: string,
+  senderId: string,
+  previewText?: string,
   groupName?: string,
 ) {
   if (!enabled || !userIds.length) return;
   const result = await pool.query<{ token: string }>('SELECT token FROM push_device WHERE "userId" = ANY($1::text[])', [userIds]);
+  if (!result.rows.length) return;
+
   const chatName = target.name || (target.kind === 'group' ? (groupName || 'Group') : senderName);
   const title = target.kind === 'group' ? chatName : senderName;
-  const body = target.kind === 'group' ? `${senderName}: New encrypted message` : 'New encrypted message';
+  const body = previewText || (target.kind === 'group' ? `${senderName}: New message` : 'New message');
+  const chatId = target.kind === 'direct' ? senderId : target.id;
+
   for (let start = 0; start < result.rows.length; start += 500) {
     const tokens = result.rows.slice(start, start + 500).map(row => row.token);
     const sent = await getMessaging().sendEachForMulticast({
@@ -61,7 +67,7 @@ export async function sendEncryptedChatPush(
       data: {
         kind: 'chat',
         chatKind: target.kind,
-        chatId: target.id,
+        chatId,
         chatName,
         name: chatName,
         senderName,
@@ -72,3 +78,4 @@ export async function sendEncryptedChatPush(
     if (stale.length) await pool.query('DELETE FROM push_device WHERE token = ANY($1::text[])', [stale]);
   }
 }
+
