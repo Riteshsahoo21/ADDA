@@ -11,7 +11,7 @@ import { AppState, Modal, Pressable, StyleSheet, Text, View } from 'react-native
 import { colors } from '@/constants/theme';
 import * as Notifications from 'expo-notifications';
 import { hasCallPushToken, registerCallNotifications, showSocketCallNotification, unregisterCallNotifications } from '@/lib/push-notifications';
-import { closeEncryptedChat, initEncryptedChat, receiveDirectEnvelope, handleMessageStatusUpdate, setCachedProfile, syncEncryptedChat, type Envelope } from '@/lib/encrypted-chat';
+import { closeEncryptedChat, initEncryptedChat, receiveDirectEnvelope, handleMessageStatusUpdate, setCachedProfile, syncEncryptedChat, clearKeyCache, type Envelope } from '@/lib/encrypted-chat';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
 
 type Session = {
@@ -59,6 +59,10 @@ export function SessionProvider({ children }: PropsWithChildren) {
     if (!username) { void closeEncryptedChat(); return; }
     let active = true;
     let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
+    let onEnvelope: ((envelope: Envelope) => void) | null = null;
+    let onStatus: ((update: any) => void) | null = null;
+    let onGroupUpdate: ((data: any) => void) | null = null;
+    let onConnect: (() => void) | null = null;
     const sync = () => { void syncEncryptedChat().catch(error => console.warn('Encrypted chat sync unavailable:', error)); };
     void socialApi<OwnProfile>('/me').then(async me => {
       if (!active) return;
@@ -68,14 +72,20 @@ export function SessionProvider({ children }: PropsWithChildren) {
       sync();
       live = await getRealtimeSocket();
       if (!active) return;
-      const onEnvelope = (envelope: Envelope) => { void receiveDirectEnvelope(envelope).catch(() => {}); };
-      const onStatus = (update: any) => { void handleMessageStatusUpdate(update).catch(() => {}); };
-      live.on('chat:envelope', onEnvelope);
-      live.on('chat:msg_status', onStatus);
-      live.on('connect', () => {
+      onEnvelope = (envelope: Envelope) => { void receiveDirectEnvelope(envelope).catch(() => {}); };
+      onStatus = (update: any) => { void handleMessageStatusUpdate(update).catch(() => {}); };
+      onGroupUpdate = (data: any) => {
+        if (data?.groupId) clearKeyCache({ kind: 'group', id: data.groupId });
+        else clearKeyCache();
+      };
+      onConnect = () => {
         sync();
         if (!hasCallPushToken()) void registerCallNotifications().catch(() => {});
-      });
+      };
+      live.on('chat:envelope', onEnvelope);
+      live.on('chat:msg_status', onStatus);
+      live.on('group:updated', onGroupUpdate);
+      live.on('connect', onConnect);
     }).catch(error => console.warn('Encrypted chat unavailable:', error));
     const appState = AppState.addEventListener('change', state => {
       if (state === 'active') {
@@ -83,7 +93,14 @@ export function SessionProvider({ children }: PropsWithChildren) {
         if (!hasCallPushToken()) void registerCallNotifications().catch(() => {});
       }
     });
-    return () => { active = false; appState.remove(); live?.off('chat:envelope'); live?.off('chat:msg_status'); live?.off('connect'); };
+    return () => {
+      active = false;
+      appState.remove();
+      if (onEnvelope) live?.off('chat:envelope', onEnvelope);
+      if (onStatus) live?.off('chat:msg_status', onStatus);
+      if (onGroupUpdate) live?.off('group:updated', onGroupUpdate);
+      if (onConnect) live?.off('connect', onConnect);
+    };
   }, [username]);
   useEffect(() => {
     if (!username) return;
@@ -137,6 +154,12 @@ export function SessionProvider({ children }: PropsWithChildren) {
         return;
       }
       if (data?.kind !== 'call' || typeof data.callId !== 'string') return;
+      if (data?.isOngoing) {
+        void Notifications.clearLastNotificationResponseAsync();
+        void Notifications.dismissNotificationAsync('adda_active_call_notification').catch(() => {});
+        router.push({ pathname: '/call', params: { callId: data.callId, role: data.role || 'callee', name: data.name || 'ADDA call' } } as unknown as Href);
+        return;
+      }
       if (openedNotificationCall.current === data.callId) return;
       openedNotificationCall.current = data.callId;
       setIncomingCall(current => current?.id === data.callId ? null : current);

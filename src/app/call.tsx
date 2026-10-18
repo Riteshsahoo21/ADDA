@@ -1,26 +1,70 @@
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  AppState,
+  Pressable,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Mic, MicOff, PhoneOff, Video, VideoOff } from 'lucide-react-native';
-import { mediaDevices, RTCIceCandidate, RTCPeerConnection, RTCSessionDescription, RTCView, type MediaStream } from 'react-native-webrtc';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  Lock,
+  Mic,
+  MicOff,
+  PhoneOff,
+  SwitchCamera,
+  User,
+  Video,
+  VideoOff,
+  Volume2,
+  VolumeX,
+} from 'lucide-react-native';
+import {
+  mediaDevices,
+  RTCIceCandidate,
+  RTCPeerConnection,
+  RTCSessionDescription,
+  RTCView,
+  type MediaStream,
+} from 'react-native-webrtc';
+import InCallManager from 'react-native-incall-manager';
+import { useKeepAwake } from 'expo-keep-awake';
+import * as Notifications from 'expo-notifications';
 import { colors } from '@/constants/theme';
 import { callRequest, type CallInfo } from '@/lib/calls';
 import { getRealtimeSocket } from '@/lib/realtime';
-import { socialApi } from '@/lib/social-api';
+import { socialApi, type OwnProfile } from '@/lib/social-api';
 import { GroupMedia, type RemoteTrack } from '@/lib/group-media';
 
 type Signal = { type: 'offer' | 'answer'; sdp: string } | { candidate: object };
+const ONGOING_CALL_NOTIF_ID = 'adda_active_call_notification';
+
+function formatDuration(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
 
 export default function CallScreen() {
+  useKeepAwake(); // Keeps screen and phone alive while on call without touching
+
+  const insets = useSafeAreaInsets();
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const { callId, role, name } = useLocalSearchParams<{ callId?: string; role?: string; name?: string }>();
+
   const [call, setCall] = useState<CallInfo | null>(null);
   const [status, setStatus] = useState(callId ? 'Connecting…' : 'Call unavailable.');
+  const [callDuration, setCallDuration] = useState(0);
   const [local, setLocal] = useState<MediaStream | null>(null);
   const [remote, setRemote] = useState<MediaStream | null>(null);
   const [groupTracks, setGroupTracks] = useState<RemoteTrack[]>([]);
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
+  const [speakerOn, setSpeakerOn] = useState(true);
+  const [userNames, setUserNames] = useState<Record<string, string>>({});
+
   const mutedRef = useRef(false);
   const cameraOffRef = useRef(false);
   const pc = useRef<RTCPeerConnection | null>(null);
@@ -33,6 +77,90 @@ export default function CallScreen() {
   const groupMedia = useRef<GroupMedia | null>(null);
   const pendingPeer = useRef<string | null>(null);
 
+  // InCallManager audio session management
+  useEffect(() => {
+    InCallManager.start({ media: 'video' });
+    InCallManager.setKeepScreenOn(true);
+    InCallManager.setSpeakerphoneOn(true);
+    return () => {
+      InCallManager.stop();
+    };
+  }, []);
+
+  // Live call timer
+  useEffect(() => {
+    if (status !== 'Connected') return;
+    const interval = setInterval(() => {
+      setCallDuration(prev => prev + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [status]);
+
+  // Fetch participant display names for group call tiles
+  useEffect(() => {
+    if (!callId) return;
+    void socialApi<OwnProfile>('/me').then(me => {
+      if (me?.id && me?.name) {
+        setUserNames(prev => ({ ...prev, [me.id]: me.name }));
+      }
+    }).catch(() => {});
+
+    if (call?.target.kind === 'group') {
+      void socialApi<{ members: Array<{ id: string; name: string }> }>(`/groups/${call.target.id}`).then(group => {
+        if (group?.members) {
+          const map: Record<string, string> = {};
+          group.members.forEach(m => { map[m.id] = m.name; });
+          setUserNames(prev => ({ ...prev, ...map }));
+        }
+      }).catch(() => {});
+    } else {
+      void socialApi<Array<{ id: string; name: string }>>('/contacts').then(contacts => {
+        if (Array.isArray(contacts)) {
+          const map: Record<string, string> = {};
+          contacts.forEach(c => { map[c.id] = c.name; });
+          setUserNames(prev => ({ ...prev, ...map }));
+        }
+      }).catch(() => {});
+    }
+  }, [callId, call?.target.id, call?.target.kind]);
+
+  // Keep in call when minimized and show active notification
+  useEffect(() => {
+    if (!callId) return;
+    const displayName = name || (call?.target.kind === 'group' ? 'ADDA Group Call' : 'ADDA Call');
+
+    const sub = AppState.addEventListener('change', async nextState => {
+      if (nextState === 'background' || nextState === 'inactive') {
+        await Notifications.scheduleNotificationAsync({
+          identifier: ONGOING_CALL_NOTIF_ID,
+          content: {
+            title: `📞 ${call?.media === 'video' ? 'Video Call' : 'Voice Call'} • ${displayName}`,
+            body: status === 'Connected' ? `Call active (${formatDuration(callDuration)}) • Tap to return` : 'Call in progress • Tap to return',
+            sticky: true,
+            autoDismiss: false,
+            priority: Notifications.AndroidNotificationPriority.HIGH,
+            data: {
+              kind: 'call',
+              callId,
+              role,
+              name: displayName,
+              isOngoing: true,
+            },
+          },
+          trigger: null,
+        }).catch(() => {});
+      } else if (nextState === 'active') {
+        await Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
+      }
+    });
+
+    return () => {
+      sub.remove();
+      void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
+    };
+  }, [callId, name, role, call, status, callDuration]);
+
+  // WebRTC Call logic
   useEffect(() => {
     if (!callId) return;
     let active = true;
@@ -40,6 +168,7 @@ export default function CallScreen() {
     let currentCall: CallInfo | null = null;
     let connectionTimer: ReturnType<typeof setTimeout> | null = null;
     const clearConnectionTimer = () => { if (connectionTimer) clearTimeout(connectionTimer); connectionTimer = null; };
+
     const startRelay = async () => {
       if (!currentCall || relayStarted.current || !active) return;
       relayStarted.current = true;
@@ -56,19 +185,25 @@ export default function CallScreen() {
         if (active) { setLocal(media.local); setStatus('Connected through ADDA server'); }
       } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Call relay unavailable.'); }
     };
+
     const requestRelay = () => { if (currentCall && !relayStarted.current) socket?.emit('call:relay', callId); };
     const onRelay = (event: { callId: string }) => { if (event.callId === callId) void startRelay(); };
+
     const close = (leave: boolean) => {
       if (ending.current) return;
       ending.current = true;
       clearConnectionTimer();
+      void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
+      InCallManager.stop();
       if (leave) socket?.emit('call:leave', callId);
       pc.current?.close(); pc.current = null;
       groupMedia.current?.close(); groupMedia.current = null;
       localRef.current?.getTracks().forEach(track => track.stop()); localRef.current = null;
       if (active) router.back();
     };
+
     const sendSignal = (to: string, signal: Signal) => socket?.emit('call:signal', { callId, to, signal });
+
     const startOffer = async (peerId: string) => {
       if (!pc.current || offered.current) return;
       offered.current = true;
@@ -80,6 +215,7 @@ export default function CallScreen() {
         connectionTimer = setTimeout(requestRelay, 15_000);
       } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Could not start media.'); }
     };
+
     const onSignal = async (event: { callId: string; from: string; signal: Signal }) => {
       if (event.callId !== callId || relayStarted.current) return;
       if (!pc.current) { pendingSignals.current.push(event); return; }
@@ -99,15 +235,18 @@ export default function CallScreen() {
         }
       } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Could not connect media.'); }
     };
+
     const onJoined = (event: { callId: string; userId: string }) => {
       if (event.callId === callId && role === 'caller' && !relayStarted.current) {
         pendingPeer.current = event.userId;
         if (pc.current) void startOffer(event.userId);
       }
     };
+
     const onEnded = (event: { callId: string; reason: string }) => {
       if (event.callId === callId) { setStatus(event.reason); setTimeout(() => close(false), 900); }
     };
+
     void (async () => {
       try {
         socket = await getRealtimeSocket();
@@ -119,6 +258,13 @@ export default function CallScreen() {
         if (!active) return;
         currentCall = joined;
         setCall(joined);
+        if (joined.media === 'video') {
+          InCallManager.setSpeakerphoneOn(true);
+        } else {
+          InCallManager.setSpeakerphoneOn(false);
+          setSpeakerOn(false);
+        }
+
         if (joined.usingRelay) { await startRelay(); return; }
         if (joined.target.kind === 'group') {
           const media = new GroupMedia(tracks => { if (active) setGroupTracks(tracks); }, message => { if (active) setStatus(message); });
@@ -131,23 +277,26 @@ export default function CallScreen() {
           setStatus('Connected');
           return;
         }
+
         const config = await socialApi<{ iceServers: { urls: string; username?: string; credential?: string }[] }>('/calls/ice');
         const stream = await mediaDevices.getUserMedia({ audio: true, video: joined.media === 'video' });
         if (!active) { stream.getTracks().forEach(track => track.stop()); return; }
         stream.getAudioTracks().forEach(track => { track.enabled = !mutedRef.current; });
         stream.getVideoTracks().forEach(track => { track.enabled = !cameraOffRef.current; });
-        localRef.current = stream; setLocal(stream);
+        localRef.current = stream;
+        setLocal(stream);
+
         const peer = new RTCPeerConnection({ iceServers: config.iceServers });
         pc.current = peer;
         stream.getTracks().forEach(track => peer.addTrack(track, stream));
-        // This package exposes EventTarget at runtime, but its current TS declaration omits the inherited method.
+
         const listen = peer as unknown as { addEventListener: (type: string, listener: (event: { candidate?: RTCIceCandidate; streams?: MediaStream[] }) => void) => void };
         listen.addEventListener('icecandidate', event => {
           if (event.candidate) sendSignal(role === 'caller' ? joined.target.id : joined.callerId, { candidate: event.candidate.toJSON() });
         });
         listen.addEventListener('track', event => {
-          const stream = event.streams?.[0];
-          if (stream && active) setRemote(stream);
+          const s = event.streams?.[0];
+          if (s && active) setRemote(s);
         });
         listen.addEventListener('connectionstatechange', () => {
           if (!active || relayStarted.current) return;
@@ -156,11 +305,13 @@ export default function CallScreen() {
           else if (peer.connectionState === 'disconnected') { clearConnectionTimer(); connectionTimer = setTimeout(requestRelay, 5000); setStatus('Reconnecting…'); }
           else setStatus('Connecting…');
         });
+
         for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
         if (role === 'caller' && (pendingPeer.current || joined.joined.length > 1)) void startOffer(pendingPeer.current || joined.joined.find(id => id !== joined.callerId)!);
         else setStatus(role === 'caller' ? 'Calling…' : 'Connecting…');
       } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Call failed.'); }
     })();
+
     return () => {
       active = false;
       socket?.off('call:signal', onSignal);
@@ -168,6 +319,8 @@ export default function CallScreen() {
       socket?.off('call:ended', onEnded);
       socket?.off('call:relay', onRelay);
       clearConnectionTimer();
+      void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
+      InCallManager.stop();
       if (!ending.current) socket?.emit('call:leave', callId);
       pc.current?.close(); pc.current = null;
       groupMedia.current?.close(); groupMedia.current = null;
@@ -182,6 +335,7 @@ export default function CallScreen() {
     groupMedia.current?.setMuted(next);
     setMuted(next);
   };
+
   const toggleCamera = () => {
     const next = !cameraOffRef.current;
     cameraOffRef.current = next;
@@ -189,33 +343,441 @@ export default function CallScreen() {
     groupMedia.current?.setCameraOff(next);
     setCameraOff(next);
   };
-  const endCall = () => { if (callId) void getRealtimeSocket().then(socket => socket.emit('call:leave', callId)); router.back(); };
-  return <SafeAreaView style={styles.safe}>
-    <Text style={styles.name}>{name || (call?.target.kind === 'group' ? 'Group call' : 'ADDA call')}</Text>
-    <Text style={styles.status}>{status}</Text>
-    {remote && call?.media === 'video' && <RTCView streamURL={remote.toURL()} style={styles.remote} objectFit="cover" />}
-    {call?.media === 'video' && <View style={styles.groupGrid}>{groupTracks.filter(track => track.kind === 'video').map(track => <View key={track.producerId} style={styles.groupTile}><RTCView streamURL={track.stream.toURL()} style={styles.groupVideo} objectFit="cover" /><Text style={styles.groupLabel}>{track.userId.slice(0, 8)}</Text></View>)}</View>}
-    {!remote && groupTracks.filter(track => track.kind === 'video').length === 0 && <View style={styles.waiting}><Text style={styles.waitingText}>{name?.[0]?.toUpperCase() || 'A'}</Text></View>}
-    {local && call?.media === 'video' && !cameraOff && <RTCView streamURL={local.toURL()} style={styles.local} objectFit="cover" mirror />}
-    <View style={styles.controls}>
-      <Pressable accessibilityLabel={muted ? 'Unmute' : 'Mute'} onPress={toggleMute} style={styles.control}>{muted ? <MicOff color={colors.text} /> : <Mic color={colors.text} />}</Pressable>
-      {call?.media === 'video' && <Pressable accessibilityLabel={cameraOff ? 'Turn camera on' : 'Turn camera off'} onPress={toggleCamera} style={styles.control}>{cameraOff ? <VideoOff color={colors.text} /> : <Video color={colors.text} />}</Pressable>}
-      <Pressable accessibilityLabel="End call" onPress={endCall} style={[styles.control, styles.hangup]}><PhoneOff color="#FFFFFF" /></Pressable>
+
+  const flipCamera = () => {
+    const videoTrack = localRef.current?.getVideoTracks()[0];
+    if (videoTrack && typeof (videoTrack as any)._switchCamera === 'function') {
+      (videoTrack as any)._switchCamera();
+    }
+  };
+
+  const toggleSpeaker = () => {
+    const next = !speakerOn;
+    setSpeakerOn(next);
+    InCallManager.setSpeakerphoneOn(next);
+    InCallManager.setForceSpeakerphoneOn(next);
+  };
+
+  const endCall = () => {
+    ending.current = true;
+    void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
+    InCallManager.stop();
+    if (callId) void getRealtimeSocket().then(s => s.emit('call:leave', callId));
+    router.back();
+  };
+
+  const isVideoCall = call?.media === 'video';
+  const isGroup = call?.target.kind === 'group' || groupTracks.length > 0;
+  const videoTracks = groupTracks.filter(track => track.kind === 'video');
+  const audioTracks = groupTracks.filter(track => track.kind === 'audio');
+  const isDirect1on1Video = !isGroup && Boolean(remote) && isVideoCall;
+  const displayName = name || (isGroup ? 'Group Call' : 'ADDA Call');
+
+  // Compute WhatsApp-style smart responsive grid tile dimensions
+  const getGridTileStyle = (index: number, total: number) => {
+    if (total <= 1) {
+      return styles.tileFull;
+    }
+    if (total === 2) {
+      return styles.tileHalfVertical;
+    }
+    if (total === 3) {
+      // 1 on top (100% width, 50% height), 2 on bottom side-by-side (50% width, 50% height)
+      if (index === 0) return styles.tileHalfVertical;
+      return styles.tileQuarter;
+    }
+    if (total === 4) {
+      return styles.tileQuarter;
+    }
+    return styles.tileSixth;
+  };
+
+  return (
+    <View style={styles.container}>
+      {/* ========================================================
+          VIDEO CONTENT (1:1 or WhatsApp Smart Adaptive Grid)
+          ======================================================== */}
+      {isVideoCall ? (
+        <View style={styles.videoStage}>
+          {isDirect1on1Video ? (
+            // 1:1 Video Call: Remote fills 100% full screen
+            <RTCView streamURL={remote!.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" />
+          ) : videoTracks.length > 0 ? (
+            // Group Video Call: Dynamic full-screen grid
+            <View style={styles.fullGridContainer}>
+              {videoTracks.map((track, idx) => (
+                <View key={track.producerId} style={[styles.gridTile, getGridTileStyle(idx, videoTracks.length)]}>
+                  <RTCView streamURL={track.stream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" />
+                  <View style={styles.tileBadge}>
+                    <Text style={styles.tileBadgeText} numberOfLines={1}>
+                      {userNames[track.userId] || `User ${track.userId.slice(0, 4)}`}
+                    </Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          ) : (
+            // Waiting for video / Camera off state
+            <View style={styles.audioCenterStage}>
+              <View style={styles.largeAvatarCircle}>
+                <Text style={styles.largeAvatarText}>{displayName[0]?.toUpperCase() || 'A'}</Text>
+              </View>
+            </View>
+          )}
+
+          {/* 1:1 or Group Floating PiP Preview (Top-Right) */}
+          {local && !cameraOff && (
+            <Pressable onPress={flipCamera} style={[styles.pipContainer, { top: insets.top + 70 }]}>
+              <RTCView streamURL={local.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={true} />
+              <View style={styles.pipBadge}>
+                <Text style={styles.pipBadgeText}>You</Text>
+              </View>
+            </Pressable>
+          )}
+        </View>
+      ) : (
+        /* ========================================================
+           AUDIO CALL SMART GRID / CENTERING
+           ======================================================== */
+        <View style={styles.audioStage}>
+          {audioTracks.length > 1 ? (
+            // Group Audio Grid (WhatsApp style full tiles)
+            <View style={styles.fullGridContainer}>
+              {audioTracks.map((track, idx) => (
+                <View key={track.producerId} style={[styles.audioGridTile, getGridTileStyle(idx, audioTracks.length)]}>
+                  <View style={styles.audioCardAvatar}>
+                    <Text style={styles.audioCardAvatarText}>
+                      {(userNames[track.userId]?.[0] || 'U').toUpperCase()}
+                    </Text>
+                  </View>
+                  <Text style={styles.audioCardName} numberOfLines={1}>
+                    {userNames[track.userId] || `User ${track.userId.slice(0, 4)}`}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          ) : (
+            // 1:1 Audio Call Central Display
+            <View style={styles.audioCenterStage}>
+              <View style={styles.pulseRing}>
+                <View style={styles.largeAvatarCircle}>
+                  <Text style={styles.largeAvatarText}>{displayName[0]?.toUpperCase() || 'A'}</Text>
+                </View>
+              </View>
+              <Text style={styles.audioCallerName}>{displayName}</Text>
+              <Text style={styles.audioCallTimer}>{status === 'Connected' ? formatDuration(callDuration) : status}</Text>
+            </View>
+          )}
+        </View>
+      )}
+
+      {/* ========================================================
+          TOP HEADER OVERLAY (Call Info, Encrypted Badge, Timer)
+          ======================================================== */}
+      <View style={[styles.topHeader, { top: insets.top + 10 }]}>
+        <View style={styles.headerInfoPill}>
+          <View style={styles.encryptedRow}>
+            <Lock size={12} color="#34D399" style={{ marginRight: 4 }} />
+            <Text style={styles.encryptedText}>End-to-end encrypted</Text>
+          </View>
+          <Text style={styles.headerTitle} numberOfLines={1}>{displayName}</Text>
+          <Text style={styles.headerSubtitle}>
+            {status === 'Connected' ? formatDuration(callDuration) : status}
+          </Text>
+        </View>
+      </View>
+
+      {/* ========================================================
+          BOTTOM FLOATING ACTION BAR (WhatsApp Call Controls)
+          ======================================================== */}
+      <View style={[styles.bottomBarContainer, { bottom: Math.max(insets.bottom, 20) + 12 }]}>
+        <View style={styles.bottomBarPill}>
+          {/* Mute Button */}
+          <Pressable
+            accessibilityLabel={muted ? 'Unmute' : 'Mute'}
+            onPress={toggleMute}
+            style={[styles.controlBtn, muted && styles.controlBtnActiveRed]}
+          >
+            {muted ? <MicOff size={22} color="#FFFFFF" /> : <Mic size={22} color="#FFFFFF" />}
+          </Pressable>
+
+          {/* Video Toggle Button (for video calls) */}
+          {isVideoCall && (
+            <Pressable
+              accessibilityLabel={cameraOff ? 'Turn camera on' : 'Turn camera off'}
+              onPress={toggleCamera}
+              style={[styles.controlBtn, cameraOff && styles.controlBtnActiveRed]}
+            >
+              {cameraOff ? <VideoOff size={22} color="#FFFFFF" /> : <Video size={22} color="#FFFFFF" />}
+            </Pressable>
+          )}
+
+          {/* Flip Camera Button (if video is on) */}
+          {isVideoCall && !cameraOff && (
+            <Pressable
+              accessibilityLabel="Flip camera"
+              onPress={flipCamera}
+              style={styles.controlBtn}
+            >
+              <SwitchCamera size={22} color="#FFFFFF" />
+            </Pressable>
+          )}
+
+          {/* Speakerphone Button */}
+          <Pressable
+            accessibilityLabel={speakerOn ? 'Speaker on' : 'Speaker off'}
+            onPress={toggleSpeaker}
+            style={[styles.controlBtn, speakerOn && styles.controlBtnActiveGreen]}
+          >
+            {speakerOn ? <Volume2 size={22} color="#FFFFFF" /> : <VolumeX size={22} color="#FFFFFF" />}
+          </Pressable>
+
+          {/* End Call Button */}
+          <Pressable
+            accessibilityLabel="End call"
+            onPress={endCall}
+            style={[styles.controlBtn, styles.hangupBtn]}
+          >
+            <PhoneOff size={24} color="#FFFFFF" />
+          </Pressable>
+        </View>
+      </View>
     </View>
-  </SafeAreaView>;
+  );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#11251D', alignItems: 'center', paddingTop: 34 },
-  name: { color: '#FFFFFF', fontSize: 26, fontWeight: '800' }, status: { color: '#B9D3C4', fontSize: 14, marginTop: 8 },
-  remote: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0 },
-  waiting: { width: 170, height: 170, borderRadius: 85, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center', marginTop: '30%' },
-  waitingText: { color: '#FFFFFF', fontSize: 72, fontWeight: '700' },
-  local: { position: 'absolute', right: 20, top: 100, width: 115, height: 160, borderRadius: 14, overflow: 'hidden' },
-  groupGrid: { position: 'absolute', top: 110, left: 12, right: 12, bottom: 125, flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignContent: 'center', justifyContent: 'center' },
-  groupTile: { width: '47%', height: 190, backgroundColor: '#1F3B2D', borderRadius: 14, overflow: 'hidden' },
-  groupVideo: { flex: 1 }, groupLabel: { color: '#FFFFFF', fontWeight: '700', position: 'absolute', left: 8, bottom: 7 },
-  controls: { position: 'absolute', bottom: 45, flexDirection: 'row', gap: 20 },
-  control: { width: 62, height: 62, borderRadius: 31, alignItems: 'center', justifyContent: 'center', backgroundColor: '#E4EEE8' },
-  hangup: { backgroundColor: '#DA3D3D' },
+  container: {
+    flex: 1,
+    backgroundColor: '#0A1711',
+  },
+  videoStage: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#0A1711',
+  },
+  audioStage: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#0D2018',
+  },
+  fullGridContainer: {
+    ...StyleSheet.absoluteFill,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  gridTile: {
+    backgroundColor: '#12251D',
+    overflow: 'hidden',
+    borderColor: '#0A1711',
+    borderWidth: 1.5,
+  },
+  tileFull: {
+    width: '100%',
+    height: '100%',
+  },
+  tileHalfVertical: {
+    width: '100%',
+    height: '50%',
+  },
+  tileQuarter: {
+    width: '50%',
+    height: '50%',
+  },
+  tileSixth: {
+    width: '50%',
+    height: '33.33%',
+  },
+  tileBadge: {
+    position: 'absolute',
+    left: 10,
+    bottom: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 10,
+  },
+  tileBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  pipContainer: {
+    position: 'absolute',
+    right: 16,
+    width: 105,
+    height: 155,
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.45)',
+    overflow: 'hidden',
+    backgroundColor: '#183327',
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+  },
+  pipBadge: {
+    position: 'absolute',
+    bottom: 6,
+    left: 6,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  pipBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  audioCenterStage: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pulseRing: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: 'rgba(38, 166, 122, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 24,
+  },
+  largeAvatarCircle: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: '#1C3D2F',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 3,
+    borderColor: '#34D399',
+  },
+  largeAvatarText: {
+    color: '#FFFFFF',
+    fontSize: 54,
+    fontWeight: '700',
+  },
+  audioCallerName: {
+    color: '#FFFFFF',
+    fontSize: 26,
+    fontWeight: '800',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  audioCallTimer: {
+    color: '#34D399',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  audioGridTile: {
+    backgroundColor: '#142920',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderColor: '#0A1711',
+    borderWidth: 1.5,
+  },
+  audioCardAvatar: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#204334',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#34D399',
+    marginBottom: 10,
+  },
+  audioCardAvatarText: {
+    color: '#FFFFFF',
+    fontSize: 30,
+    fontWeight: '700',
+  },
+  audioCardName: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+    maxWidth: '80%',
+    textAlign: 'center',
+  },
+  topHeader: {
+    position: 'absolute',
+    left: 20,
+    right: 20,
+    alignItems: 'center',
+  },
+  headerInfoPill: {
+    backgroundColor: 'rgba(10, 23, 17, 0.78)',
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  encryptedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 2,
+  },
+  encryptedText: {
+    color: '#34D399',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  headerTitle: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  headerSubtitle: {
+    color: 'rgba(255, 255, 255, 0.75)',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  bottomBarContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  bottomBarPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(13, 28, 21, 0.92)',
+    borderRadius: 36,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    gap: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+  },
+  controlBtn: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  controlBtnActiveRed: {
+    backgroundColor: '#EF4444',
+  },
+  controlBtnActiveGreen: {
+    backgroundColor: '#059669',
+  },
+  hangupBtn: {
+    backgroundColor: '#DC2626',
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+  },
 });
