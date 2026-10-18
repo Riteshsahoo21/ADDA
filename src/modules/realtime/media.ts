@@ -23,7 +23,7 @@ function publicAddress() {
 function validKey(value: unknown): value is MediaKey {
   return !!value && typeof value === 'object' && 'kind' in value && 'id' in value &&
     (value.kind === 'call' && typeof value.id === 'string' && value.id.length < 100 ||
-      value.kind === 'room' && (value.id === 'loft' || value.id === 'roof' || value.id === 'tea'));
+      value.kind === 'room' && (value.id === 'loft' || value.id === 'roof' || value.id === 'tea' || value.id === 'beach'));
 }
 function sessionKey(value: MediaKey) { return `${value.kind}:${value.id}`; }
 async function getWorker() {

@@ -1,13 +1,13 @@
 import type { Server, Socket } from 'socket.io';
 
-type RoomId = 'loft' | 'roof' | 'tea';
+type RoomId = 'loft' | 'roof' | 'tea' | 'beach';
 type AvatarBody = 'man' | 'uncle' | 'photo_boy' | 'self' | 'woman' | 'chinese_woman' | 'nepali_woman' | 'white_top_woman';
 type RoomPose = 'idle' | 'walk' | 'run' | 'jump' | 'crouch_idle' | 'crouch_walk' | 'sit_enter' | 'sit_idle' | 'sit_exit';
 type RoomPeer = { userId: string; name: string; avatar: AvatarBody; x: number; y?: number; z: number; yaw: number; pose?: RoomPose };
 type RoomMessage = { id: string; room: RoomId; userId: string; name: string; body: string; createdAt: number };
 type Ack<T> = (reply: { ok: true; value: T } | { ok: false; error: string }) => void;
 
-const roomIds = new Set(['loft', 'roof', 'tea']);
+const roomIds = new Set(['loft', 'roof', 'tea', 'beach']);
 const avatars = new Set(['man', 'uncle', 'photo_boy', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman']);
 const poses = new Set<RoomPose>(['idle', 'walk', 'run', 'jump', 'crouch_idle', 'crouch_walk', 'sit_enter', 'sit_idle', 'sit_exit']);
 const peers = new Map<string, RoomPeer>();
