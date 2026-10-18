@@ -20,10 +20,10 @@ const poses = new Set<RoomPose>(['idle', 'walk', 'run', 'jump', 'crouch_idle', '
 const peers = new Map<string, RoomPeer>();
 const messages = new Map<RoomId, RoomMessage[]>();
 const roomRadios = new Map<RoomId, RoomRadioState>([
-  ['tea', { enabled: true, trackIndex: 0, seekSeconds: 0, lastUpdated: Date.now() }],
-  ['beach', { enabled: true, trackIndex: 1, seekSeconds: 0, lastUpdated: Date.now() }],
-  ['loft', { enabled: true, trackIndex: 2, seekSeconds: 0, lastUpdated: Date.now() }],
-  ['roof', { enabled: true, trackIndex: 3, seekSeconds: 0, lastUpdated: Date.now() }],
+  ['tea', { enabled: false, trackIndex: 0, seekSeconds: 0, lastUpdated: Date.now() }],
+  ['beach', { enabled: false, trackIndex: 1, seekSeconds: 0, lastUpdated: Date.now() }],
+  ['loft', { enabled: false, trackIndex: 2, seekSeconds: 0, lastUpdated: Date.now() }],
+  ['roof', { enabled: false, trackIndex: 3, seekSeconds: 0, lastUpdated: Date.now() }],
 ]);
 const channel = (room: RoomId) => `presence:${room}`;
 
@@ -34,7 +34,20 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     const room = socket.data.roomId as RoomId | undefined;
     socket.data.roomId = undefined;
     peers.delete(socket.id);
-    if (room) { socket.leave(channel(room)); socket.to(channel(room)).emit('room:peer-left', { userId }); }
+    if (room) {
+      socket.leave(channel(room));
+      socket.to(channel(room)).emit('room:peer-left', { userId });
+      const remaining = io.sockets.adapter.rooms.get(channel(room))?.size ?? 0;
+      if (remaining === 0) {
+        const currentRadio = roomRadios.get(room);
+        if (currentRadio) {
+          currentRadio.enabled = false;
+          currentRadio.seekSeconds = 0;
+          currentRadio.lastUpdated = Date.now();
+          roomRadios.set(room, currentRadio);
+        }
+      }
+    }
   };
   socket.on('room:join', (input: { room?: string; avatar?: string }, ack?: Ack<{ peers: RoomPeer[]; messages: RoomMessage[]; radio?: RoomRadioState }>) => {
     if (!input || !roomIds.has(input.room ?? '') || !avatars.has(input.avatar ?? '')) {
@@ -48,7 +61,13 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     peers.set(socket.id, peer);
     const existing = [...io.sockets.adapter.rooms.get(channel(room)) ?? []]
       .filter(id => id !== socket.id).map(id => peers.get(id)).filter((value): value is RoomPeer => !!value);
-    ack?.({ ok: true, value: { peers: existing, messages: messages.get(room) ?? [], radio: roomRadios.get(room) } });
+    const currentRadio = roomRadios.get(room) ?? { enabled: false, trackIndex: 0, seekSeconds: 0, lastUpdated: Date.now() };
+    if (existing.length === 0) {
+      currentRadio.enabled = true;
+      currentRadio.lastUpdated = Date.now();
+      roomRadios.set(room, currentRadio);
+    }
+    ack?.({ ok: true, value: { peers: existing, messages: messages.get(room) ?? [], radio: currentRadio } });
     socket.to(channel(room)).emit('room:peer', peer);
   });
   socket.on('room:position', (input: { x?: number; y?: number; z?: number; yaw?: number; pose?: RoomPose }) => {
