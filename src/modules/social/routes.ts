@@ -115,35 +115,93 @@ socialRoutes.get('/people', run(async (request, response) => {
   response.json(result.rows);
 }));
 
-async function requestContact(selfId: string, targetId: string, response: Parameters<RequestHandler>[1]) {
+async function requestContact(
+  selfId: string,
+  targetUser: { id: string; name: string; username: string; avatarUrl?: string | null },
+  response: Parameters<RequestHandler>[1],
+) {
+  const targetId = targetUser.id;
   if (selfId === targetId) { response.status(400).json({ error: 'You cannot add yourself.' }); return; }
   const [userA, userB] = [selfId, targetId].sort();
-  const existing = await pool.query('SELECT 1 FROM "contact" WHERE "userA" = $1 AND "userB" = $2', [userA, userB]);
-  if (existing.rowCount) { response.status(409).json({ error: 'You are already friends.' }); return; }
-  const incoming = await pool.query('SELECT 1 FROM "friend_request" WHERE "senderId" = $1 AND "recipientId" = $2 AND status = $3', [targetId, selfId, 'pending']);
-  if (incoming.rowCount) { response.status(409).json({ error: 'This person has sent you a friend request. Open Updates to accept it.' }); return; }
-  await pool.query(`INSERT INTO "friend_request" (id, "senderId", "recipientId") VALUES ($1, $2, $3)
-    ON CONFLICT ("senderId", "recipientId") DO UPDATE SET status = 'pending', "updatedAt" = NOW()`, [randomUUID(), selfId, targetId]);
-  const result = await pool.query('SELECT id, name, username FROM "user" WHERE id = $1', [targetId]);
-  response.status(201).json(result.rows[0]);
-  publishFriendUpdate([selfId, targetId]);
+
+  const check = await pool.query<{
+    is_friend: boolean;
+    has_incoming: boolean;
+    sender_name: string;
+    sender_username: string;
+    sender_image: string | null;
+  }>(
+    `SELECT
+       EXISTS(SELECT 1 FROM "contact" WHERE "userA" = $1 AND "userB" = $2) AS is_friend,
+       EXISTS(SELECT 1 FROM "friend_request" WHERE "senderId" = $3 AND "recipientId" = $4 AND status = 'pending') AS has_incoming,
+       (SELECT name FROM "user" WHERE id = $4) AS sender_name,
+       (SELECT username FROM "user" WHERE id = $4) AS sender_username,
+       (SELECT image FROM "user" WHERE id = $4) AS sender_image`,
+    [userA, userB, targetId, selfId],
+  );
+  const row = check.rows[0];
+  if (row?.is_friend) { response.status(409).json({ error: 'You are already friends.' }); return; }
+  if (row?.has_incoming) { response.status(409).json({ error: 'This person has sent you a friend request. Open Updates to accept it.' }); return; }
+
+  const reqId = randomUUID();
+  const now = new Date().toISOString();
+  await pool.query(
+    `INSERT INTO "friend_request" (id, "senderId", "recipientId") VALUES ($1, $2, $3)
+     ON CONFLICT ("senderId", "recipientId") DO UPDATE SET status = 'pending', "updatedAt" = NOW()`,
+    [reqId, selfId, targetId],
+  );
+
+  response.status(201).json(targetUser);
+
+  publishFriendUpdate([selfId, targetId], {
+    type: 'request_created',
+    request: {
+      id: reqId,
+      senderId: selfId,
+      recipientId: targetId,
+      senderName: row?.sender_name || '',
+      senderUsername: row?.sender_username || '',
+      senderAvatarUrl: row?.sender_image || null,
+      recipientName: targetUser.name,
+      recipientUsername: targetUser.username,
+      recipientAvatarUrl: targetUser.avatarUrl || null,
+      createdAt: now,
+      status: 'pending',
+    },
+  });
 }
 
 socialRoutes.post('/contacts/username', run(async (request, response) => {
   const username = typeof request.body?.username === 'string' ? request.body.username.trim().toLowerCase() : '';
   if (!validUsername(username)) { response.status(400).json({ error: 'Enter a valid username.' }); return; }
-  const result = await pool.query<{id: string}>('SELECT id FROM "user" WHERE LOWER(username) = $1', [username]);
+  const result = await pool.query<{ id: string; name: string; username: string; avatarUrl: string | null }>(
+    'SELECT id, name, username, image AS "avatarUrl" FROM "user" WHERE LOWER(username) = $1',
+    [username],
+  );
   if (!result.rows[0]) { response.status(404).json({ error: 'No user has that username.' }); return; }
-  await requestContact(response.locals.userId, result.rows[0].id, response);
+  await requestContact(response.locals.userId, result.rows[0], response);
+}));
+
+socialRoutes.post('/contacts/user/:id', run(async (request, response) => {
+  const targetId = request.params.id;
+  const result = await pool.query<{ id: string; name: string; username: string; avatarUrl: string | null }>(
+    'SELECT id, name, username, image AS "avatarUrl" FROM "user" WHERE id = $1',
+    [targetId],
+  );
+  if (!result.rows[0]) { response.status(404).json({ error: 'User not found.' }); return; }
+  await requestContact(response.locals.userId, result.rows[0], response);
 }));
 
 socialRoutes.post('/contacts/qr', run(async (request, response) => {
   const raw = typeof request.body?.code === 'string' ? request.body.code.trim() : '';
   const code = /^adda:friend:v1:([a-f0-9]{48})$/.exec(raw)?.[1];
   if (!code) { response.status(400).json({ error: 'This is not an ADDA friend QR.' }); return; }
-  const result = await pool.query<{id: string}>('SELECT id FROM "user" WHERE "friendCode" = $1', [code]);
+  const result = await pool.query<{ id: string; name: string; username: string; avatarUrl: string | null }>(
+    'SELECT id, name, username, image AS "avatarUrl" FROM "user" WHERE "friendCode" = $1',
+    [code],
+  );
   if (!result.rows[0]) { response.status(404).json({ error: 'Friend QR not found.' }); return; }
-  await requestContact(response.locals.userId, result.rows[0].id, response);
+  await requestContact(response.locals.userId, result.rows[0], response);
 }));
 
 socialRoutes.get('/friend-requests', run(async (_request, response) => {
@@ -164,11 +222,27 @@ socialRoutes.post('/friend-requests/:id/respond', run(async (request, response) 
   if (decision !== 'accept' && decision !== 'decline') { response.status(400).json({ error: 'Choose accept or decline.' }); return; }
   const client = await pool.connect();
   let parties: string[] = [];
+  let payload: unknown = null;
   try {
     await client.query('BEGIN');
-    const result = await client.query<{ senderId: string; recipientId: string }>(
-      'SELECT "senderId", "recipientId" FROM "friend_request" WHERE id = $1 AND "recipientId" = $2 AND status = $3 FOR UPDATE',
-      [request.params.id, response.locals.userId, 'pending'],
+    const result = await client.query<{
+      senderId: string;
+      recipientId: string;
+      senderName: string;
+      senderUsername: string;
+      senderImage: string | null;
+      recipientName: string;
+      recipientUsername: string;
+      recipientImage: string | null;
+    }>(
+      `SELECT r."senderId", r."recipientId",
+              s.name AS "senderName", s.username AS "senderUsername", s.image AS "senderImage",
+              rec.name AS "recipientName", rec.username AS "recipientUsername", rec.image AS "recipientImage"
+       FROM "friend_request" r
+       JOIN "user" s ON s.id = r."senderId"
+       JOIN "user" rec ON rec.id = r."recipientId"
+       WHERE r.id = $1 AND r."recipientId" = $2 AND r.status = 'pending' FOR UPDATE`,
+      [request.params.id, response.locals.userId],
     );
     const item = result.rows[0];
     if (!item) { await client.query('ROLLBACK'); response.status(404).json({ error: 'Friend request is no longer available.' }); return; }
@@ -179,10 +253,27 @@ socialRoutes.post('/friend-requests/:id/respond', run(async (request, response) 
     await client.query('UPDATE "friend_request" SET status = $2, "updatedAt" = NOW() WHERE id = $1', [request.params.id, decision === 'accept' ? 'accepted' : 'declined']);
     await client.query('COMMIT');
     parties = [item.senderId, item.recipientId];
+    payload = {
+      type: 'request_responded',
+      decision,
+      requestId: request.params.id,
+      senderContact: decision === 'accept' ? {
+        id: item.recipientId,
+        name: item.recipientName,
+        username: item.recipientUsername,
+        avatarUrl: item.recipientImage,
+      } : null,
+      recipientContact: decision === 'accept' ? {
+        id: item.senderId,
+        name: item.senderName,
+        username: item.senderUsername,
+        avatarUrl: item.senderImage,
+      } : null,
+    };
     response.json({ status: decision === 'accept' ? 'accepted' : 'declined' });
   } catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
-  publishFriendUpdate(parties);
+  publishFriendUpdate(parties, payload);
 }));
 
 socialRoutes.get('/groups', run(async (_request, response) => {

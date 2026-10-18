@@ -64,8 +64,8 @@ export async function publishMessage(message: ChatMessage): Promise<void> {
   io?.to(ids.map(userRoom)).emit('chat:message', message);
 }
 
-export function publishFriendUpdate(userIds: string[]): void {
-  io?.to(userIds.map(userRoom)).emit('friends:updated');
+export function publishFriendUpdate(userIds: string[], payload?: unknown): void {
+  io?.to(userIds.map(userRoom)).emit('friends:updated', payload);
 }
 
 export function publishEncryptedChatUpdate(userIds: string[]): void {

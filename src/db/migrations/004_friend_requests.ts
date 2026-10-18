@@ -10,4 +10,6 @@ CREATE TABLE IF NOT EXISTS "friend_request" (
   UNIQUE ("senderId", "recipientId")
 );
 CREATE INDEX IF NOT EXISTS "idx_friend_request_recipient" ON "friend_request" ("recipientId", "status", "createdAt" DESC);
+CREATE INDEX IF NOT EXISTS "idx_friend_request_sender" ON "friend_request" ("senderId", "status", "createdAt" DESC);
+CREATE INDEX IF NOT EXISTS "idx_friend_request_pair_pending" ON "friend_request" ("senderId", "recipientId") WHERE status = 'pending';
 `;
