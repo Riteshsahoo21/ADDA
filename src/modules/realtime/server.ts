@@ -389,6 +389,43 @@ export function attachRealtime(httpServer: HttpServer): Server {
       void processReadAck(data.messageIds, selfId, data.senderId);
     });
 
+    // ========================================================
+    // WHATSAPP DELETE FOR EVERYONE
+    // ========================================================
+    socket.on('chat:delete_for_everyone', async (data: { messageId: string; target: ChatTarget }) => {
+      if (!data?.messageId || !validTarget(data?.target)) return;
+      try {
+        await pool.query('DELETE FROM chat_spool WHERE "messageId" = $1', [data.messageId]).catch(() => {});
+        const targetIds = await listeners(data.target, selfId);
+        io?.to(targetIds.map(userRoom)).emit('chat:message_deleted', {
+          messageId: data.messageId,
+          target: data.target,
+          deletedBy: selfId,
+        });
+      } catch (e) {
+        console.warn('[ADDA] Delete for everyone warning:', e);
+      }
+    });
+
+    // ========================================================
+    // WHATSAPP EMOJI REACTIONS
+    // ========================================================
+    socket.on('chat:reaction', async (data: { messageId: string; target: ChatTarget; emoji: string }) => {
+      if (!data?.messageId || !validTarget(data?.target) || typeof data.emoji !== 'string') return;
+      try {
+        const targetIds = await listeners(data.target, selfId);
+        io?.to(targetIds.map(userRoom)).emit('chat:reaction_updated', {
+          messageId: data.messageId,
+          target: data.target,
+          userId: selfId,
+          userName: socket.data.name || 'User',
+          emoji: data.emoji,
+        });
+      } catch (e) {
+        console.warn('[ADDA] Reaction broadcast warning:', e);
+      }
+    });
+
     socket.on('disconnect', () => {
       for (const room of typingTimers.keys()) stopTyping(room);
     });

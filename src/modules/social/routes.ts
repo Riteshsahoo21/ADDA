@@ -45,16 +45,35 @@ socialRoutes.get('/me', run(async (_request, response) => {
 }));
 
 socialRoutes.patch('/me', run(async (request, response) => {
-  const name = typeof request.body?.name === 'string' ? request.body.name.trim() : '';
-  const username = typeof request.body?.username === 'string' ? request.body.username.trim().toLowerCase() : '';
+  const current = await ensureProfile(response.locals.userId);
+  if (!current) { response.status(404).json({ error: 'User not found.' }); return; }
+
+  const name = typeof request.body?.name === 'string' && request.body.name.trim() ? request.body.name.trim() : current.name;
+  const username = typeof request.body?.username === 'string' && request.body.username.trim() ? request.body.username.trim().toLowerCase() : current.username;
+  const about = typeof request.body?.about === 'string' ? request.body.about.trim().slice(0, 150) : undefined;
+  const avatarUrl = request.body?.avatarUrl; // string or null
+
   if (name.length < 2 || name.length > 60 || !validUsername(username)) {
     response.status(400).json({ error: 'Use a name of 2–60 characters and a username of 3–24 letters, numbers, dots or underscores.' }); return;
   }
-  await ensureProfile(response.locals.userId);
+
+  const updates: string[] = ['name = $2', 'username = $3', '"updatedAt" = NOW()'];
+  const values: any[] = [response.locals.userId, name, username];
+  let paramIdx = 4;
+
+  if (avatarUrl !== undefined) {
+    updates.push(`image = $${paramIdx++}`);
+    values.push(typeof avatarUrl === 'string' ? avatarUrl : null);
+  }
+  if (about !== undefined) {
+    updates.push(`about = $${paramIdx++}`);
+    values.push(about);
+  }
+
   try {
     const result = await pool.query(
-      'UPDATE "user" SET name = $2, username = $3, "updatedAt" = NOW() WHERE id = $1 RETURNING id, name, username, "friendCode"',
-      [response.locals.userId, name, username],
+      `UPDATE "user" SET ${updates.join(', ')} WHERE id = $1 RETURNING id, name, username, "friendCode", image AS "avatarUrl", about`,
+      values,
     );
     response.json(result.rows[0]);
   } catch (error) {
