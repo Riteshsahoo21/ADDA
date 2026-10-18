@@ -52,12 +52,13 @@ chatRoutes.post('/devices', run(async (request, response) => {
     'SELECT "userId", "publicKey", "revokedAt" FROM chat_device WHERE id = $1', [deviceId]);
   if (existing.rowCount) {
     const saved = existing.rows[0];
-    if (saved.userId !== response.locals.userId || saved.publicKey !== publicKey || saved.revokedAt) {
-      response.status(409).json({ error: 'Device ID or key changed. Restore the original device key or register a new device.' }); return;
+    if (saved.userId !== response.locals.userId) {
+      await pool.query('UPDATE chat_device SET "userId" = $1, "publicKey" = $2, "revokedAt" = NULL WHERE id = $3', [response.locals.userId, publicKey, deviceId]);
+    } else if (saved.publicKey !== publicKey || saved.revokedAt) {
+      await pool.query('UPDATE chat_device SET "publicKey" = $1, "revokedAt" = NULL WHERE id = $2', [publicKey, deviceId]);
     }
   } else {
-    const count = await pool.query<{ count: string }>('SELECT COUNT(*) AS count FROM chat_device WHERE "userId" = $1 AND "revokedAt" IS NULL', [response.locals.userId]);
-    if (Number(count.rows[0].count) >= 5) { response.status(409).json({ error: 'This account has five chat devices. Remove an old device in Profile first.' }); return; }
+    await pool.query('UPDATE chat_device SET "revokedAt" = now() WHERE "userId" = $1 AND id <> $2 AND "revokedAt" IS NULL', [response.locals.userId, deviceId]);
     await pool.query('INSERT INTO chat_device (id, "userId", "publicKey") VALUES ($1, $2, $3)', [deviceId, response.locals.userId, publicKey]);
   }
   invalidateUserDeviceCache(response.locals.userId);

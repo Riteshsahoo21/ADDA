@@ -7,7 +7,7 @@ import { attachCallHandlers } from './calls.js';
 import { attachMediaHandlers } from './media.js';
 import { attachRoomHandlers } from './rooms.js';
 import { attachPushHandlers, sendEncryptedChatPush } from './push.js';
-import { getCachedGroupMembers, getRecipientDevices } from './cache.js';
+import { getCachedGroupMembers, getRecipientDevices, invalidateUserDeviceCache } from './cache.js';
 
 type ChatKind = 'direct' | 'group';
 type ChatTarget = { kind: ChatKind; id: string };
@@ -274,7 +274,17 @@ export function attachRealtime(httpServer: HttpServer): Server {
         ]);
 
         const senderDevice = senderDevices.find(d => d.deviceId === senderDeviceId);
-        const senderPublicKey = senderDevice?.publicKey ?? '';
+        let senderPublicKey = (payload as any).senderPublicKey || senderDevice?.publicKey || '';
+        if (!senderPublicKey) {
+          const freshDev = await pool.query<{ publicKey: string }>(
+            'SELECT "publicKey" FROM chat_device WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL',
+            [senderDeviceId, selfId]
+          );
+          if (freshDev.rows.length > 0) {
+            senderPublicKey = freshDev.rows[0].publicKey;
+            invalidateUserDeviceCache(selfId);
+          }
+        }
 
         // Link media to message if attached
         if (mediaId) {

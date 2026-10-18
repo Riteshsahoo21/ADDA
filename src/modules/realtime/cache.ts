@@ -36,7 +36,7 @@ export async function getRecipientDevices(userIds: string[]): Promise<CachedDevi
     for (const uid of missingUsers) {
       deviceCache.set(uid, {
         devices: userMap.get(uid) ?? [],
-        expiresAt: now + 5 * 60 * 1000 // 5 minutes cache
+        expiresAt: now + 30 * 1000 // 30 seconds cache (rapid key sync)
       });
     }
   }
@@ -63,7 +63,7 @@ export async function getCachedGroupMembers(groupId: string): Promise<string[]> 
   const members = dbRes.rows.map(r => r.userId);
   groupMembersCache.set(groupId, {
     members,
-    expiresAt: now + 5 * 60 * 1000 // 5 minutes cache
+    expiresAt: now + 15 * 1000 // 15 seconds cache (rapid membership sync)
   });
   return members;
 }
