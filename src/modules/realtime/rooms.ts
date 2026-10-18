@@ -7,11 +7,24 @@ type RoomPeer = { userId: string; name: string; avatar: AvatarBody; x: number; y
 type RoomMessage = { id: string; room: RoomId; userId: string; name: string; body: string; createdAt: number };
 type Ack<T> = (reply: { ok: true; value: T } | { ok: false; error: string }) => void;
 
+export type RoomRadioState = {
+  enabled: boolean;
+  trackIndex: number;
+  seekSeconds: number;
+  lastUpdated: number;
+};
+
 const roomIds = new Set(['loft', 'roof', 'tea', 'beach']);
 const avatars = new Set(['man', 'uncle', 'photo_boy', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman']);
 const poses = new Set<RoomPose>(['idle', 'walk', 'run', 'jump', 'crouch_idle', 'crouch_walk', 'sit_enter', 'sit_idle', 'sit_exit']);
 const peers = new Map<string, RoomPeer>();
 const messages = new Map<RoomId, RoomMessage[]>();
+const roomRadios = new Map<RoomId, RoomRadioState>([
+  ['tea', { enabled: true, trackIndex: 0, seekSeconds: 0, lastUpdated: Date.now() }],
+  ['beach', { enabled: true, trackIndex: 1, seekSeconds: 0, lastUpdated: Date.now() }],
+  ['loft', { enabled: true, trackIndex: 2, seekSeconds: 0, lastUpdated: Date.now() }],
+  ['roof', { enabled: true, trackIndex: 3, seekSeconds: 0, lastUpdated: Date.now() }],
+]);
 const channel = (room: RoomId) => `presence:${room}`;
 
 export function attachRoomHandlers(io: Server, socket: Socket) {
@@ -23,7 +36,7 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     peers.delete(socket.id);
     if (room) { socket.leave(channel(room)); socket.to(channel(room)).emit('room:peer-left', { userId }); }
   };
-  socket.on('room:join', (input: { room?: string; avatar?: string }, ack?: Ack<{ peers: RoomPeer[]; messages: RoomMessage[] }>) => {
+  socket.on('room:join', (input: { room?: string; avatar?: string }, ack?: Ack<{ peers: RoomPeer[]; messages: RoomMessage[]; radio?: RoomRadioState }>) => {
     if (!input || !roomIds.has(input.room ?? '') || !avatars.has(input.avatar ?? '')) {
       ack?.({ ok: false, error: 'Invalid room or avatar.' }); return;
     }
@@ -35,7 +48,7 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     peers.set(socket.id, peer);
     const existing = [...io.sockets.adapter.rooms.get(channel(room)) ?? []]
       .filter(id => id !== socket.id).map(id => peers.get(id)).filter((value): value is RoomPeer => !!value);
-    ack?.({ ok: true, value: { peers: existing, messages: messages.get(room) ?? [] } });
+    ack?.({ ok: true, value: { peers: existing, messages: messages.get(room) ?? [], radio: roomRadios.get(room) } });
     socket.to(channel(room)).emit('room:peer', peer);
   });
   socket.on('room:position', (input: { x?: number; y?: number; z?: number; yaw?: number; pose?: RoomPose }) => {
@@ -61,6 +74,17 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     messages.set(room, history);
     io.to(channel(room)).emit('room:message', message);
     ack?.({ ok: true, value: message });
+  });
+  socket.on('room:radio-sync', (input: { enabled?: boolean; trackIndex?: number; seekSeconds?: number }) => {
+    const room = socket.data.roomId as RoomId | undefined;
+    if (!room) return;
+    const current = roomRadios.get(room) ?? { enabled: true, trackIndex: 0, seekSeconds: 0, lastUpdated: Date.now() };
+    if (typeof input?.enabled === 'boolean') current.enabled = input.enabled;
+    if (typeof input?.trackIndex === 'number' && input.trackIndex >= 0 && input.trackIndex < 100) current.trackIndex = input.trackIndex;
+    if (typeof input?.seekSeconds === 'number' && input.seekSeconds >= 0) current.seekSeconds = input.seekSeconds;
+    current.lastUpdated = Date.now();
+    roomRadios.set(room, current);
+    socket.to(channel(room)).emit('room:radio-sync', current);
   });
   socket.on('room:leave', leave);
   socket.on('disconnect', leave);
