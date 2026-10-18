@@ -75,6 +75,12 @@ socialRoutes.patch('/me', run(async (request, response) => {
       `UPDATE "user" SET ${updates.join(', ')} WHERE id = $1 RETURNING id, name, username, "friendCode", image AS "avatarUrl", about`,
       values,
     );
+    const contacts = await pool.query<{ id: string }>(
+      'SELECT CASE WHEN "userA" = $1 THEN "userB" ELSE "userA" END AS id FROM "contact" WHERE "userA" = $1 OR "userB" = $1',
+      [response.locals.userId]
+    );
+    const parties = [response.locals.userId, ...contacts.rows.map(r => r.id)];
+    publishFriendUpdate(parties);
     response.json(result.rows[0]);
   } catch (error) {
     if (typeof error === 'object' && error && 'code' in error && error.code === '23505') {
@@ -86,7 +92,7 @@ socialRoutes.patch('/me', run(async (request, response) => {
 
 socialRoutes.get('/contacts', run(async (_request, response) => {
   const result = await pool.query(
-    `SELECT u.id, u.name, u.username, last.body AS "lastMessage", last."createdAt" AS "lastAt" FROM "contact" c
+    `SELECT u.id, u.name, u.username, u.image AS "avatarUrl", last.body AS "lastMessage", last."createdAt" AS "lastAt" FROM "contact" c
      JOIN "user" u ON u.id = CASE WHEN c."userA" = $1 THEN c."userB" ELSE c."userA" END
      LEFT JOIN LATERAL (SELECT m.body, m."createdAt" FROM "chat_message" m
        WHERE (m."senderId" = $1 AND m."recipientId" = u.id) OR (m."senderId" = u.id AND m."recipientId" = $1)
@@ -100,7 +106,7 @@ socialRoutes.get('/contacts', run(async (_request, response) => {
 socialRoutes.get('/people', run(async (request, response) => {
   const search = typeof request.query.search === 'string' ? request.query.search.trim().toLowerCase().slice(0, 24) : '';
   const result = await pool.query(
-    `SELECT u.id, u.name, u.username FROM "user" u WHERE u.id <> $1 AND u.username IS NOT NULL
+    `SELECT u.id, u.name, u.username, u.image AS "avatarUrl" FROM "user" u WHERE u.id <> $1 AND u.username IS NOT NULL
      AND ($2 = '' OR LOWER(u.username) LIKE $2 || '%')
      AND NOT EXISTS (SELECT 1 FROM "contact" c WHERE (c."userA" = $1 AND c."userB" = u.id) OR (c."userB" = $1 AND c."userA" = u.id))
      ORDER BY u."createdAt" DESC LIMIT 20`,
@@ -143,8 +149,8 @@ socialRoutes.post('/contacts/qr', run(async (request, response) => {
 socialRoutes.get('/friend-requests', run(async (_request, response) => {
   const result = await pool.query(
     `SELECT r.id, r."senderId", r."recipientId", r."createdAt", r.status,
-       sender.name AS "senderName", sender.username AS "senderUsername",
-       recipient.name AS "recipientName", recipient.username AS "recipientUsername"
+       sender.name AS "senderName", sender.username AS "senderUsername", sender.image AS "senderAvatarUrl",
+       recipient.name AS "recipientName", recipient.username AS "recipientUsername", recipient.image AS "recipientAvatarUrl"
      FROM "friend_request" r JOIN "user" sender ON sender.id = r."senderId"
        JOIN "user" recipient ON recipient.id = r."recipientId"
      WHERE (r."senderId" = $1 OR r."recipientId" = $1) AND r.status = 'pending'
@@ -181,11 +187,11 @@ socialRoutes.post('/friend-requests/:id/respond', run(async (request, response) 
 
 socialRoutes.get('/groups', run(async (_request, response) => {
   const result = await pool.query(
-    `SELECT g.id, g.name, g."createdAt", COUNT(m2."userId")::int AS "memberCount", last.body AS "lastMessage", last."createdAt" AS "lastAt"
+    `SELECT g.id, g.name, g."avatarUrl", g."createdAt", COUNT(m2."userId")::int AS "memberCount", last.body AS "lastMessage", last."createdAt" AS "lastAt"
      FROM "chat_group" g JOIN "chat_group_member" mine ON mine."groupId" = g.id AND mine."userId" = $1
      JOIN "chat_group_member" m2 ON m2."groupId" = g.id
      LEFT JOIN LATERAL (SELECT body, "createdAt" FROM "chat_message" WHERE "groupId" = g.id ORDER BY "createdAt" DESC LIMIT 1) last ON TRUE
-     GROUP BY g.id, last.body, last."createdAt" ORDER BY COALESCE(last."createdAt", g."createdAt") DESC`,
+     GROUP BY g.id, g."avatarUrl", last.body, last."createdAt" ORDER BY COALESCE(last."createdAt", g."createdAt") DESC`,
     [response.locals.userId],
   );
   response.json(result.rows);
