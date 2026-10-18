@@ -13,7 +13,7 @@ import type { TypingEvent } from '@/lib/realtime';
 import { TypingDots } from '@/components/ui/TypingDots';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { type AvatarBody } from '@/three/player/avatarStyle';
-import { initEncryptedChat, localPreviews, onChatChanged, previewBody } from '@/lib/encrypted-chat';
+import { initEncryptedChat, localPreviews, onChatChanged, previewBody, setCachedProfile } from '@/lib/encrypted-chat';
 
 const avatars: { body: AvatarBody; label: string }[] = [
   { body: 'man', label: 'Indian Man' }, { body: 'uncle', label: 'Uncle' },
@@ -76,6 +76,7 @@ export default function HomeScreen() {
       const previews = await localPreviews();
       const byChat = new Map(previews.map(item => [`${item.kind}:${item.targetId}`, item]));
       setProfile(me);
+      setCachedProfile(me);
       setContacts(friends.map(item => ({ ...item, lastMessage: byChat.get(`direct:${item.id}`) ? previewBody(byChat.get(`direct:${item.id}`)!.body) : null, lastAt: byChat.get(`direct:${item.id}`)?.createdAt ?? null })));
       setPeople(suggested);
       setGroups(joined.map(item => ({ ...item, lastMessage: byChat.get(`group:${item.id}`) ? previewBody(byChat.get(`group:${item.id}`)!.body) : null, lastAt: byChat.get(`group:${item.id}`)?.createdAt ?? null })));

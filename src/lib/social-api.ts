@@ -2,7 +2,43 @@ import { API_BASE_URL, authStorage } from './auth-client';
 
 export type PublicProfile = { id: string; name: string; username: string; lastMessage?: string | null; lastAt?: string | null };
 export type OwnProfile = PublicProfile & { friendCode: string };
-export type ChatGroup = { id: string; name: string; memberCount: number; createdAt: string; lastMessage?: string | null; lastAt?: string | null };
+export type ChatGroup = {
+  id: string;
+  name: string;
+  description?: string;
+  avatarUrl?: string | null;
+  memberCount: number;
+  createdAt: string;
+  lastMessage?: string | null;
+  lastAt?: string | null;
+};
+export type GroupMember = {
+  id: string;
+  name: string;
+  username: string;
+  about: string;
+  avatarUrl: string | null;
+  role: 'admin' | 'member';
+  joinedAt: string;
+  isSelf: boolean;
+};
+export type GroupDetails = {
+  id: string;
+  name: string;
+  description: string;
+  avatarUrl: string | null;
+  ownerId: string;
+  isAdmin: boolean;
+  memberCount: number;
+  members: GroupMember[];
+};
+export type GroupMediaItem = {
+  id: string;
+  mediaKind: 'photo' | 'video';
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: string;
+};
 export type ChatMessage = { id: string; body: string; senderId: string; senderName: string; createdAt: string };
 export type FriendRequest = { id: string; senderId: string; recipientId: string; senderName: string; senderUsername: string; recipientName: string; recipientUsername: string; createdAt: string; status: 'pending' };
 

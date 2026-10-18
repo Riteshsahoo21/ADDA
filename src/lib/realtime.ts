@@ -5,10 +5,10 @@ import type { ChatMessage } from './social-api';
 export type ChatTarget = { kind: 'direct' | 'group'; id: string };
 export type LiveMessage = ChatMessage & { kind: ChatTarget['kind']; targetId: string };
 export type TypingEvent = ChatTarget & { userId: string; name: string; typing: boolean };
-type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 
 let socket: Socket | null = null;
 let socketToken: string | null = null;
+let currentDeviceId: string | null = null;
 
 function waitConnected(live: Socket): Promise<Socket> {
   if (live.connected) return Promise.resolve(live);
@@ -23,37 +23,42 @@ function waitConnected(live: Socket): Promise<Socket> {
   });
 }
 
-export async function getRealtimeSocket(): Promise<Socket> {
+export function setRealtimeDeviceId(deviceId: string | null) {
+  currentDeviceId = deviceId;
+  if (socket && socket.connected && deviceId) {
+    socket.auth = { ...(socket.auth as object), deviceId };
+  }
+}
+
+export async function getRealtimeSocket(deviceId?: string): Promise<Socket> {
   const token = await authStorage.getAccessToken();
   if (!token) throw new Error('Please sign in again.');
+  if (deviceId) currentDeviceId = deviceId;
+
   if (socket && socketToken === token) {
+    if (currentDeviceId && (socket.auth as any)?.deviceId !== currentDeviceId) {
+      socket.auth = { token, deviceId: currentDeviceId };
+    }
     if (!socket.connected) socket.connect();
     return waitConnected(socket);
   }
   socket?.disconnect();
   socketToken = token;
-  socket = io(API_BASE_URL, { auth: { token }, transports: ['websocket'], reconnection: true, autoConnect: true });
+  socket = io(API_BASE_URL, {
+    auth: { token, deviceId: currentDeviceId },
+    transports: ['websocket'],
+    reconnection: true,
+    autoConnect: true,
+  });
   return waitConnected(socket);
+}
+
+export function getActiveSocket(): Socket | null {
+  return socket;
 }
 
 export function disconnectRealtime() {
   socket?.disconnect();
   socket = null;
   socketToken = null;
-}
-
-export async function sendLiveMessage(target: ChatTarget, body: string, clientId: string): Promise<LiveMessage> {
-  const live = await getRealtimeSocket();
-  if (!live.connected) throw new Error('Connecting to ADDA. Try again in a moment.');
-  return new Promise((resolve, reject) => {
-    live.timeout(10_000).emit('chat:send', { target, body, clientId }, (error: Error | null, result?: Result<LiveMessage>) => {
-      if (error) reject(new Error('Message was not confirmed. Tap send again.'));
-      else if (!result || !result.ok) reject(new Error(result?.error || 'Could not send message.'));
-      else resolve(result.value);
-    });
-  });
-}
-
-export function makeClientMessageId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }

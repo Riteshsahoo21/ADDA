@@ -39,6 +39,12 @@ export async function registerCallNotifications() {
   await Notifications.setNotificationChannelAsync('adda_messages', {
     name: 'Messages', importance: Notifications.AndroidImportance.HIGH, sound: 'default',
   });
+  await Notifications.setNotificationChannelAsync('adda_mentions', {
+    name: 'Mentions & Replies',
+    importance: Notifications.AndroidImportance.MAX,
+    sound: 'default',
+    vibrationPattern: [0, 250, 100, 250],
+  });
   await Notifications.setNotificationChannelAsync('adda_calls', {
     name: 'Incoming calls',
     importance: Notifications.AndroidImportance.MAX,
@@ -47,9 +53,31 @@ export async function registerCallNotifications() {
   });
   const permission = await Notifications.getPermissionsAsync();
   const status = permission.granted ? permission : await Notifications.requestPermissionsAsync();
-  if (!status.granted) return;
-  const token = await Notifications.getDevicePushTokenAsync();
-  if (typeof token.data === 'string') await submitToken(token.data);
+  if (!status.granted) {
+    console.warn('[Push] Notification permission not granted.');
+    return;
+  }
+
+  let tokenData: string | null = null;
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      const token = await Notifications.getDevicePushTokenAsync();
+      if (typeof token.data === 'string' && token.data.length > 20) {
+        tokenData = token.data;
+        break;
+      }
+    } catch (error) {
+      console.warn(`[Push] Token retrieval attempt ${attempt}/6 failed:`, error);
+      if (attempt < 6) await new Promise(r => setTimeout(r, attempt * 1500));
+    }
+  }
+
+  if (tokenData) {
+    await submitToken(tokenData);
+    console.log('[Push] Successfully registered FCM push token with backend!');
+  } else {
+    console.warn('[Push] Could not obtain device push token after 6 attempts.');
+  }
 }
 
 export async function unregisterCallNotifications() {

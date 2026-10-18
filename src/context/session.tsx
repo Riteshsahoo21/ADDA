@@ -10,8 +10,8 @@ import { router, type Href } from 'expo-router';
 import { AppState, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors } from '@/constants/theme';
 import * as Notifications from 'expo-notifications';
-import { registerCallNotifications, showSocketCallNotification, unregisterCallNotifications } from '@/lib/push-notifications';
-import { closeEncryptedChat, initEncryptedChat, syncEncryptedChat } from '@/lib/encrypted-chat';
+import { hasCallPushToken, registerCallNotifications, showSocketCallNotification, unregisterCallNotifications } from '@/lib/push-notifications';
+import { closeEncryptedChat, initEncryptedChat, receiveDirectEnvelope, handleMessageStatusUpdate, setCachedProfile, syncEncryptedChat, type Envelope } from '@/lib/encrypted-chat';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
 
 type Session = {
@@ -62,16 +62,28 @@ export function SessionProvider({ children }: PropsWithChildren) {
     const sync = () => { void syncEncryptedChat().catch(error => console.warn('Encrypted chat sync unavailable:', error)); };
     void socialApi<OwnProfile>('/me').then(async me => {
       if (!active) return;
+      setCachedProfile(me);
       await initEncryptedChat(me.id);
       if (!active) return;
       sync();
       live = await getRealtimeSocket();
       if (!active) return;
-      live.on('chat:encrypted:update', sync);
-      live.on('connect', sync);
+      const onEnvelope = (envelope: Envelope) => { void receiveDirectEnvelope(envelope).catch(() => {}); };
+      const onStatus = (update: any) => { void handleMessageStatusUpdate(update).catch(() => {}); };
+      live.on('chat:envelope', onEnvelope);
+      live.on('chat:msg_status', onStatus);
+      live.on('connect', () => {
+        sync();
+        if (!hasCallPushToken()) void registerCallNotifications().catch(() => {});
+      });
     }).catch(error => console.warn('Encrypted chat unavailable:', error));
-    const appState = AppState.addEventListener('change', state => { if (state === 'active') sync(); });
-    return () => { active = false; appState.remove(); live?.off('chat:encrypted:update', sync); live?.off('connect', sync); };
+    const appState = AppState.addEventListener('change', state => {
+      if (state === 'active') {
+        sync();
+        if (!hasCallPushToken()) void registerCallNotifications().catch(() => {});
+      }
+    });
+    return () => { active = false; appState.remove(); live?.off('chat:envelope'); live?.off('chat:msg_status'); live?.off('connect'); };
   }, [username]);
   useEffect(() => {
     if (!username) return;
@@ -104,11 +116,16 @@ export function SessionProvider({ children }: PropsWithChildren) {
     const openCall = (response: Notifications.NotificationResponse) => {
       const data = response.notification.request.content.data;
       if (data?.kind === 'chat' && (data.chatKind === 'direct' || data.chatKind === 'group') && typeof data.chatId === 'string') {
+        if (typeof data.envelope === 'string' && data.envelope.length > 0) {
+          try {
+            const envelope = JSON.parse(data.envelope) as Envelope;
+            void receiveDirectEnvelope(envelope).catch(() => {});
+          } catch {}
+        }
         const chatName = (typeof data.chatName === 'string' && data.chatName) ||
                          (typeof data.name === 'string' && data.name) ||
                          (typeof response.notification.request.content.title === 'string' && response.notification.request.content.title !== 'ADDA' ? response.notification.request.content.title : '');
         void Notifications.clearLastNotificationResponseAsync();
-        router.replace('/home');
         router.push({
           pathname: '/conversation',
           params: {
@@ -129,7 +146,25 @@ export function SessionProvider({ children }: PropsWithChildren) {
     };
     void Notifications.getLastNotificationResponseAsync().then(response => { if (response) openCall(response); });
     const subscription = Notifications.addNotificationResponseReceivedListener(openCall);
-    return () => subscription.remove();
+    const receiveSubscription = Notifications.addNotificationReceivedListener(notification => {
+      const data = notification.request.content.data;
+      if (data?.kind === 'chat') {
+        if (typeof data.envelope === 'string' && data.envelope.length > 0) {
+          try {
+            const envelope = JSON.parse(data.envelope) as Envelope;
+            void receiveDirectEnvelope(envelope).catch(() => {
+              void syncEncryptedChat().catch(() => {});
+            });
+            return;
+          } catch {}
+        }
+        void syncEncryptedChat().catch(() => {});
+      }
+    });
+    return () => {
+      subscription.remove();
+      receiveSubscription.remove();
+    };
   }, [username]);
 
   const answerCall = () => {
