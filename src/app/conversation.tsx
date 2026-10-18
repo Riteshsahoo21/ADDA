@@ -1,5 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  FlatList,
+  Image,
+  KeyboardAvoidingView,
+  Modal,
+  PanResponder,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import * as Crypto from 'expo-crypto';
 import * as ImagePicker from 'expo-image-picker';
 import * as Sharing from 'expo-sharing';
@@ -7,16 +23,57 @@ import * as MediaLibrary from 'expo-media-library/legacy';
 import { VideoView } from 'expo-video';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
-import { ArrowLeft, Download, LockKeyhole, Paperclip, Phone, Play, Reply, Send, Share2, Trash2, Video, X } from 'lucide-react-native';
+import {
+  ArrowLeft,
+  Ban,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Download,
+  MoreVertical,
+  Paperclip,
+  Phone,
+  Play,
+  Reply,
+  Search,
+  Send,
+  Share2,
+  Smile,
+  Star,
+  Trash2,
+  Video,
+  X,
+} from 'lucide-react-native';
 import { colors } from '@/constants/theme';
 import { socialApi, type ChatGroup, type GroupDetails, type GroupMember, type OwnProfile, type PublicProfile } from '@/lib/social-api';
 import { getRealtimeSocket, type ChatTarget, type TypingEvent } from '@/lib/realtime';
 import {
-  chatSafetyCode, deleteLocalMessage, getActiveUserId, getCachedProfile,
-  handleMessageStatusUpdate, initEncryptedChat, isEncryptedChatReady, localMessages,
-  markChatRead, mediaFromBody, onChatChanged, openEncryptedMedia, prefetchChatKeys,
-  receiveDirectEnvelope, sendEncryptedMedia, sendEncryptedMessage, setCachedProfile,
-  syncEncryptedChat, type EncryptedMedia, type Envelope, type LocalMessage, type QuotedReply
+  deleteLocalMessage,
+  deleteMessageForEveryone,
+  getActiveUserId,
+  getCachedProfile,
+  handleMessageStatusUpdate,
+  handleRemoteMessageDeleted,
+  handleRemoteReaction,
+  clearKeyCache,
+  initEncryptedChat,
+  isEncryptedChatReady,
+  localMessages,
+  markChatRead,
+  mediaFromBody,
+  onChatChanged,
+  openEncryptedMedia,
+  prefetchChatKeys,
+  receiveDirectEnvelope,
+  sendEncryptedMedia,
+  sendEncryptedMessage,
+  setCachedProfile,
+  syncEncryptedChat,
+  toggleMessageReaction,
+  type EncryptedMedia,
+  type Envelope,
+  type LocalMessage,
+  type QuotedReply,
 } from '@/lib/encrypted-chat';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { TypingDots } from '@/components/ui/TypingDots';
@@ -30,8 +87,108 @@ type ViewerState = {
   mine: boolean;
 } | null;
 
+const EMOJI_LIST = [
+  '😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '😊', '😇',
+  '🙂', '🙃', '😉', '😌', '😍', '🥰', '😘', '😗', '😋', '😛',
+  '😜', '🤪', '😎', '🥳', '😏', '😒', '😞', '😔', '😟', '😕',
+  '🥺', '😢', '😭', '😤', '😠', '😡', '🤯', '😳', '🥵', '🥶',
+  '😱', '😨', '🤔', '🤫', '🤐', '🤗', '😴', '😷', '🤒', '🤕',
+  '🤢', '🤮', '🤧', '💀', '💩', '🤡', '👻', '👽', '🤖', '🎃',
+  '😺', '❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '💔',
+  '❣️', '💕', '💞', '💓', '💗', '💖', '💘', '💝', '🔥', '✨',
+  '🌟', '💥', '💯', '🎉', '🎊', '👍', '👎', '👏', '🙌', '👐',
+  '🤲', '🤝', '🙏', '✊', '👊', '✌️', '🤞', '🤟', '🤘', '👌',
+  '👈', '👉', '👆', '👇', '👋', '🤙', '💪', '👀', '🧠', '💋',
+];
+
+function SwipeableBubbleRow({
+  children,
+  onSwipeReply,
+  onLongPress,
+  isSelected,
+  disabled,
+}: {
+  children: React.ReactNode;
+  onSwipeReply: () => void;
+  onLongPress: () => void;
+  isSelected?: boolean;
+  disabled?: boolean;
+}) {
+  const panX = useRef(new Animated.Value(0)).current;
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        if (disabled) return false;
+        return gestureState.dx > 12 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy * 1.5);
+      },
+      onPanResponderMove: (_, gestureState) => {
+        if (disabled) return;
+        if (gestureState.dx > 0) {
+          panX.setValue(Math.min(gestureState.dx, 70));
+        }
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        if (!disabled && gestureState.dx > 45) {
+          onSwipeReply();
+        }
+        Animated.spring(panX, {
+          toValue: 0,
+          useNativeDriver: true,
+          bounciness: 6,
+        }).start();
+      },
+      onPanResponderTerminate: () => {
+        Animated.spring(panX, {
+          toValue: 0,
+          useNativeDriver: true,
+        }).start();
+      },
+    })
+  ).current;
+
+  const iconOpacity = panX.interpolate({
+    inputRange: [0, 10, 35],
+    outputRange: [0, 0.4, 1],
+    extrapolate: 'clamp',
+  });
+
+  const iconScale = panX.interpolate({
+    inputRange: [0, 10, 45],
+    outputRange: [0.4, 0.6, 1],
+    extrapolate: 'clamp',
+  });
+
+  return (
+    <View style={[styles.swipeRowWrapper, isSelected && styles.selectedRowWrapper]}>
+      {!disabled && (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.swipeReplyIconArea,
+            {
+              opacity: iconOpacity,
+              transform: [{ scale: iconScale }],
+            },
+          ]}
+        >
+          <Reply size={20} color="#25D366" />
+        </Animated.View>
+      )}
+      <Animated.View
+        {...panResponder.panHandlers}
+        style={{ transform: [{ translateX: panX }] }}
+      >
+        <Pressable onLongPress={onLongPress} delayLongPress={280}>
+          {children}
+        </Pressable>
+      </Animated.View>
+    </View>
+  );
+}
+
 export default function ConversationScreen() {
-  const { kind, id, name } = useLocalSearchParams<{ kind?: string; id?: string; name?: string }>();
+  const { kind, id, name, search } = useLocalSearchParams<{ kind?: string; id?: string; name?: string; search?: string }>();
   const [chatTitle, setChatTitle] = useState(name || '');
   const [selfId, setSelfId] = useState('');
   const [selfName, setSelfName] = useState('');
@@ -46,6 +203,14 @@ export default function ConversationScreen() {
   const [groupMembers, setGroupMembers] = useState<GroupMember[]>([]);
   const [selectedMentions, setSelectedMentions] = useState<string[]>([]);
   const [mentionQuery, setMentionQuery] = useState<{ active: boolean; prefix: string; query: string } | null>(null);
+
+  // WhatsApp selection mode & Reactions & In-chat Search & Emoji Picker
+  const [selectedMessage, setSelectedMessage] = useState<LocalMessage | null>(null);
+  const [isSearching, setIsSearching] = useState(search === '1');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+
   const flatListRef = useRef<FlatList<LocalMessage>>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const typingExpiry = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -56,6 +221,41 @@ export default function ConversationScreen() {
   const target: ChatTarget | null = useMemo(() => valid ? { kind: kind as ChatTarget['kind'], id: id as string } : null, [valid, kind, id]);
 
   const reversedMessages = useMemo(() => [...messages].reverse(), [messages]);
+
+  const searchMatches = useMemo(() => {
+    if (!searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase().trim();
+    return reversedMessages.filter(m => !m.body.startsWith('__adda_media__') && m.body !== '__adda_deleted__' && m.body.toLowerCase().includes(q));
+  }, [searchQuery, reversedMessages]);
+
+  useEffect(() => {
+    setCurrentMatchIdx(0);
+  }, [searchQuery]);
+
+  const jumpToMatch = (idx: number) => {
+    if (searchMatches.length === 0) return;
+    const targetMsg = searchMatches[idx];
+    const flatIdx = reversedMessages.findIndex(m => m.id === targetMsg.id);
+    if (flatIdx !== -1) {
+      try {
+        flatListRef.current?.scrollToIndex({ index: flatIdx, animated: true, viewPosition: 0.5 });
+      } catch {}
+    }
+  };
+
+  const nextSearchMatch = () => {
+    if (searchMatches.length === 0) return;
+    const nextIdx = (currentMatchIdx + 1) % searchMatches.length;
+    setCurrentMatchIdx(nextIdx);
+    jumpToMatch(nextIdx);
+  };
+
+  const prevSearchMatch = () => {
+    if (searchMatches.length === 0) return;
+    const prevIdx = (currentMatchIdx - 1 + searchMatches.length) % searchMatches.length;
+    setCurrentMatchIdx(prevIdx);
+    jumpToMatch(prevIdx);
+  };
 
   useEffect(() => {
     if (name) setChatTitle(name);
@@ -191,12 +391,50 @@ export default function ConversationScreen() {
 
     const onDisconnect = () => { setTypingNames({}); for (const timer of expiry.values()) clearTimeout(timer); expiry.clear(); lastTyping.current = 0; };
 
+    const onRemoteDelete = (payload: { messageId: string }) => {
+      if (payload?.messageId) {
+        void handleRemoteMessageDeleted(payload.messageId);
+        setMessages(curr => curr.map(m => m.id === payload.messageId ? { ...m, body: '__adda_deleted__', reactions: null, replyTo: null } : m));
+        setSelectedMessage(current => (current?.id === payload.messageId ? null : current));
+      }
+    };
+
+    const onRemoteReaction = (payload: { messageId: string; userId: string; emoji: string }) => {
+      if (payload?.messageId) {
+        void handleRemoteReaction(payload);
+        setMessages(curr => curr.map(m => {
+          if (m.id !== payload.messageId) return m;
+          const reactions = { ...(m.reactions || {}) };
+          if (reactions[payload.userId] === payload.emoji) {
+            delete reactions[payload.userId];
+          } else {
+            reactions[payload.userId] = payload.emoji;
+          }
+          return { ...m, reactions };
+        }));
+      }
+    };
+
+    const onGroupUpdate = (payload?: { groupId?: string }) => {
+      if (target.kind === 'group' && (!payload?.groupId || payload.groupId === target.id)) {
+        clearKeyCache(target);
+        void socialApi<GroupDetails>(`/groups/${target.id}`).then(details => {
+          setGroupMembers(details.members);
+          if (details.name) setChatTitle(details.name);
+        }).catch(() => {});
+        void prefetchChatKeys(target);
+      }
+    };
+
     void getRealtimeSocket().then(value => {
       if (!active) return;
       live = value;
       value.on('chat:envelope', onEnvelope);
       value.on('chat:msg_status', onStatus);
       value.on('chat:typing', onTyping);
+      value.on('chat:message_deleted', onRemoteDelete);
+      value.on('chat:reaction_updated', onRemoteReaction);
+      value.on('group:updated', onGroupUpdate);
       value.on('connect', onConnect);
       value.on('disconnect', onDisconnect);
       if (value.connected) onConnect();
@@ -213,6 +451,9 @@ export default function ConversationScreen() {
       live?.off('chat:envelope', onEnvelope);
       live?.off('chat:msg_status', onStatus);
       live?.off('chat:typing', onTyping);
+      live?.off('chat:message_deleted', onRemoteDelete);
+      live?.off('chat:reaction_updated', onRemoteReaction);
+      live?.off('group:updated', onGroupUpdate);
       live?.off('connect', onConnect);
       live?.off('disconnect', onDisconnect);
     };
@@ -289,26 +530,104 @@ export default function ConversationScreen() {
     });
   };
 
-  const onMessageLongPress = (item: LocalMessage, mine: boolean) => {
-    const media = mediaFromBody(item.body);
-    Alert.alert(
-      item.senderName,
-      media ? (media.mediaKind === 'video' ? '🎥 Video' : '📷 Photo') : (item.body.length > 60 ? item.body.slice(0, 57) + '...' : item.body),
-      [
-        { text: 'Reply', onPress: () => triggerReply(item) },
-        ...(mine ? [{
-          text: 'Delete',
-          style: 'destructive' as const,
+  const onMessageLongPress = (item: LocalMessage) => {
+    if (item.body === '__adda_deleted__') {
+      Alert.alert('Delete message?', 'Delete this message for yourself?', [
+        {
+          text: 'Delete for me',
+          style: 'destructive',
           onPress: async () => {
             try {
               await deleteLocalMessage(item.id);
               setMessages(curr => curr.filter(m => m.id !== item.id));
             } catch {}
-          }
-        }] : []),
-        { text: 'Cancel', style: 'cancel' as const },
-      ]
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+      return;
+    }
+    setSelectedMessage(item);
+  };
+
+  const handleReact = async (msg: LocalMessage, emoji: string) => {
+    if (!target) return;
+    const currentReactions: Record<string, string> = { ...(msg.reactions || {}) };
+    if (currentReactions[selfId] === emoji) {
+      delete currentReactions[selfId];
+    } else {
+      currentReactions[selfId] = emoji;
+    }
+    setMessages(curr =>
+      curr.map(m => (m.id === msg.id ? { ...m, reactions: currentReactions } : m))
     );
+    setSelectedMessage(null);
+    try {
+      await toggleMessageReaction(target, msg.id, emoji);
+    } catch (err) {
+      console.warn('React error:', err);
+    }
+  };
+
+  const handleDeleteSelected = () => {
+    if (!selectedMessage || !target) return;
+    const isMine = selectedMessage.senderId === selfId;
+    if (isMine) {
+      Alert.alert(
+        'Delete message?',
+        'You can delete this message for everyone or just for yourself.',
+        [
+          {
+            text: 'Delete for everyone',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await deleteMessageForEveryone(target, selectedMessage.id);
+                setMessages(curr => curr.map(m => m.id === selectedMessage.id ? { ...m, body: '__adda_deleted__', reactions: null, replyTo: null } : m));
+                setSelectedMessage(null);
+              } catch {
+                Alert.alert('Error', 'Could not delete for everyone.');
+              }
+            },
+          },
+          {
+            text: 'Delete for me',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await deleteLocalMessage(selectedMessage.id);
+                setMessages(curr => curr.filter(m => m.id !== selectedMessage.id));
+                setSelectedMessage(null);
+              } catch {
+                Alert.alert('Error', 'Could not delete message.');
+              }
+            },
+          },
+          { text: 'Cancel', style: 'cancel', onPress: () => setSelectedMessage(null) },
+        ]
+      );
+    } else {
+      Alert.alert(
+        'Delete message?',
+        'Delete this message for yourself? It will remain for other people in this chat.',
+        [
+          {
+            text: 'Delete for me',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await deleteLocalMessage(selectedMessage.id);
+                setMessages(curr => curr.filter(m => m.id !== selectedMessage.id));
+                setSelectedMessage(null);
+              } catch {
+                Alert.alert('Error', 'Could not delete message.');
+              }
+            },
+          },
+          { text: 'Cancel', style: 'cancel', onPress: () => setSelectedMessage(null) },
+        ]
+      );
+    }
   };
 
   const send = async () => {
@@ -413,14 +732,6 @@ export default function ConversationScreen() {
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not start call.'); }
   };
 
-  const showSafetyCode = async () => {
-    if (!target) return;
-    try {
-      const code = await chatSafetyCode(target);
-      Alert.alert('Compare chat keys', `${code}\n\nCompare this code with the other people in this chat through a trusted channel. If it differs, do not share sensitive messages.`);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not check chat keys.'); }
-  };
-
   const handleDownload = async (fileUri: string, mediaKind: 'image' | 'video' = 'image') => {
     try {
       const permission = await MediaLibrary.requestPermissionsAsync();
@@ -472,7 +783,36 @@ export default function ConversationScreen() {
     );
   };
 
-  const renderMessageBody = (text: string, isMine: boolean) => {
+  const renderMessageBody = (text: string, isMine: boolean, msgId: string) => {
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim();
+      const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`(${escaped})`, 'gi');
+      const parts = text.split(regex);
+      const isCurrentMatch = searchMatches[currentMatchIdx]?.id === msgId;
+      return (
+        <Text style={[styles.body, !isMine && styles.theirBody]}>
+          {parts.map((part, i) => {
+            if (part.toLowerCase() === q.toLowerCase()) {
+              return (
+                <Text key={i} style={[styles.searchHighlight, isCurrentMatch && styles.searchHighlightActive]}>
+                  {part}
+                </Text>
+              );
+            }
+            if (part.startsWith('@')) {
+              return (
+                <Text key={i} style={styles.mentionText}>
+                  {part}
+                </Text>
+              );
+            }
+            return part;
+          })}
+        </Text>
+      );
+    }
+
     const regex = /(@[A-Za-z0-9_]+(?:\s[A-Za-z0-9_]+)?|@everyone)/g;
     const parts = text.split(regex);
     if (parts.length <= 1) {
@@ -496,65 +836,120 @@ export default function ConversationScreen() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <View style={styles.top}>
-        <Pressable accessibilityLabel="Back" onPress={handleBack} style={styles.back}>
-          <ArrowLeft size={24} color={colors.text} />
-        </Pressable>
-
-        {kind === 'group' ? (
-          <Pressable
-            onPress={() =>
-              router.push({
-                pathname: '/group-info',
-                params: { id: target?.id, name: activeTitle },
-              } as unknown as Href)
-            }
-            style={styles.headerPressable}
-          >
-            <View style={styles.avatar}>
-              <Text style={styles.initial}>{activeTitle[0]?.toUpperCase() || '?'}</Text>
-            </View>
-            <View style={styles.titleWrap}>
-              <Text style={styles.title} numberOfLines={1}>{activeTitle}</Text>
-              <View style={styles.subtitleRow}>
-                <Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]}>
-                  {Object.keys(typingNames).length
-                    ? `${Object.values(typingNames).slice(0, 2).join(', ')} typing`
-                    : 'Tap for group info'}
-                </Text>
-                {Object.keys(typingNames).length > 0 && <TypingDots />}
-              </View>
-            </View>
-          </Pressable>
-        ) : (
-          <View style={styles.headerPressable}>
-            <View style={styles.avatar}>
-              <Text style={styles.initial}>{activeTitle[0]?.toUpperCase() || '?'}</Text>
-            </View>
-            <View style={styles.titleWrap}>
-              <Text style={styles.title} numberOfLines={1}>{activeTitle}</Text>
-              <View style={styles.subtitleRow}>
-                <Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]}>
-                  {Object.keys(typingNames).length
-                    ? `${Object.values(typingNames).slice(0, 2).join(', ')} typing`
-                    : 'Contact'}
-                </Text>
-                {Object.keys(typingNames).length > 0 && <TypingDots />}
-              </View>
-            </View>
+      {/* 1. SELECTION TOP BAR (WhatsApp style matching screenshot) */}
+      {selectedMessage ? (
+        <View style={styles.topSelectionBar}>
+          <View style={styles.selectionLeft}>
+            <Pressable onPress={() => setSelectedMessage(null)} style={styles.selectionBtn} accessibilityLabel="Cancel selection">
+              <ArrowLeft size={24} color="#FFFFFF" />
+            </Pressable>
+            <Text style={styles.selectionCount}>1</Text>
           </View>
-        )}
+          <View style={styles.selectionRight}>
+            <Pressable onPress={() => { triggerReply(selectedMessage); setSelectedMessage(null); }} style={styles.selectionBtn} accessibilityLabel="Reply">
+              <Reply size={22} color="#FFFFFF" />
+            </Pressable>
+            <Pressable onPress={handleDeleteSelected} style={styles.selectionBtn} accessibilityLabel="Delete">
+              <Trash2 size={22} color="#FFFFFF" />
+            </Pressable>
+            <Pressable onPress={() => setSelectedMessage(null)} style={styles.selectionBtn} accessibilityLabel="More options">
+              <MoreVertical size={22} color="#FFFFFF" />
+            </Pressable>
+          </View>
+        </View>
+      ) : isSearching ? (
+        /* 2. SEARCH TOP BAR */
+        <View style={styles.topSearchBar}>
+          <Pressable onPress={() => { setIsSearching(false); setSearchQuery(''); }} style={styles.searchBackBtn} accessibilityLabel="Close search">
+            <ArrowLeft size={24} color="#FFFFFF" />
+          </Pressable>
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search messages..."
+            placeholderTextColor="#8E9BA8"
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            autoFocus
+          />
+          {searchQuery.trim().length > 0 && (
+            <View style={styles.searchControls}>
+              <Text style={styles.searchMatchCount}>
+                {searchMatches.length > 0 ? `${currentMatchIdx + 1}/${searchMatches.length}` : '0/0'}
+              </Text>
+              <Pressable onPress={prevSearchMatch} style={styles.searchNavBtn} accessibilityLabel="Previous match">
+                <ChevronUp size={20} color="#FFFFFF" />
+              </Pressable>
+              <Pressable onPress={nextSearchMatch} style={styles.searchNavBtn} accessibilityLabel="Next match">
+                <ChevronDown size={20} color="#FFFFFF" />
+              </Pressable>
+              <Pressable onPress={() => setSearchQuery('')} style={styles.searchNavBtn} accessibilityLabel="Clear search">
+                <X size={18} color="#8E9BA8" />
+              </Pressable>
+            </View>
+          )}
+        </View>
+      ) : (
+        /* 3. NORMAL TOP BAR */
+        <View style={styles.top}>
+          <Pressable accessibilityLabel="Back" onPress={handleBack} style={styles.back}>
+            <ArrowLeft size={24} color={colors.text} />
+          </Pressable>
 
-        <Pressable accessibilityLabel="Compare encryption keys" onPress={() => void showSafetyCode()} style={styles.callAction}>
-          <LockKeyhole size={19} color={colors.primary} />
-        </Pressable>
-        <Pressable accessibilityLabel="Voice call" onPress={() => void startCall('audio')} style={styles.callAction}>
-          <Phone size={20} color={colors.primary} />
-        </Pressable>
-        <Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}>
-          <Video size={22} color={colors.primary} />
-        </Pressable>
-      </View>
+          {kind === 'group' ? (
+            <Pressable
+              onPress={() =>
+                router.push({
+                  pathname: '/group-info',
+                  params: { id: target?.id, name: activeTitle },
+                } as unknown as Href)
+              }
+              style={styles.headerPressable}
+            >
+              <View style={styles.avatar}>
+                <Text style={styles.initial}>{activeTitle[0]?.toUpperCase() || '?'}</Text>
+              </View>
+              <View style={styles.titleWrap}>
+                <Text style={styles.title} numberOfLines={1}>{activeTitle}</Text>
+                <View style={styles.subtitleRow}>
+                  <Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]}>
+                    {Object.keys(typingNames).length
+                      ? `${Object.values(typingNames).slice(0, 2).join(', ')} typing`
+                      : 'Tap for group info'}
+                  </Text>
+                  {Object.keys(typingNames).length > 0 && <TypingDots />}
+                </View>
+              </View>
+            </Pressable>
+          ) : (
+            <View style={styles.headerPressable}>
+              <View style={styles.avatar}>
+                <Text style={styles.initial}>{activeTitle[0]?.toUpperCase() || '?'}</Text>
+              </View>
+              <View style={styles.titleWrap}>
+                <Text style={styles.title} numberOfLines={1}>{activeTitle}</Text>
+                <View style={styles.subtitleRow}>
+                  <Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]}>
+                    {Object.keys(typingNames).length
+                      ? `${Object.values(typingNames).slice(0, 2).join(', ')} typing`
+                      : 'Contact'}
+                  </Text>
+                  {Object.keys(typingNames).length > 0 && <TypingDots />}
+                </View>
+              </View>
+            </View>
+          )}
+
+          <Pressable accessibilityLabel="Search in chat" onPress={() => setIsSearching(true)} style={styles.callAction}>
+            <Search size={20} color={colors.primary} />
+          </Pressable>
+          <Pressable accessibilityLabel="Voice call" onPress={() => void startCall('audio')} style={styles.callAction}>
+            <Phone size={20} color={colors.primary} />
+          </Pressable>
+          <Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}>
+            <Video size={22} color={colors.primary} />
+          </Pressable>
+        </View>
+      )}
 
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 20 : 0}>
         <FlatList
@@ -569,80 +964,179 @@ export default function ConversationScreen() {
           removeClippedSubviews={Platform.OS === 'android'}
           renderItem={({ item }) => {
             const mine = item.senderId === selfId;
-            const media = mediaFromBody(item.body);
-            const isTagged = !mine && (item.mentions?.includes(selfId) || item.mentions?.includes('everyone'));
-            return (
-              <Pressable
-                onLongPress={() => onMessageLongPress(item, mine)}
-                delayLongPress={300}
-                style={[
-                  styles.bubble,
-                  mine ? styles.myBubble : styles.theirBubble,
-                  media && styles.mediaBubble,
-                  isTagged && styles.taggedBubble,
-                ]}
-              >
-                {kind === 'group' && !mine && <Text style={styles.sender}>{item.senderName}</Text>}
+            const isDeleted = item.body === '__adda_deleted__';
 
-                {/* Quoted Reply inside message bubble */}
-                {item.replyTo && (
-                  <Pressable
-                    onPress={() => {
-                      const idx = reversedMessages.findIndex(m => m.id === item.replyTo?.messageId);
-                      if (idx !== -1) {
-                        try {
-                          flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 });
-                        } catch {}
-                      }
-                    }}
-                    style={[styles.quotedBubbleCard, mine ? styles.myQuotedBubbleCard : styles.theirQuotedBubbleCard]}
+            if (isDeleted) {
+              return (
+                <SwipeableBubbleRow
+                  onSwipeReply={() => {}}
+                  onLongPress={() => onMessageLongPress(item)}
+                  isSelected={false}
+                  disabled={true}
+                >
+                  <View
+                    style={[
+                      styles.bubble,
+                      mine ? styles.myBubble : styles.theirBubble,
+                      styles.deletedBubble,
+                    ]}
                   >
-                    <View style={styles.quotedAccentBar} />
-                    <View style={styles.quotedBubbleContent}>
-                      <Text style={styles.quotedSenderName} numberOfLines={1}>
-                        {item.replyTo.senderId === selfId ? 'You' : item.replyTo.senderName}
+                    <View style={styles.deletedRow}>
+                      <Ban size={15} color={mine ? 'rgba(255, 255, 255, 0.65)' : colors.muted} style={{ marginRight: 6 }} />
+                      <Text style={[styles.deletedText, !mine && styles.theirDeletedText]}>
+                        {mine ? 'You deleted this message' : 'This message was deleted'}
                       </Text>
-                      <Text style={[styles.quotedSnippet, mine ? styles.myQuotedSnippet : styles.theirQuotedSnippet]} numberOfLines={2}>
-                        {item.replyTo.snippet}
+                      <Text style={[styles.deletedTime, !mine && styles.theirDeletedTime]}>
+                        {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
                       </Text>
                     </View>
-                    {item.replyTo.mediaId && (
-                      <View style={styles.quotedBubbleThumbnail}>
-                        <Text style={{ fontSize: 16 }}>{item.replyTo.mediaKind === 'video' ? '🎥' : '📷'}</Text>
+                  </View>
+                </SwipeableBubbleRow>
+              );
+            }
+
+            const media = mediaFromBody(item.body);
+            const isTagged = !mine && (item.mentions?.includes(selfId) || item.mentions?.includes('everyone'));
+            const isSelected = selectedMessage?.id === item.id;
+            const hasReactions = Boolean(item.reactions && Object.keys(item.reactions).length > 0);
+
+            return (
+              <SwipeableBubbleRow
+                onSwipeReply={() => triggerReply(item)}
+                onLongPress={() => onMessageLongPress(item)}
+                isSelected={isSelected}
+              >
+                {/* Floating WhatsApp Emoji Reaction Pill directly above selected message */}
+                {isSelected && (
+                  <View style={[styles.floatingReactionPill, mine ? styles.myReactionFloating : styles.theirReactionFloating]}>
+                    {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => (
+                      <Pressable
+                        key={emoji}
+                        onPress={() => void handleReact(item, emoji)}
+                        style={styles.reactionEmojiBtn}
+                      >
+                        <Text style={styles.reactionEmojiText}>{emoji}</Text>
+                      </Pressable>
+                    ))}
+                    <Pressable
+                      onPress={() => {
+                        setShowEmojiPicker(true);
+                      }}
+                      style={styles.reactionPlusBtn}
+                    >
+                      <Text style={styles.reactionPlusText}>＋</Text>
+                    </Pressable>
+                  </View>
+                )}
+
+                <View
+                  style={[
+                    styles.bubble,
+                    mine ? styles.myBubble : styles.theirBubble,
+                    media && styles.mediaBubble,
+                    isTagged && styles.taggedBubble,
+                    hasReactions && styles.bubbleWithReactions,
+                  ]}
+                >
+                  {kind === 'group' && !mine && <Text style={styles.sender}>{item.senderName}</Text>}
+
+                  {/* Quoted Reply inside message bubble */}
+                  {item.replyTo && (
+                    <Pressable
+                      onPress={() => {
+                        const idx = reversedMessages.findIndex(m => m.id === item.replyTo?.messageId);
+                        if (idx !== -1) {
+                          try {
+                            flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 });
+                          } catch {}
+                        }
+                      }}
+                      style={[styles.quotedBubbleCard, mine ? styles.myQuotedBubbleCard : styles.theirQuotedBubbleCard]}
+                    >
+                      <View style={styles.quotedAccentBar} />
+                      <View style={styles.quotedBubbleContent}>
+                        <Text style={styles.quotedSenderName} numberOfLines={1}>
+                          {item.replyTo.senderId === selfId ? 'You' : item.replyTo.senderName}
+                        </Text>
+                        <Text style={[styles.quotedSnippet, mine ? styles.myQuotedSnippet : styles.theirQuotedSnippet]} numberOfLines={2}>
+                          {item.replyTo.snippet}
+                        </Text>
                       </View>
-                    )}
-                  </Pressable>
-                )}
-
-                {media ? (
-                  <MediaMessage
-                    media={media}
-                    onPress={(mediaUri) =>
-                      setViewerMedia({
-                        uri: mediaUri,
-                        media,
-                        messageId: item.id,
-                        senderName: item.senderName,
-                        createdAt: item.createdAt,
-                        mine,
-                      })
-                    }
-                  />
-                ) : (
-                  renderMessageBody(item.body, mine)
-                )}
-
-                <View style={[styles.messageFooter, media && styles.mediaFooter]}>
-                  <Text style={[styles.messageTime, !mine && styles.theirMessageTime]}>
-                    {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
-                  </Text>
-                  {mine && (
-                    <Text accessibilityLabel={item.status === 'read' ? 'Read' : item.status === 'delivered' ? 'Delivered' : item.status === 'sent' ? 'Sent' : 'Pending'} style={[styles.tick, item.status === 'read' && styles.readTick]}>
-                      {item.status === 'read' || item.status === 'delivered' ? '✓✓' : item.status === 'sent' ? '✓' : '○'}
-                    </Text>
+                      {item.replyTo.mediaId && (
+                        <View style={styles.quotedBubbleThumbnail}>
+                          <Text style={{ fontSize: 16 }}>{item.replyTo.mediaKind === 'video' ? '🎥' : '📷'}</Text>
+                        </View>
+                      )}
+                    </Pressable>
                   )}
+
+                  {media ? (
+                    <MediaMessage
+                      media={media}
+                      onPress={(mediaUri) => {
+                        if (selectedMessage) {
+                          setSelectedMessage(null);
+                          return;
+                        }
+                        setViewerMedia({
+                          uri: mediaUri,
+                          media,
+                          messageId: item.id,
+                          senderName: item.senderName,
+                          createdAt: item.createdAt,
+                          mine,
+                        });
+                      }}
+                      onLongPress={() => onMessageLongPress(item)}
+                    />
+                  ) : (
+                    renderMessageBody(item.body, mine, item.id)
+                  )}
+
+                  <View style={[styles.messageFooter, media && styles.mediaFooter]}>
+                    <Text style={[styles.messageTime, !mine && styles.theirMessageTime]}>
+                      {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                    </Text>
+                    {mine && (
+                      <Text accessibilityLabel={item.status === 'read' ? 'Read' : item.status === 'delivered' ? 'Delivered' : item.status === 'sent' ? 'Sent' : 'Pending'} style={[styles.tick, item.status === 'read' && styles.readTick]}>
+                        {item.status === 'read' || item.status === 'delivered' ? '✓✓' : item.status === 'sent' ? '✓' : '○'}
+                      </Text>
+                    )}
+                  </View>
+
+                  {/* Reaction Badge on message bubble */}
+                  {(() => {
+                    if (!item.reactions || typeof item.reactions !== 'object') return null;
+                    const counts: Record<string, number> = {};
+                    for (const e of Object.values(item.reactions)) {
+                      if (typeof e === 'string') counts[e] = (counts[e] || 0) + 1;
+                    }
+                    const entries = Object.entries(counts);
+                    if (entries.length === 0) return null;
+                    const myEmoji = selfId && item.reactions[selfId];
+                    return (
+                      <Pressable
+                        onPress={() => {
+                          if (myEmoji) {
+                            void handleReact(item, myEmoji);
+                          } else {
+                            onMessageLongPress(item);
+                          }
+                        }}
+                        style={[
+                          styles.reactionBadge,
+                          mine ? styles.myReactionBadge : styles.theirReactionBadge,
+                          myEmoji && styles.myReactionActiveBadge,
+                        ]}
+                      >
+                        <Text style={styles.reactionBadgeText}>
+                          {entries.map(([e]) => e).join('')} {entries.reduce((acc, [, c]) => acc + c, 0) > 1 ? entries.reduce((acc, [, c]) => acc + c, 0) : ''}
+                        </Text>
+                      </Pressable>
+                    );
+                  })()}
                 </View>
-              </Pressable>
+              </SwipeableBubbleRow>
             );
           }}
           ListFooterComponent={
@@ -708,7 +1202,15 @@ export default function ConversationScreen() {
           </View>
         )}
 
+        {/* Composer with Emoji, Attach, and Send */}
         <View style={styles.composer}>
+          <Pressable
+            accessibilityLabel="Emoji tray"
+            onPress={() => setShowEmojiPicker(prev => !prev)}
+            style={styles.attach}
+          >
+            <Smile size={23} color={showEmojiPicker ? '#25D366' : colors.primary} />
+          </Pressable>
           <Pressable accessibilityLabel="Attach photo or video" disabled={sending} onPress={() => void attach()} style={styles.attach}>
             <Paperclip size={23} color={colors.primary} />
           </Pressable>
@@ -725,6 +1227,41 @@ export default function ConversationScreen() {
             <Send size={20} color="#FFFFFF" />
           </Pressable>
         </View>
+
+        {/* EMOJI TRAY TRAY */}
+        {showEmojiPicker && (
+          <View style={styles.emojiTrayContainer}>
+            {selectedMessage && (
+              <View style={styles.emojiTrayHeader}>
+                <Text style={styles.emojiTrayHeaderText}>React to message</Text>
+                <Pressable onPress={() => setShowEmojiPicker(false)} style={styles.emojiTrayCloseBtn}>
+                  <X size={18} color="#8E9BA8" />
+                </Pressable>
+              </View>
+            )}
+            <ScrollView
+              contentContainerStyle={styles.emojiGrid}
+              keyboardShouldPersistTaps="always"
+            >
+              {EMOJI_LIST.map((emoji) => (
+                <Pressable
+                  key={emoji}
+                  onPress={() => {
+                    if (selectedMessage) {
+                      void handleReact(selectedMessage, emoji);
+                      setShowEmojiPicker(false);
+                    } else {
+                      onDraftChange(draft + emoji);
+                    }
+                  }}
+                  style={styles.emojiGridItem}
+                >
+                  <Text style={styles.emojiGridText}>{emoji}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
+        )}
       </KeyboardAvoidingView>
 
       {viewerMedia && (
@@ -760,6 +1297,29 @@ export default function ConversationScreen() {
                 <Image source={{ uri: viewerMedia.uri }} style={styles.viewerImage} resizeMode="contain" />
               )}
             </View>
+
+            {/* Quick Reaction Bar in Full-Screen Viewer */}
+            <View style={styles.viewerFooterBar}>
+              <View style={styles.viewerReactionPill}>
+                {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => {
+                  const currentViewerMsg = messages.find(m => m.id === viewerMedia.messageId);
+                  const isReacted = currentViewerMsg?.reactions?.[selfId] === emoji;
+                  return (
+                    <Pressable
+                      key={emoji}
+                      onPress={() => {
+                        if (currentViewerMsg) {
+                          void handleReact(currentViewerMsg, emoji);
+                        }
+                      }}
+                      style={[styles.viewerReactionEmojiBtn, isReacted && styles.viewerReactionEmojiActive]}
+                    >
+                      <Text style={styles.viewerReactionEmojiText}>{emoji}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
           </SafeAreaView>
         </Modal>
       )}
@@ -767,7 +1327,15 @@ export default function ConversationScreen() {
   );
 }
 
-function MediaMessage({ media, onPress }: { media: EncryptedMedia; onPress: (uri: string) => void }) {
+function MediaMessage({
+  media,
+  onPress,
+  onLongPress,
+}: {
+  media: EncryptedMedia;
+  onPress: (uri: string) => void;
+  onLongPress?: () => void;
+}) {
   const [uri, setUri] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -800,16 +1368,21 @@ function MediaMessage({ media, onPress }: { media: EncryptedMedia; onPress: (uri
 
   if (loading) {
     return (
-      <View style={styles.mediaLoading}>
+      <Pressable onLongPress={onLongPress} delayLongPress={280} style={styles.mediaLoading}>
         <ActivityIndicator size="small" color={colors.primary} />
         <Text style={styles.mediaLoadingText}>Downloading {media.mediaKind}...</Text>
-      </View>
+      </Pressable>
     );
   }
 
   if (uri) {
     return (
-      <Pressable onPress={() => onPress(uri)} style={styles.mediaPressable}>
+      <Pressable
+        onPress={() => onPress(uri)}
+        onLongPress={onLongPress}
+        delayLongPress={280}
+        style={styles.mediaPressable}
+      >
         {media.mediaKind === 'image' ? (
           <Image
             source={{ uri }}
@@ -830,6 +1403,8 @@ function MediaMessage({ media, onPress }: { media: EncryptedMedia; onPress: (uri
   return (
     <Pressable
       onPress={loadMedia}
+      onLongPress={onLongPress}
+      delayLongPress={280}
       style={styles.mediaButton}
     >
       <Text style={styles.mediaErrorText}>{error || `Tap to load ${media.mediaKind}`}</Text>
@@ -1095,4 +1670,212 @@ const styles = StyleSheet.create({
   viewerBody: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   viewerImage: { width: '100%', height: '100%' },
   viewerVideo: { width: '100%', height: '100%' },
+  topSelectionBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#1F2C34',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2D383E',
+  },
+  selectionLeft: { flexDirection: 'row', alignItems: 'center', gap: 18 },
+  selectionCount: { color: '#FFFFFF', fontSize: 18, fontWeight: '700' },
+  selectionRight: { flexDirection: 'row', alignItems: 'center', gap: 20 },
+  selectionBtn: { padding: 4 },
+  topSearchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: '#1F2C34',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2D383E',
+    gap: 12,
+  },
+  searchBackBtn: { padding: 4 },
+  searchInput: {
+    flex: 1,
+    height: 40,
+    backgroundColor: '#121B22',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    color: '#FFFFFF',
+    fontSize: 15,
+  },
+  searchControls: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  searchMatchCount: { color: '#8E9BA8', fontSize: 13, fontWeight: '600' },
+  searchNavBtn: { padding: 4 },
+  searchHighlight: { backgroundColor: '#F59E0B', color: '#000000', borderRadius: 2 },
+  searchHighlightActive: { backgroundColor: '#25D366', color: '#000000', fontWeight: '800' },
+  swipeRowWrapper: { position: 'relative', width: '100%', marginVertical: 2 },
+  selectedRowWrapper: { backgroundColor: 'rgba(37, 211, 102, 0.16)', borderRadius: 12 },
+  swipeReplyIconArea: {
+    position: 'absolute',
+    left: 8,
+    top: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: 32,
+    zIndex: 0,
+  },
+  floatingReactionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#202C33',
+    borderRadius: 24,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 6,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    gap: 6,
+  },
+  myReactionFloating: { alignSelf: 'flex-end', marginRight: 8 },
+  theirReactionFloating: { alignSelf: 'flex-start', marginLeft: 8 },
+  reactionEmojiBtn: { paddingHorizontal: 6, paddingVertical: 2 },
+  reactionEmojiText: { fontSize: 24 },
+  reactionPlusBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#2A3942',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 4,
+  },
+  reactionPlusText: { color: '#8E9BA8', fontSize: 18, fontWeight: '700' },
+  bubbleWithReactions: {
+    marginBottom: 10,
+  },
+  reactionBadge: {
+    position: 'absolute',
+    bottom: -10,
+    backgroundColor: '#202C33',
+    borderRadius: 12,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderWidth: 1.5,
+    borderColor: '#0B1014',
+    elevation: 4,
+    zIndex: 10,
+  },
+  myReactionBadge: { right: 8 },
+  theirReactionBadge: { left: 8 },
+  myReactionActiveBadge: {
+    borderColor: '#25D366',
+    backgroundColor: '#1E3A2F',
+  },
+  reactionBadgeText: { fontSize: 12, color: '#FFFFFF' },
+  viewerFooterBar: {
+    position: 'absolute',
+    bottom: 24,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 20,
+  },
+  viewerReactionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(32, 44, 51, 0.92)',
+    borderRadius: 28,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    gap: 8,
+  },
+  viewerReactionEmojiBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    borderRadius: 16,
+  },
+  viewerReactionEmojiActive: {
+    backgroundColor: 'rgba(37, 211, 102, 0.25)',
+  },
+  viewerReactionEmojiText: {
+    fontSize: 26,
+  },
+  emojiTrayHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#202C33',
+  },
+  emojiTrayHeaderText: {
+    color: '#8E9BA8',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  emojiTrayCloseBtn: {
+    padding: 4,
+  },
+  emojiTrayContainer: {
+    height: 220,
+    backgroundColor: '#121B22',
+    borderTopWidth: 1,
+    borderTopColor: '#202C33',
+  },
+  emojiGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+    justifyContent: 'flex-start',
+  },
+  emojiGridItem: {
+    width: '12.5%',
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emojiGridText: {
+    fontSize: 26,
+  },
+  deletedBubble: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
+    maxWidth: '85%',
+  },
+  deletedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  deletedText: {
+    fontStyle: 'italic',
+    fontSize: 14,
+    color: 'rgba(255, 255, 255, 0.75)',
+    flexShrink: 1,
+  },
+  theirDeletedText: {
+    color: colors.muted,
+  },
+  deletedTime: {
+    fontSize: 10,
+    color: 'rgba(255, 255, 255, 0.6)',
+    marginLeft: 8,
+    alignSelf: 'flex-end',
+  },
+  theirDeletedTime: {
+    color: colors.muted,
+  },
 });
