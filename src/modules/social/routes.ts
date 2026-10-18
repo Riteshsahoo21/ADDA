@@ -3,8 +3,8 @@ import { Router, type RequestHandler } from 'express';
 import { auth } from '../auth/auth.js';
 import { pool } from '../../db/pool.js';
 import { ensureProfile, validUsername } from './profile.js';
-import { publishFriendUpdate } from '../realtime/server.js';
-import { invalidateGroupMembersCache } from '../realtime/cache.js';
+import { publishFriendUpdate, publishGroupUpdate } from '../realtime/server.js';
+import { getCachedGroupMembers, invalidateGroupMembersCache } from '../realtime/cache.js';
 import { env } from '../../config/env.js';
 
 export const socialRoutes = Router();
@@ -191,14 +191,286 @@ socialRoutes.post('/groups', run(async (request, response) => {
     await client.query('BEGIN');
     const id = randomUUID();
     await client.query('INSERT INTO "chat_group" (id, name, "ownerId") VALUES ($1, $2, $3)', [id, name, response.locals.userId]);
-    for (const userId of [response.locals.userId, ...ids]) {
-      await client.query('INSERT INTO "chat_group_member" ("groupId", "userId") VALUES ($1, $2)', [id, userId]);
+    await client.query('INSERT INTO "chat_group_member" ("groupId", "userId", "role") VALUES ($1, $2, $3)', [id, response.locals.userId, 'admin']);
+    for (const userId of ids) {
+      await client.query('INSERT INTO "chat_group_member" ("groupId", "userId", "role") VALUES ($1, $2, $3)', [id, userId, 'member']);
     }
     await client.query('COMMIT');
     invalidateGroupMembersCache(id);
     response.status(201).json({ id, name, memberCount: ids.length + 1 });
   } catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
+}));
+
+socialRoutes.get('/groups/:id', run(async (request, response) => {
+  const groupId = String(request.params.id);
+  const callerId = response.locals.userId as string;
+
+  const groupRes = await pool.query<{
+    id: string;
+    name: string;
+    description: string;
+    avatarUrl: string | null;
+    ownerId: string;
+    createdAt: string;
+  }>(
+    'SELECT id, name, COALESCE(description, \'\') AS description, "avatarUrl", "ownerId", "createdAt" FROM "chat_group" WHERE id = $1',
+    [groupId]
+  );
+  if (!groupRes.rows.length) {
+    response.status(404).json({ error: 'Group not found.' });
+    return;
+  }
+  const group = groupRes.rows[0];
+
+  const callerMember = await pool.query<{ role: string }>(
+    'SELECT role FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2',
+    [groupId, callerId]
+  );
+  if (!callerMember.rows.length) {
+    response.status(403).json({ error: 'You are not a member of this group.' });
+    return;
+  }
+  const callerRole = callerMember.rows[0].role;
+  const isAdmin = callerId === group.ownerId || callerRole === 'admin';
+
+  const membersRes = await pool.query<{
+    id: string;
+    name: string;
+    username: string;
+    about: string;
+    avatarUrl: string | null;
+    role: 'admin' | 'member';
+    joinedAt: string;
+  }>(
+    `SELECT u.id, u.name, u.username, COALESCE(u.about, 'Hey there! I am using ADDA.') AS about,
+            u.image AS "avatarUrl", m.role, m."joinedAt"
+     FROM "chat_group_member" m
+     JOIN "user" u ON u.id = m."userId"
+     WHERE m."groupId" = $1
+     ORDER BY (m."userId" = $2) DESC, (m.role = 'admin') DESC, u.name ASC`,
+    [groupId, callerId]
+  );
+
+  response.json({
+    id: group.id,
+    name: group.name,
+    description: group.description,
+    avatarUrl: group.avatarUrl,
+    ownerId: group.ownerId,
+    isAdmin,
+    memberCount: membersRes.rows.length,
+    members: membersRes.rows.map(m => ({
+      ...m,
+      isSelf: m.id === callerId
+    }))
+  });
+}));
+
+socialRoutes.patch('/groups/:id', run(async (request, response) => {
+  const groupId = String(request.params.id);
+  const callerId = response.locals.userId as string;
+  const { name, description, avatarUrl } = request.body ?? {};
+
+  const member = await pool.query<{ role: string }>(
+    'SELECT role FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2',
+    [groupId, callerId]
+  );
+  const groupRes = await pool.query<{ ownerId: string }>('SELECT "ownerId" FROM "chat_group" WHERE id = $1', [groupId]);
+  if (!groupRes.rows.length || !member.rows.length) {
+    response.status(404).json({ error: 'Group unavailable.' });
+    return;
+  }
+  const isAdmin = callerId === groupRes.rows[0].ownerId || member.rows[0].role === 'admin';
+  if (!isAdmin) {
+    response.status(403).json({ error: 'Only admins can edit group settings.' });
+    return;
+  }
+
+  const updates: string[] = [];
+  const values: any[] = [];
+  let paramIdx = 1;
+
+  if (typeof name === 'string' && name.trim().length >= 2 && name.trim().length <= 60) {
+    updates.push(`name = $${paramIdx++}`);
+    values.push(name.trim());
+  }
+  if (typeof description === 'string' && description.length <= 500) {
+    updates.push(`description = $${paramIdx++}`);
+    values.push(description.trim());
+  }
+  if (typeof avatarUrl === 'string' || avatarUrl === null) {
+    updates.push(`"avatarUrl" = $${paramIdx++}`);
+    values.push(avatarUrl);
+  }
+
+  if (updates.length > 0) {
+    values.push(groupId);
+    await pool.query(`UPDATE "chat_group" SET ${updates.join(', ')} WHERE id = $${paramIdx}`, values);
+  }
+
+  const allMembers = await getCachedGroupMembers(groupId);
+  publishGroupUpdate(groupId, allMembers);
+
+  response.json({ ok: true });
+}));
+
+socialRoutes.post('/groups/:id/members', run(async (request, response) => {
+  const groupId = String(request.params.id);
+  const callerId = response.locals.userId as string;
+  const memberIds: unknown = request.body?.memberIds;
+
+  if (!Array.isArray(memberIds) || memberIds.length === 0 || !memberIds.every(id => typeof id === 'string')) {
+    response.status(400).json({ error: 'Select at least one contact to add.' });
+    return;
+  }
+
+  const member = await pool.query<{ role: string }>(
+    'SELECT role FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2',
+    [groupId, callerId]
+  );
+  const groupRes = await pool.query<{ ownerId: string }>('SELECT "ownerId" FROM "chat_group" WHERE id = $1', [groupId]);
+  if (!groupRes.rows.length || !member.rows.length) {
+    response.status(404).json({ error: 'Group unavailable.' });
+    return;
+  }
+  const isAdmin = callerId === groupRes.rows[0].ownerId || member.rows[0].role === 'admin';
+  if (!isAdmin) {
+    response.status(403).json({ error: 'Only admins can add members.' });
+    return;
+  }
+
+  for (const uid of memberIds as string[]) {
+    await pool.query(
+      'INSERT INTO "chat_group_member" ("groupId", "userId", role) VALUES ($1, $2, \'member\') ON CONFLICT ("groupId", "userId") DO NOTHING',
+      [groupId, uid]
+    );
+  }
+
+  invalidateGroupMembersCache(groupId);
+  const allMembers = await getCachedGroupMembers(groupId);
+  publishGroupUpdate(groupId, allMembers);
+
+  response.json({ ok: true });
+}));
+
+socialRoutes.patch('/groups/:id/members/:userId', run(async (request, response) => {
+  const groupId = String(request.params.id);
+  const targetUserId = String(request.params.userId);
+  const callerId = response.locals.userId as string;
+  const { role } = request.body ?? {};
+
+  if (role !== 'admin' && role !== 'member') {
+    response.status(400).json({ error: 'Invalid role.' });
+    return;
+  }
+
+  const groupRes = await pool.query<{ ownerId: string }>('SELECT "ownerId" FROM "chat_group" WHERE id = $1', [groupId]);
+  const callerMember = await pool.query<{ role: string }>(
+    'SELECT role FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2',
+    [groupId, callerId]
+  );
+  if (!groupRes.rows.length || !callerMember.rows.length) {
+    response.status(404).json({ error: 'Group unavailable.' });
+    return;
+  }
+  const isCallerAdmin = callerId === groupRes.rows[0].ownerId || callerMember.rows[0].role === 'admin';
+  if (!isCallerAdmin) {
+    response.status(403).json({ error: 'Only admins can change roles.' });
+    return;
+  }
+
+  if (targetUserId === groupRes.rows[0].ownerId && role !== 'admin') {
+    response.status(403).json({ error: 'The group creator must remain an admin.' });
+    return;
+  }
+
+  await pool.query(
+    'UPDATE "chat_group_member" SET role = $1 WHERE "groupId" = $2 AND "userId" = $3',
+    [role, groupId, targetUserId]
+  );
+
+  const allMembers = await getCachedGroupMembers(groupId);
+  publishGroupUpdate(groupId, allMembers);
+
+  response.json({ ok: true });
+}));
+
+socialRoutes.delete('/groups/:id/members/:userId', run(async (request, response) => {
+  const groupId = String(request.params.id);
+  const targetUserId = String(request.params.userId);
+  const callerId = response.locals.userId as string;
+
+  const groupRes = await pool.query<{ ownerId: string }>('SELECT "ownerId" FROM "chat_group" WHERE id = $1', [groupId]);
+  if (!groupRes.rows.length) {
+    response.status(404).json({ error: 'Group unavailable.' });
+    return;
+  }
+  const ownerId = groupRes.rows[0].ownerId;
+
+  // Case 1: Member leaves voluntarily
+  if (callerId === targetUserId) {
+    await pool.query('DELETE FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2', [groupId, callerId]);
+    invalidateGroupMembersCache(groupId);
+    const remaining = await pool.query<{ count: string }>('SELECT count(*)::int AS count FROM "chat_group_member" WHERE "groupId" = $1', [groupId]);
+    if (parseInt(remaining.rows[0].count, 10) === 0) {
+      await pool.query('DELETE FROM "chat_group" WHERE id = $1', [groupId]);
+    } else {
+      const allMembers = await getCachedGroupMembers(groupId);
+      publishGroupUpdate(groupId, allMembers);
+    }
+    response.json({ ok: true, left: true });
+    return;
+  }
+
+  // Case 2: Admin removes member
+  const callerMember = await pool.query<{ role: string }>(
+    'SELECT role FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2',
+    [groupId, callerId]
+  );
+  const isCallerAdmin = callerId === ownerId || callerMember.rows[0]?.role === 'admin';
+  if (!isCallerAdmin) {
+    response.status(403).json({ error: 'Only admins can remove members.' });
+    return;
+  }
+  if (targetUserId === ownerId) {
+    response.status(403).json({ error: 'The group creator cannot be removed.' });
+    return;
+  }
+
+  await pool.query('DELETE FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2', [groupId, targetUserId]);
+  invalidateGroupMembersCache(groupId);
+  const allMembers = await getCachedGroupMembers(groupId);
+  publishGroupUpdate(groupId, allMembers);
+
+  response.json({ ok: true, removed: true });
+}));
+
+socialRoutes.get('/groups/:id/media', run(async (request, response) => {
+  const groupId = String(request.params.id);
+  const callerId = response.locals.userId as string;
+
+  const member = await pool.query('SELECT 1 FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2', [groupId, callerId]);
+  if (!member.rows.length) {
+    response.status(403).json({ error: 'You are not a member of this group.' });
+    return;
+  }
+
+  const result = await pool.query<{
+    id: string;
+    ownerId: string;
+    mediaKind: 'image' | 'video';
+    contentLength: string;
+    createdAt: string;
+  }>(
+    `SELECT id, "ownerId", "mediaKind", "contentLength", "createdAt"
+     FROM "chat_media"
+     WHERE "targetId" = $1 AND confirmed = true
+     ORDER BY "createdAt" DESC LIMIT 100`,
+    [groupId]
+  );
+
+  response.json(result.rows);
 }));
 
 async function canMessageDirect(selfId: string, otherId: string) {

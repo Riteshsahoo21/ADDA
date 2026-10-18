@@ -49,7 +49,8 @@ export async function sendEncryptedChatPush(
   senderId: string,
   previewText?: string,
   groupName?: string,
-  envelopesByUser?: Map<string, any>
+  envelopesByUser?: Map<string, any>,
+  mentions?: string[]
 ) {
   if (!enabled || !userIds.length) return;
   const result = await pool.query<{ token: string; userId: string }>('SELECT token, "userId" FROM push_device WHERE "userId" = ANY($1::text[])', [userIds]);
@@ -64,6 +65,14 @@ export async function sendEncryptedChatPush(
     const batch = result.rows.slice(start, start + 500);
     const messages = batch.map(row => {
       const envObj = envelopesByUser?.get(row.userId);
+      const isMentioned = Boolean(mentions && (mentions.includes(row.userId) || mentions.includes('@everyone')));
+      const notifTitle = isMentioned && target.kind === 'group'
+        ? `${chatName} • ${senderName} mentioned you`
+        : title;
+      const notifBody = isMentioned && target.kind === 'group'
+        ? `@You: ${previewText || 'New message'}`
+        : body;
+
       const dataPayload: Record<string, string> = {
         kind: 'chat',
         chatKind: target.kind,
@@ -71,17 +80,21 @@ export async function sendEncryptedChatPush(
         chatName,
         name: chatName,
         senderName,
+        isMention: isMentioned ? 'true' : 'false'
       };
       if (envObj) {
         dataPayload.envelope = JSON.stringify(envObj);
       }
       return {
         token: row.token,
-        notification: { title, body },
+        notification: { title: notifTitle, body: notifBody },
         data: dataPayload,
         android: {
           priority: 'high' as const,
-          notification: { channelId: 'adda_messages', priority: 'high' as const }
+          notification: {
+            channelId: isMentioned ? 'adda_mentions' : 'adda_messages',
+            priority: 'high' as const
+          }
         },
       };
     });

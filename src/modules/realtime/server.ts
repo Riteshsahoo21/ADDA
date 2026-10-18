@@ -76,6 +76,10 @@ export function publishEncryptedEnvelope(userId: string, envelope: unknown): voi
   io?.to(userRoom(userId)).emit('chat:encrypted:envelope', envelope);
 }
 
+export function publishGroupUpdate(groupId: string, userIds: string[]): void {
+  if (userIds.length) io?.to([...new Set(userIds)].map(userRoom)).emit('group:updated', { groupId });
+}
+
 async function drainOfflineSpool(socket: Socket, userId: string, deviceId?: string) {
   try {
     const spooled = await pool.query<{
@@ -236,11 +240,12 @@ export function attachRealtime(httpServer: HttpServer): Server {
         keys: Array<{ deviceId: string; wrappedKey: string; wrapNonce: string }>;
         mediaId?: string;
         previewText?: string;
+        mentions?: string[];
       },
       ack?: (res: { ok: boolean; timestamp?: string; error?: string }) => void
     ) => {
       try {
-        const { messageId, senderDeviceId, target, ciphertext, nonce, keys, mediaId, previewText } = payload;
+        const { messageId, senderDeviceId, target, ciphertext, nonce, keys, mediaId, previewText, mentions } = payload;
         if (!messageId || !senderDeviceId || !validTarget(target) || !ciphertext || !nonce || !Array.isArray(keys)) {
           ack?.({ ok: false, error: 'Invalid message structure.' });
           return;
@@ -359,7 +364,8 @@ export function attachRealtime(httpServer: HttpServer): Server {
             selfId,
             previewText,
             undefined,
-            offlineEnvelopesByUser
+            offlineEnvelopesByUser,
+            mentions
           ).catch((e) => console.warn('[ADDA] Push send warning:', e));
         }
       } catch (err: any) {
