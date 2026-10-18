@@ -77,6 +77,7 @@ import {
 } from '@/lib/encrypted-chat';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { TypingDots } from '@/components/ui/TypingDots';
+import { ChatWallpaper, type ChatWallpaperTheme } from '@/components/ui/ChatWallpaper';
 
 type ViewerState = {
   uri: string;
@@ -188,8 +189,10 @@ function SwipeableBubbleRow({
 }
 
 export default function ConversationScreen() {
-  const { kind, id, name, search } = useLocalSearchParams<{ kind?: string; id?: string; name?: string; search?: string }>();
+  const { kind, id, name, search, avatar } = useLocalSearchParams<{ kind?: string; id?: string; name?: string; search?: string; avatar?: string }>();
   const [chatTitle, setChatTitle] = useState(name || '');
+  const [chatAvatarUrl, setChatAvatarUrl] = useState<string | null>(avatar || null);
+  const [wallpaperTheme, setWallpaperTheme] = useState<ChatWallpaperTheme>('light');
   const [selfId, setSelfId] = useState('');
   const [selfName, setSelfName] = useState('');
   const [messages, setMessages] = useState<LocalMessage[]>([]);
@@ -261,6 +264,10 @@ export default function ConversationScreen() {
     if (name) setChatTitle(name);
   }, [name]);
 
+  useEffect(() => {
+    if (avatar) setChatAvatarUrl(avatar);
+  }, [avatar]);
+
   const load = useCallback(async () => {
     if (!target) return;
     
@@ -298,34 +305,28 @@ export default function ConversationScreen() {
       const local = await localMessages(target);
       setMessages(local);
 
-      if (!name) {
-        if (target.kind === 'direct') {
-          const fromOther = local.find(m => m.senderId === target.id && m.senderName);
-          if (fromOther?.senderName) {
-            setChatTitle(fromOther.senderName);
-          } else {
-            void socialApi<PublicProfile[]>('/contacts').then(contacts => {
-              const match = contacts.find(c => c.id === target.id);
-              if (match?.name) setChatTitle(match.name);
-            }).catch(() => {});
-          }
-        } else if (target.kind === 'group') {
-          void socialApi<GroupDetails>(`/groups/${target.id}`).then(details => {
-            setGroupMembers(details.members);
-            if (details.name) setChatTitle(details.name);
-          }).catch(() => {
-            void socialApi<ChatGroup[]>('/groups').then(groups => {
-              const match = groups.find(g => g.id === target.id);
-              if (match?.name) setChatTitle(match.name);
-            }).catch(() => {});
-          });
+      if (target.kind === 'direct') {
+        const fromOther = local.find(m => m.senderId === target.id && m.senderName);
+        if (fromOther?.senderName && !name) {
+          setChatTitle(fromOther.senderName);
         }
-      }
-
-      if (target.kind === 'group') {
+        void socialApi<PublicProfile[]>('/contacts').then(contacts => {
+          const match = contacts.find(c => c.id === target.id);
+          if (match?.avatarUrl) setChatAvatarUrl(match.avatarUrl);
+          if (match?.name && !name) setChatTitle(match.name);
+        }).catch(() => {});
+      } else if (target.kind === 'group') {
         void socialApi<GroupDetails>(`/groups/${target.id}`).then(details => {
           setGroupMembers(details.members);
-        }).catch(() => {});
+          if (details.avatarUrl) setChatAvatarUrl(details.avatarUrl);
+          if (details.name && !name) setChatTitle(details.name);
+        }).catch(() => {
+          void socialApi<ChatGroup[]>('/groups').then(groups => {
+            const match = groups.find(g => g.id === target.id);
+            if (match?.avatarUrl) setChatAvatarUrl(match.avatarUrl);
+            if (match?.name && !name) setChatTitle(match.name);
+          }).catch(() => {});
+        });
       }
 
       void prefetchChatKeys(target);
@@ -420,9 +421,20 @@ export default function ConversationScreen() {
         clearKeyCache(target);
         void socialApi<GroupDetails>(`/groups/${target.id}`).then(details => {
           setGroupMembers(details.members);
+          if (details.avatarUrl) setChatAvatarUrl(details.avatarUrl);
           if (details.name) setChatTitle(details.name);
         }).catch(() => {});
         void prefetchChatKeys(target);
+      }
+    };
+
+    const onFriendsUpdated = () => {
+      if (target.kind === 'direct') {
+        void socialApi<PublicProfile[]>('/contacts').then(contacts => {
+          const match = contacts.find(c => c.id === target.id);
+          if (match?.avatarUrl) setChatAvatarUrl(match.avatarUrl);
+          if (match?.name && !name) setChatTitle(match.name);
+        }).catch(() => {});
       }
     };
 
@@ -435,6 +447,7 @@ export default function ConversationScreen() {
       value.on('chat:message_deleted', onRemoteDelete);
       value.on('chat:reaction_updated', onRemoteReaction);
       value.on('group:updated', onGroupUpdate);
+      value.on('friends:updated', onFriendsUpdated);
       value.on('connect', onConnect);
       value.on('disconnect', onDisconnect);
       if (value.connected) onConnect();
@@ -454,6 +467,7 @@ export default function ConversationScreen() {
       live?.off('chat:message_deleted', onRemoteDelete);
       live?.off('chat:reaction_updated', onRemoteReaction);
       live?.off('group:updated', onGroupUpdate);
+      live?.off('friends:updated', onFriendsUpdated);
       live?.off('connect', onConnect);
       live?.off('disconnect', onDisconnect);
     };
@@ -783,7 +797,8 @@ export default function ConversationScreen() {
     );
   };
 
-  const renderMessageBody = (text: string, isMine: boolean, msgId: string) => {
+  const renderMessageBody = (text: string, isMine: boolean, msgId: string, isLight: boolean) => {
+    const textStyle = [styles.body, !isMine && styles.theirBody, isLight && styles.bodyLight];
     if (searchQuery.trim()) {
       const q = searchQuery.trim();
       const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -791,7 +806,7 @@ export default function ConversationScreen() {
       const parts = text.split(regex);
       const isCurrentMatch = searchMatches[currentMatchIdx]?.id === msgId;
       return (
-        <Text style={[styles.body, !isMine && styles.theirBody]}>
+        <Text style={textStyle}>
           {parts.map((part, i) => {
             if (part.toLowerCase() === q.toLowerCase()) {
               return (
@@ -816,10 +831,10 @@ export default function ConversationScreen() {
     const regex = /(@[A-Za-z0-9_]+(?:\s[A-Za-z0-9_]+)?|@everyone)/g;
     const parts = text.split(regex);
     if (parts.length <= 1) {
-      return <Text style={[styles.body, !isMine && styles.theirBody]}>{text}</Text>;
+      return <Text style={textStyle}>{text}</Text>;
     }
     return (
-      <Text style={[styles.body, !isMine && styles.theirBody]}>
+      <Text style={textStyle}>
         {parts.map((part, i) => {
           if (part.startsWith('@')) {
             return (
@@ -906,7 +921,11 @@ export default function ConversationScreen() {
               style={styles.headerPressable}
             >
               <View style={styles.avatar}>
-                <Text style={styles.initial}>{activeTitle[0]?.toUpperCase() || '?'}</Text>
+                {chatAvatarUrl ? (
+                  <Image source={{ uri: chatAvatarUrl }} style={styles.headerAvatarImg} />
+                ) : (
+                  <Text style={styles.initial}>{activeTitle[0]?.toUpperCase() || '?'}</Text>
+                )}
               </View>
               <View style={styles.titleWrap}>
                 <Text style={styles.title} numberOfLines={1}>{activeTitle}</Text>
@@ -923,7 +942,11 @@ export default function ConversationScreen() {
           ) : (
             <View style={styles.headerPressable}>
               <View style={styles.avatar}>
-                <Text style={styles.initial}>{activeTitle[0]?.toUpperCase() || '?'}</Text>
+                {chatAvatarUrl ? (
+                  <Image source={{ uri: chatAvatarUrl }} style={styles.headerAvatarImg} />
+                ) : (
+                  <Text style={styles.initial}>{activeTitle[0]?.toUpperCase() || '?'}</Text>
+                )}
               </View>
               <View style={styles.titleWrap}>
                 <Text style={styles.title} numberOfLines={1}>{activeTitle}</Text>
@@ -939,6 +962,13 @@ export default function ConversationScreen() {
             </View>
           )}
 
+          <Pressable
+            accessibilityLabel="Toggle chat background theme"
+            onPress={() => setWallpaperTheme(curr => curr === 'light' ? 'dark' : 'light')}
+            style={styles.callAction}
+          >
+            <Text style={{ fontSize: 16 }}>{wallpaperTheme === 'light' ? '🌙' : '☀️'}</Text>
+          </Pressable>
           <Pressable accessibilityLabel="Search in chat" onPress={() => setIsSearching(true)} style={styles.callAction}>
             <Search size={20} color={colors.primary} />
           </Pressable>
@@ -952,6 +982,7 @@ export default function ConversationScreen() {
       )}
 
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 20 : 0}>
+        <ChatWallpaper theme={wallpaperTheme} />
         <FlatList
           ref={flatListRef}
           inverted
@@ -965,6 +996,7 @@ export default function ConversationScreen() {
           renderItem={({ item }) => {
             const mine = item.senderId === selfId;
             const isDeleted = item.body === '__adda_deleted__';
+            const isLight = wallpaperTheme === 'light';
 
             if (isDeleted) {
               return (
@@ -977,16 +1009,17 @@ export default function ConversationScreen() {
                   <View
                     style={[
                       styles.bubble,
-                      mine ? styles.myBubble : styles.theirBubble,
+                      mine ? (isLight ? styles.myBubbleLight : styles.myBubble) : (isLight ? styles.theirBubbleLight : styles.theirBubble),
                       styles.deletedBubble,
+                      isLight && styles.deletedBubbleLight,
                     ]}
                   >
                     <View style={styles.deletedRow}>
-                      <Ban size={15} color={mine ? 'rgba(255, 255, 255, 0.65)' : colors.muted} style={{ marginRight: 6 }} />
-                      <Text style={[styles.deletedText, !mine && styles.theirDeletedText]}>
+                      <Ban size={15} color={isLight ? '#8696A0' : (mine ? 'rgba(255, 255, 255, 0.65)' : colors.muted)} style={{ marginRight: 6 }} />
+                      <Text style={[styles.deletedText, !mine && styles.theirDeletedText, isLight && styles.deletedTextLight]}>
                         {mine ? 'You deleted this message' : 'This message was deleted'}
                       </Text>
-                      <Text style={[styles.deletedTime, !mine && styles.theirDeletedTime]}>
+                      <Text style={[styles.deletedTime, !mine && styles.theirDeletedTime, isLight && styles.messageTimeLight]}>
                         {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
                       </Text>
                     </View>
@@ -1032,13 +1065,13 @@ export default function ConversationScreen() {
                 <View
                   style={[
                     styles.bubble,
-                    mine ? styles.myBubble : styles.theirBubble,
+                    mine ? (isLight ? styles.myBubbleLight : styles.myBubble) : (isLight ? styles.theirBubbleLight : styles.theirBubble),
                     media && styles.mediaBubble,
                     isTagged && styles.taggedBubble,
                     hasReactions && styles.bubbleWithReactions,
                   ]}
                 >
-                  {kind === 'group' && !mine && <Text style={styles.sender}>{item.senderName}</Text>}
+                  {kind === 'group' && !mine && <Text style={[styles.sender, isLight && styles.senderLight]}>{item.senderName}</Text>}
 
                   {/* Quoted Reply inside message bubble */}
                   {item.replyTo && (
@@ -1051,14 +1084,17 @@ export default function ConversationScreen() {
                           } catch {}
                         }
                       }}
-                      style={[styles.quotedBubbleCard, mine ? styles.myQuotedBubbleCard : styles.theirQuotedBubbleCard]}
+                      style={[
+                        styles.quotedBubbleCard,
+                        mine ? (isLight ? styles.myQuotedBubbleCardLight : styles.myQuotedBubbleCard) : (isLight ? styles.theirQuotedBubbleCardLight : styles.theirQuotedBubbleCard)
+                      ]}
                     >
                       <View style={styles.quotedAccentBar} />
                       <View style={styles.quotedBubbleContent}>
-                        <Text style={styles.quotedSenderName} numberOfLines={1}>
+                        <Text style={[styles.quotedSenderName, isLight && styles.quotedSenderNameLight]} numberOfLines={1}>
                           {item.replyTo.senderId === selfId ? 'You' : item.replyTo.senderName}
                         </Text>
-                        <Text style={[styles.quotedSnippet, mine ? styles.myQuotedSnippet : styles.theirQuotedSnippet]} numberOfLines={2}>
+                        <Text style={[styles.quotedSnippet, mine ? styles.myQuotedSnippet : styles.theirQuotedSnippet, isLight && styles.quotedSnippetLight]} numberOfLines={2}>
                           {item.replyTo.snippet}
                         </Text>
                       </View>
@@ -1090,15 +1126,15 @@ export default function ConversationScreen() {
                       onLongPress={() => onMessageLongPress(item)}
                     />
                   ) : (
-                    renderMessageBody(item.body, mine, item.id)
+                    renderMessageBody(item.body, mine, item.id, isLight)
                   )}
 
                   <View style={[styles.messageFooter, media && styles.mediaFooter]}>
-                    <Text style={[styles.messageTime, !mine && styles.theirMessageTime]}>
+                    <Text style={[styles.messageTime, !mine && styles.theirMessageTime, isLight && styles.messageTimeLight]}>
                       {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
                     </Text>
                     {mine && (
-                      <Text accessibilityLabel={item.status === 'read' ? 'Read' : item.status === 'delivered' ? 'Delivered' : item.status === 'sent' ? 'Sent' : 'Pending'} style={[styles.tick, item.status === 'read' && styles.readTick]}>
+                      <Text accessibilityLabel={item.status === 'read' ? 'Read' : item.status === 'delivered' ? 'Delivered' : item.status === 'sent' ? 'Sent' : 'Pending'} style={[styles.tick, isLight && styles.tickLight, item.status === 'read' && (isLight ? styles.readTickLight : styles.readTick)]}>
                         {item.status === 'read' || item.status === 'delivered' ? '✓✓' : item.status === 'sent' ? '✓' : '○'}
                       </Text>
                     )}
@@ -1126,10 +1162,11 @@ export default function ConversationScreen() {
                         style={[
                           styles.reactionBadge,
                           mine ? styles.myReactionBadge : styles.theirReactionBadge,
+                          isLight && styles.reactionBadgeLight,
                           myEmoji && styles.myReactionActiveBadge,
                         ]}
                       >
-                        <Text style={styles.reactionBadgeText}>
+                        <Text style={[styles.reactionBadgeText, isLight && styles.reactionBadgeTextLight]}>
                           {entries.map(([e]) => e).join('')} {entries.reduce((acc, [, c]) => acc + c, 0) > 1 ? entries.reduce((acc, [, c]) => acc + c, 0) : ''}
                         </Text>
                       </Pressable>
@@ -1877,5 +1914,74 @@ const styles = StyleSheet.create({
   },
   theirDeletedTime: {
     color: colors.muted,
+  },
+  headerAvatarImg: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+  },
+  myBubbleLight: {
+    alignSelf: 'flex-end',
+    backgroundColor: '#D9FDD3',
+    borderBottomRightRadius: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 1.5,
+    elevation: 1,
+  },
+  theirBubbleLight: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#FFFFFF',
+    borderBottomLeftRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.06)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 1.5,
+    elevation: 1,
+  },
+  bodyLight: {
+    color: '#111B21',
+  },
+  senderLight: {
+    color: '#008069',
+  },
+  messageTimeLight: {
+    color: '#667781',
+  },
+  tickLight: {
+    color: '#8696A0',
+  },
+  readTickLight: {
+    color: '#53BDEB',
+  },
+  myQuotedBubbleCardLight: {
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  theirQuotedBubbleCardLight: {
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  quotedSenderNameLight: {
+    color: '#008069',
+  },
+  quotedSnippetLight: {
+    color: '#3B4A54',
+  },
+  deletedBubbleLight: {
+    backgroundColor: 'rgba(0, 0, 0, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.08)',
+  },
+  deletedTextLight: {
+    color: '#667781',
+  },
+  reactionBadgeLight: {
+    backgroundColor: '#FFFFFF',
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+  },
+  reactionBadgeTextLight: {
+    color: '#111B21',
   },
 });

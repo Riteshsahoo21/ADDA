@@ -1,19 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
-import { CirclePlus, DoorOpen, EllipsisVertical, MessageCircle, Phone, Plus, QrCode, Search, UserPlus, UsersRound, Video, X } from 'lucide-react-native';
+import { Check, CirclePlus, DoorOpen, EllipsisVertical, MessageCircle, Phone, Plus, QrCode, Search, UserPlus, UsersRound, Video, X } from 'lucide-react-native';
 import { BottomNav, type HubTab } from '@/components/ui/BottomNav';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
 import { socialApi, type ChatGroup, type FriendRequest, type OwnProfile, type PublicProfile } from '@/lib/social-api';
-import { getRealtimeSocket } from '@/lib/realtime';
-import type { TypingEvent } from '@/lib/realtime';
+import { getRealtimeSocket, type TypingEvent } from '@/lib/realtime';
 import { TypingDots } from '@/components/ui/TypingDots';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { type AvatarBody } from '@/three/player/avatarStyle';
-import { initEncryptedChat, localPreviews, onChatChanged, previewBody, setCachedProfile } from '@/lib/encrypted-chat';
+import { initEncryptedChat, localPreviews, onChatChanged, previewBody, formatChatPreview, setCachedProfile, getCachedProfile } from '@/lib/encrypted-chat';
 
 const avatars: { body: AvatarBody; label: string }[] = [
   { body: 'man', label: 'Indian Man' }, { body: 'uncle', label: 'Uncle' },
@@ -22,7 +21,7 @@ const avatars: { body: AvatarBody; label: string }[] = [
   { body: 'nepali_woman', label: 'Nepali Woman' }, { body: 'white_top_woman', label: 'White Top Woman' },
 ];
 type Sheet = 'add' | 'group' | 'menu' | 'room' | null;
-type Room = 'loft' | 'tea';
+type Room = 'loft' | 'tea' | 'beach';
 
 export default function HomeScreen() {
   const { username, logout, avatarStyle, setAvatarStyle } = useSession();
@@ -45,27 +44,37 @@ export default function HomeScreen() {
   const [sheetError, setSheetError] = useState('');
   const [typing, setTyping] = useState<Record<string, Record<string, string>>>({});
   const typingExpiry = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const refreshingRef = useRef(false);
   const updateLocalPreviews = useCallback(async () => {
     try {
       const previews = await localPreviews();
       const byChat = new Map(previews.map(item => [`${item.kind}:${item.targetId}`, item]));
       setContacts(current => current.map(item => {
         const preview = byChat.get(`direct:${item.id}`);
-        return { ...item, lastMessage: preview ? previewBody(preview.body) : null, lastAt: preview?.createdAt ?? null };
+        return {
+          ...item,
+          lastMessage: preview ? formatChatPreview(preview, profile?.id) : null,
+          lastAt: preview?.createdAt ?? null,
+        };
       }));
       setGroups(current => current.map(item => {
         const preview = byChat.get(`group:${item.id}`);
-        return { ...item, lastMessage: preview ? previewBody(preview.body) : null, lastAt: preview?.createdAt ?? null };
+        return {
+          ...item,
+          lastMessage: preview ? formatChatPreview(preview, profile?.id) : null,
+          lastAt: preview?.createdAt ?? null,
+        };
       }));
     } catch { /* Chat storage may still be starting. */ }
-  }, []);
+  }, [profile?.id]);
   useEffect(() => onChatChanged(() => { void updateLocalPreviews(); }), [updateLocalPreviews]);
 
   useEffect(() => { void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP); }, []);
   useEffect(() => { if (!username) router.replace('/login'); }, [username]);
 
   const refresh = useCallback(async () => {
-    if (!username) return;
+    if (!username || refreshingRef.current) return;
+    refreshingRef.current = true;
     try {
       const [me, friends, suggested, joined, requests] = await Promise.all([
         socialApi<OwnProfile>('/me'), socialApi<PublicProfile[]>('/contacts'),
@@ -77,20 +86,120 @@ export default function HomeScreen() {
       const byChat = new Map(previews.map(item => [`${item.kind}:${item.targetId}`, item]));
       setProfile(me);
       setCachedProfile(me);
-      setContacts(friends.map(item => ({ ...item, lastMessage: byChat.get(`direct:${item.id}`) ? previewBody(byChat.get(`direct:${item.id}`)!.body) : null, lastAt: byChat.get(`direct:${item.id}`)?.createdAt ?? null })));
+      setContacts(friends.map(item => {
+        const preview = byChat.get(`direct:${item.id}`);
+        return {
+          ...item,
+          lastMessage: preview ? formatChatPreview(preview, me.id) : null,
+          lastAt: preview?.createdAt ?? null,
+        };
+      }));
       setPeople(suggested);
-      setGroups(joined.map(item => ({ ...item, lastMessage: byChat.get(`group:${item.id}`) ? previewBody(byChat.get(`group:${item.id}`)!.body) : null, lastAt: byChat.get(`group:${item.id}`)?.createdAt ?? null })));
+      setGroups(joined.map(item => {
+        const preview = byChat.get(`group:${item.id}`);
+        return {
+          ...item,
+          lastMessage: preview ? formatChatPreview(preview, me.id) : null,
+          lastAt: preview?.createdAt ?? null,
+        };
+      }));
       setFriendRequests(requests); setError('');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not load ADDA.');
-    } finally { setLoading(false); }
+    } finally {
+      refreshingRef.current = false;
+      setLoading(false);
+    }
   }, [username]);
-  useFocusEffect(useCallback(() => { void refresh(); }, [refresh]));
+  useFocusEffect(useCallback(() => {
+    const cached = getCachedProfile();
+    if (cached) setProfile(cached);
+    void refresh();
+  }, [refresh]));
+
+  const refreshSocial = useCallback(async () => {
+    try {
+      const [friends, requests, suggested] = await Promise.all([
+        socialApi<PublicProfile[]>('/contacts'),
+        socialApi<FriendRequest[]>('/friend-requests'),
+        socialApi<PublicProfile[]>('/people'),
+      ]);
+      setContacts(current => {
+        const prevMap = new Map(current.map(c => [c.id, c]));
+        return friends.map(item => {
+          const existing = prevMap.get(item.id);
+          return {
+            ...item,
+            lastMessage: existing?.lastMessage ?? null,
+            lastAt: existing?.lastAt ?? null,
+          };
+        });
+      });
+      setFriendRequests(requests);
+      setPeople(suggested);
+    } catch { /* Silent background sync */ }
+  }, []);
+
   useEffect(() => {
     if (!username) return;
     let active = true;
     let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
-    const onUpdate = () => { void refresh(); };
+    const onUpdate = () => { void refreshSocial(); };
+    const onFriendUpdate = (payload?: {
+      type?: string;
+      request?: FriendRequest;
+      decision?: 'accept' | 'decline';
+      requestId?: string;
+      senderContact?: PublicProfile | null;
+      recipientContact?: PublicProfile | null;
+    }) => {
+      if (payload?.type === 'request_created' && payload.request) {
+        const req = payload.request;
+        if (req.recipientId === profile?.id) {
+          setFriendRequests(curr => {
+            if (curr.some(r => r.id === req.id)) return curr;
+            return [req, ...curr];
+          });
+          return;
+        }
+        if (req.senderId === profile?.id) {
+          setFriendRequests(curr => curr.map(r =>
+            (r.recipientId === req.recipientId || r.recipientUsername.toLowerCase() === req.recipientUsername.toLowerCase())
+              ? req : r
+          ));
+          return;
+        }
+      }
+
+      if (payload?.type === 'request_responded' && payload.requestId) {
+        setFriendRequests(curr => curr.filter(r => r.id !== payload.requestId));
+        const newContact = payload.decision === 'accept'
+          ? (payload.senderContact?.id === profile?.id ? payload.recipientContact : payload.senderContact)
+          : null;
+        if (newContact) {
+          setContacts(curr => {
+            if (curr.some(c => c.id === newContact.id)) return curr;
+            return [
+              {
+                id: newContact.id,
+                name: newContact.name,
+                username: newContact.username,
+                avatarUrl: newContact.avatarUrl,
+                about: null,
+                lastMessage: null,
+                lastAt: new Date().toISOString(),
+              },
+              ...curr,
+            ];
+          });
+          setPeople(curr => curr.filter(p => p.id !== newContact.id));
+        }
+        return;
+      }
+
+      void refreshSocial();
+    };
+
     const onTyping = (event: TypingEvent) => {
       if (event.userId === profile?.id) return;
       const key = `${event.kind}:${event.id}`;
@@ -122,27 +231,96 @@ export default function HomeScreen() {
       if (!active) return;
       live = value;
       value.on('chat:encrypted:update', onUpdate);
-      value.on('friends:updated', onUpdate);
+      value.on('chat:message_deleted', onUpdate);
+      value.on('friends:updated', onFriendUpdate);
       value.on('connect', onUpdate);
       value.on('disconnect', clearTyping);
       value.on('chat:typing', onTyping);
     }).catch(() => {});
-    return () => { active = false; clearTyping(); live?.off('chat:encrypted:update', onUpdate); live?.off('friends:updated', onUpdate); live?.off('connect', onUpdate); live?.off('disconnect', clearTyping); live?.off('chat:typing', onTyping); };
-  }, [username, refresh, profile?.id]);
+    return () => {
+      active = false;
+      clearTyping();
+      live?.off('chat:encrypted:update', onUpdate);
+      live?.off('chat:message_deleted', onUpdate);
+      live?.off('friends:updated', onFriendUpdate);
+      live?.off('connect', onUpdate);
+      live?.off('disconnect', clearTyping);
+      live?.off('chat:typing', onTyping);
+    };
+  }, [username, refresh, profile?.id, refreshSocial]);
 
-  const visibleContacts = useMemo(() => contacts.filter((item) => `${item.name} ${item.username}`.toLowerCase().includes(search.toLowerCase())), [contacts, search]);
-  const visibleGroups = useMemo(() => groups.filter((item) => item.name.toLowerCase().includes(search.toLowerCase())), [groups, search]);
-  const visiblePeople = useMemo(() => people.filter((item) => `${item.name} ${item.username}`.toLowerCase().includes(search.toLowerCase())), [people, search]);
+  const visibleContacts = useMemo(() => {
+    return contacts
+      .filter((item) => `${item.name} ${item.username}`.toLowerCase().includes(search.toLowerCase()))
+      .sort((a, b) => (b.lastAt || '').localeCompare(a.lastAt || ''));
+  }, [contacts, search]);
+
+  const visibleGroups = useMemo(() => {
+    return groups
+      .filter((item) => item.name.toLowerCase().includes(search.toLowerCase()))
+      .sort((a, b) => (b.lastAt || '').localeCompare(a.lastAt || ''));
+  }, [groups, search]);
+  const contactIds = useMemo(() => new Set(contacts.map(c => c.id)), [contacts]);
+  const visiblePeople = useMemo(() => {
+    return people.filter((item) => !contactIds.has(item.id) && `${item.name} ${item.username}`.toLowerCase().includes(search.toLowerCase()));
+  }, [people, contactIds, search]);
 
   const openSheet = (next: Sheet) => { setSheetError(''); setSheet(next); };
-  const addFriend = async (value: string) => {
-    if (busy) return;
-    setBusy(true); setSheetError('');
+  const addFriend = async (value: string, explicitTarget?: PublicProfile) => {
+    const cleanUsername = value.trim().toLowerCase();
+    if (!cleanUsername && !explicitTarget) return;
+
+    // 1. INSTANT OPTIMISTIC UI UPDATE (0ms)
+    const targetUser = explicitTarget || people.find(p => p.username.toLowerCase() === cleanUsername);
+    const targetId = explicitTarget?.id || targetUser?.id || `user-${cleanUsername}`;
+    const tempId = `temp-${Date.now()}`;
+
+    const optimisticRequest: FriendRequest = {
+      id: tempId,
+      senderId: profile?.id || '',
+      recipientId: targetId,
+      senderName: profile?.name || '',
+      senderUsername: profile?.username || '',
+      senderAvatarUrl: profile?.avatarUrl || null,
+      recipientName: explicitTarget?.name || targetUser?.name || cleanUsername,
+      recipientUsername: explicitTarget?.username || targetUser?.username || cleanUsername,
+      recipientAvatarUrl: explicitTarget?.avatarUrl || targetUser?.avatarUrl || null,
+      createdAt: new Date().toISOString(),
+      status: 'pending',
+    };
+
+    setSheet(null);
+    setNewUsername('');
+    setSheetError('');
+
+    setFriendRequests(curr => {
+      const matchUsername = (explicitTarget?.username || targetUser?.username || cleanUsername).toLowerCase();
+      if (curr.some(r => r.recipientUsername.toLowerCase() === matchUsername || r.recipientId === targetId)) {
+        return curr;
+      }
+      return [optimisticRequest, ...curr];
+    });
+
+    // 2. Perform API call in background
     try {
-      await socialApi('/contacts/username', 'POST', { username: value.trim().toLowerCase() });
-      setNewUsername(''); setSheet(null); await refresh();
-    } catch (cause) { setSheetError(cause instanceof Error ? cause.message : 'Could not add contact.'); }
-    finally { setBusy(false); }
+      const added = explicitTarget?.id
+        ? await socialApi<PublicProfile>(`/contacts/user/${encodeURIComponent(explicitTarget.id)}`, 'POST')
+        : targetUser?.id
+          ? await socialApi<PublicProfile>(`/contacts/user/${encodeURIComponent(targetUser.id)}`, 'POST')
+          : await socialApi<PublicProfile>('/contacts/username', 'POST', { username: cleanUsername });
+
+      setFriendRequests(curr => curr.map(r => r.id === tempId ? {
+        ...r,
+        recipientId: added.id,
+        recipientName: added.name,
+        recipientUsername: added.username,
+        recipientAvatarUrl: added.avatarUrl,
+      } : r));
+    } catch (cause) {
+      setFriendRequests(curr => curr.filter(r => r.id !== tempId));
+      const msg = cause instanceof Error ? cause.message : 'Could not add contact.';
+      Alert.alert('Friend request', msg);
+    }
   };
   const createGroup = async () => {
     if (busy) return;
@@ -154,11 +332,39 @@ export default function HomeScreen() {
     finally { setBusy(false); }
   };
   const respondToFriend = async (id: string, decision: 'accept' | 'decline') => {
-    if (busy) return;
-    setBusy(true); setError('');
-    try { await socialApi(`/friend-requests/${encodeURIComponent(id)}/respond`, 'POST', { decision }); await refresh(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not respond to request.'); }
-    finally { setBusy(false); }
+    // 1. INSTANT OPTIMISTIC REMOVAL (0ms)
+    const targetReq = friendRequests.find(item => item.id === id);
+    setFriendRequests(curr => curr.filter(item => item.id !== id));
+
+    if (decision === 'accept' && targetReq) {
+      setPeople(curr => curr.filter(p => p.id !== targetReq.senderId));
+      setContacts(curr => {
+        if (curr.some(c => c.id === targetReq.senderId)) return curr;
+        return [
+          {
+            id: targetReq.senderId,
+            name: targetReq.senderName,
+            username: targetReq.senderUsername,
+            avatarUrl: targetReq.senderAvatarUrl,
+            about: null,
+            lastMessage: null,
+            lastAt: new Date().toISOString(),
+          },
+          ...curr,
+        ];
+      });
+    }
+
+    // 2. Background network call
+    try {
+      await socialApi(`/friend-requests/${encodeURIComponent(id)}/respond`, 'POST', { decision });
+    } catch (cause) {
+      if (targetReq) setFriendRequests(curr => [targetReq, ...curr]);
+      if (decision === 'accept' && targetReq) {
+        setContacts(curr => curr.filter(c => c.id !== targetReq.senderId));
+      }
+      setError(cause instanceof Error ? cause.message : 'Could not respond to request.');
+    }
   };
   const handleLogout = async () => { setSheet(null); await logout(); router.replace('/login'); };
   const selectTab = (next: HubTab) => { if (next === 'you') router.push('/profile' as Href); else setTab(next); };
@@ -166,8 +372,11 @@ export default function HomeScreen() {
     setAvatarStyle({ body }); setSheet(null);
     router.push({ pathname: '/hangout', params: { room, avatar: body } });
   };
-  const openConversation = (kind: 'direct' | 'group', id: string, name: string) => {
-    router.push(`/conversation?kind=${kind}&id=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}` as Href);
+  const openConversation = (kind: 'direct' | 'group', id: string, name: string, avatar?: string | null) => {
+    router.push({
+      pathname: '/conversation',
+      params: { kind, id, name, avatar: avatar || '' },
+    } as unknown as Href);
   };
   const startCall = async (kind: 'direct' | 'group', id: string, name: string, media: CallMedia) => {
     if (busy) return;
@@ -182,7 +391,19 @@ export default function HomeScreen() {
   if (!username) return null;
   return <SafeAreaView style={styles.safe}>
     <View style={styles.top}>
-      <View><Text style={styles.brand}>ADDA<Text style={styles.brandDot}>.</Text></Text><Text style={styles.subBrand}>{profile ? `@${profile.username}` : 'APNA VIRTUAL HANGOUT'}</Text></View>
+      <Pressable onPress={() => router.push('/profile' as Href)} style={styles.headerProfileBtn} accessibilityLabel="Your profile">
+        {profile?.avatarUrl ? (
+          <Image source={{ uri: profile.avatarUrl }} style={styles.headerAvatarImg} />
+        ) : (
+          <View style={styles.headerAvatarPlaceholder}>
+            <Text style={styles.headerAvatarInitial}>{profile?.name?.[0]?.toUpperCase() || username[0]?.toUpperCase()}</Text>
+          </View>
+        )}
+      </Pressable>
+      <View style={styles.brandContainer}>
+        <Text style={styles.brand}>ADDA<Text style={styles.brandDot}>.</Text></Text>
+        <Text style={styles.subBrand}>{profile ? `@${profile.username}` : 'APNA VIRTUAL HANGOUT'}</Text>
+      </View>
       <Pressable accessibilityLabel="More options" onPress={() => openSheet('menu')} style={styles.iconButton}><EllipsisVertical size={25} color={colors.text} /></Pressable>
     </View>
 
@@ -193,10 +414,34 @@ export default function HomeScreen() {
         {loading && <ActivityIndicator color={colors.primary} style={styles.loader} />}
         {!!error && <View style={styles.errorBox}><Text style={styles.errorText}>{error}</Text><Pressable onPress={() => { if (error.toLowerCase().includes('sign in')) void handleLogout(); else { setLoading(true); void refresh(); } }}><Text style={styles.retry}>{error.toLowerCase().includes('sign in') ? 'Sign in again' : 'Retry'}</Text></Pressable></View>}
         {!loading && !error && <>
-          {visibleGroups.length > 0 && <><Text style={styles.section}>Groups</Text>{visibleGroups.map((item) => <PersonRow key={item.id} name={item.name} detail={item.lastMessage || `${item.memberCount} members`} time={item.lastAt} typingNames={Object.values(typing[`group:${item.id}`] ?? {})} group onPress={() => openConversation('group', item.id, item.name)} />)}</>}
-          {visibleContacts.length > 0 && <><Text style={styles.section}>Contacts</Text>{visibleContacts.map((item) => <PersonRow key={item.id} name={item.name} detail={item.lastMessage || `@${item.username}`} time={item.lastAt} typingNames={Object.values(typing[`direct:${item.id}`] ?? {})} onPress={() => openConversation('direct', item.id, item.name)} />)}</>}
+          {visibleGroups.length > 0 && <><Text style={styles.section}>Groups</Text>{visibleGroups.map((item) => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={item.lastMessage || `${item.memberCount} members`} time={item.lastAt} typingNames={Object.values(typing[`group:${item.id}`] ?? {})} group onPress={() => openConversation('group', item.id, item.name, item.avatarUrl)} />)}</>}
+          {visibleContacts.length > 0 && <><Text style={styles.section}>Contacts</Text>{visibleContacts.map((item) => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={item.lastMessage || `@${item.username}`} time={item.lastAt} typingNames={Object.values(typing[`direct:${item.id}`] ?? {})} onPress={() => openConversation('direct', item.id, item.name, item.avatarUrl)} />)}</>}
           {visibleGroups.length === 0 && visibleContacts.length === 0 && <View style={styles.empty}><MessageCircle size={34} color={colors.primary} /><Text style={styles.emptyTitle}>{search ? 'No matches' : 'Your chats start here'}</Text><Text style={styles.emptyCopy}>{search ? 'Try another name or username.' : 'Add a friend or create a group to get started.'}</Text></View>}
-          {visiblePeople.length > 0 && <><Text style={styles.section}>People on ADDA</Text>{visiblePeople.map((item) => <PersonRow key={item.id} name={item.name} detail={friendRequests.some(request => request.senderId === profile?.id && request.recipientId === item.id) ? 'Request sent' : `@${item.username}`} action={friendRequests.some(request => request.senderId === profile?.id && request.recipientId === item.id) ? undefined : <Pressable accessibilityLabel={`Request ${item.name}`} onPress={() => void addFriend(item.username)} style={styles.addSmall}><UserPlus size={19} color={colors.primary} /></Pressable>} />)}</>}
+          {visiblePeople.length > 0 && <><Text style={styles.section}>People on ADDA</Text>{visiblePeople.map((item) => {
+            const isRequested = friendRequests.some(request =>
+              (request.senderId === profile?.id && request.recipientId === item.id) ||
+              (request.recipientId === profile?.id && request.senderId === item.id) ||
+              (request.senderId === profile?.id && request.recipientUsername?.toLowerCase() === item.username.toLowerCase())
+            );
+            return (
+              <PersonRow
+                key={item.id}
+                name={item.name}
+                avatarUrl={item.avatarUrl}
+                detail={isRequested ? 'Request sent' : `@${item.username}`}
+                action={isRequested ? (
+                  <View style={styles.sentBadge}>
+                    <Check size={14} color="#25D366" />
+                    <Text style={styles.sentBadgeText}>Sent</Text>
+                  </View>
+                ) : (
+                  <Pressable accessibilityLabel={`Request ${item.name}`} onPress={() => void addFriend(item.username, item)} style={styles.addSmall}>
+                    <UserPlus size={19} color={colors.primary} />
+                  </Pressable>
+                )}
+              />
+            );
+          })}</>}
         </>}
       </>}
 
@@ -205,6 +450,7 @@ export default function HomeScreen() {
         <Pressable style={styles.avatarCard} onPress={() => router.push('/avatar')}><View style={styles.avatarIcon}><Text style={styles.avatarLetter}>{username[0].toUpperCase()}</Text></View><View style={styles.fill}><Text style={styles.cardTitle}>Your character</Text><Text style={styles.cardSub}>{avatars.find((item) => item.body === avatarStyle.body)?.label || 'Choose an avatar'}</Text></View><Text style={styles.chevron}>›</Text></Pressable>
         <Pressable style={styles.roomCard} onPress={() => { setRoom('loft'); openSheet('room'); }}><View style={styles.roomIcon}><DoorOpen size={25} color={colors.primaryDark} /></View><View style={styles.fill}><Text style={styles.cardTitle}>Loft 16</Text><Text style={styles.cardSub}>A cozy place to gather</Text></View><Text style={styles.chevron}>›</Text></Pressable>
         <Pressable style={styles.roomCard} onPress={() => { setRoom('tea'); openSheet('room'); }}><View style={[styles.roomIcon, styles.teaIcon]}><Text style={styles.teaEmoji}>☕</Text></View><View style={styles.fill}><Text style={styles.cardTitle}>Tea Party</Text><Text style={styles.cardSub}>Meet at the roadside adda</Text></View><Text style={styles.chevron}>›</Text></Pressable>
+        <Pressable style={styles.roomCard} onPress={() => { setRoom('beach'); openSheet('room'); }}><View style={[styles.roomIcon, { backgroundColor: '#F38D68' }]}><Text style={styles.teaEmoji}>🏖️</Text></View><View style={styles.fill}><Text style={styles.cardTitle}>Goa Beach</Text><Text style={styles.cardSub}>Sunset shores, shacks & ocean waves</Text></View><Text style={styles.chevron}>›</Text></Pressable>
       </>}
 
       {tab === 'updates' && <>
@@ -212,8 +458,18 @@ export default function HomeScreen() {
         <Text style={styles.pageCopy}>Friend requests appear here.</Text>
         {!!error && <Text style={styles.errorText}>{error}</Text>}
         {friendRequests.filter(item => item.recipientId === profile?.id).map(item => <View key={item.id} style={styles.requestCard}>
-          <Text style={styles.personName}>{item.senderName}</Text><Text style={styles.personDetail}>@{item.senderUsername} sent you a friend request</Text>
-          <View style={styles.requestActions}><Pressable disabled={busy} onPress={() => void respondToFriend(item.id, 'accept')} style={styles.acceptButton}><Text style={styles.acceptText}>Accept</Text></Pressable><Pressable disabled={busy} onPress={() => void respondToFriend(item.id, 'decline')} style={styles.declineButton}><Text style={styles.declineText}>Decline</Text></Pressable></View>
+          <View style={styles.requestHeaderRow}>
+            {item.senderAvatarUrl ? (
+              <Image source={{ uri: item.senderAvatarUrl }} style={styles.requestAvatarImg} />
+            ) : (
+              <View style={styles.requestAvatarPlaceholder}><Text style={styles.requestAvatarInitial}>{item.senderName[0]?.toUpperCase()}</Text></View>
+            )}
+            <View style={{ flex: 1 }}>
+              <Text style={styles.personName}>{item.senderName}</Text>
+              <Text style={styles.personDetail}>@{item.senderUsername} sent you a friend request</Text>
+            </View>
+          </View>
+          <View style={styles.requestActions}><Pressable onPress={() => void respondToFriend(item.id, 'accept')} style={styles.acceptButton}><Text style={styles.acceptText}>Accept</Text></Pressable><Pressable onPress={() => void respondToFriend(item.id, 'decline')} style={styles.declineButton}><Text style={styles.declineText}>Decline</Text></Pressable></View>
         </View>)}
         {friendRequests.filter(item => item.senderId === profile?.id).map(item => <View key={item.id} style={styles.requestCard}><Text style={styles.personName}>{item.recipientName}</Text><Text style={styles.personDetail}>Request sent to @{item.recipientUsername}</Text></View>)}
         {friendRequests.length === 0 && <View style={styles.empty}><Text style={styles.emptyTitle}>No friend requests</Text><Text style={styles.emptyCopy}>Requests you send or receive will appear here.</Text></View>}
@@ -221,8 +477,8 @@ export default function HomeScreen() {
       {tab === 'calls' && <>
         <Text style={styles.pageTitle}>Calls</Text><Text style={styles.pageCopy}>Start a voice or video call with your contacts or groups.</Text>
         {!!error && <Text style={styles.errorText}>{error}</Text>}
-        {groups.map(item => <PersonRow key={item.id} name={item.name} detail={`${item.memberCount} members`} group action={<View style={styles.callActions}><Pressable disabled={busy} accessibilityLabel={`Voice call ${item.name}`} onPress={() => void startCall('group', item.id, item.name, 'audio')} style={styles.callSmall}><Phone size={19} color={colors.primary} /></Pressable><Pressable disabled={busy} accessibilityLabel={`Video call ${item.name}`} onPress={() => void startCall('group', item.id, item.name, 'video')} style={styles.callSmall}><Video size={20} color={colors.primary} /></Pressable></View>} />)}
-        {contacts.map(item => <PersonRow key={item.id} name={item.name} detail={`@${item.username}`} action={<View style={styles.callActions}><Pressable disabled={busy} accessibilityLabel={`Voice call ${item.name}`} onPress={() => void startCall('direct', item.id, item.name, 'audio')} style={styles.callSmall}><Phone size={19} color={colors.primary} /></Pressable><Pressable disabled={busy} accessibilityLabel={`Video call ${item.name}`} onPress={() => void startCall('direct', item.id, item.name, 'video')} style={styles.callSmall}><Video size={20} color={colors.primary} /></Pressable></View>} />)}
+        {groups.map(item => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={`${item.memberCount} members`} group action={<View style={styles.callActions}><Pressable disabled={busy} accessibilityLabel={`Voice call ${item.name}`} onPress={() => void startCall('group', item.id, item.name, 'audio')} style={styles.callSmall}><Phone size={19} color={colors.primary} /></Pressable><Pressable disabled={busy} accessibilityLabel={`Video call ${item.name}`} onPress={() => void startCall('group', item.id, item.name, 'video')} style={styles.callSmall}><Video size={20} color={colors.primary} /></Pressable></View>} />)}
+        {contacts.map(item => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={`@${item.username}`} action={<View style={styles.callActions}><Pressable disabled={busy} accessibilityLabel={`Voice call ${item.name}`} onPress={() => void startCall('direct', item.id, item.name, 'audio')} style={styles.callSmall}><Phone size={19} color={colors.primary} /></Pressable><Pressable disabled={busy} accessibilityLabel={`Video call ${item.name}`} onPress={() => void startCall('direct', item.id, item.name, 'video')} style={styles.callSmall}><Video size={20} color={colors.primary} /></Pressable></View>} />)}
         {groups.length === 0 && contacts.length === 0 && <View style={styles.empty}><Text style={styles.emptyTitle}>No one to call yet</Text><Text style={styles.emptyCopy}>Add a contact or create a group in Chats.</Text></View>}
       </>}
     </ScrollView>
@@ -256,7 +512,7 @@ export default function HomeScreen() {
             <Pressable disabled={busy || !groupName.trim() || selectedIds.length === 0} onPress={() => void createGroup()} style={[styles.primaryAction, (busy || !groupName.trim() || selectedIds.length === 0) && styles.disabled]}><CirclePlus size={19} color="#FFFFFF" /><Text style={styles.primaryActionText}>{busy ? 'Creating…' : 'Create group'}</Text></Pressable>
           </>}
           {sheet === 'room' && <>
-            <Text style={styles.helper}>Enter {room === 'loft' ? 'Loft 16' : 'Tea Party'} as:</Text>
+            <Text style={styles.helper}>Enter {room === 'beach' ? 'Goa Beach' : room === 'loft' ? 'Loft 16' : 'Tea Party'} as:</Text>
             <ScrollView style={styles.memberList}>{avatars.map((item) => <Pressable key={item.body} style={styles.memberRow} onPress={() => joinRoom(item.body)}><View style={styles.characterIcon}><Text style={styles.characterLetter}>{item.label[0]}</Text></View><Text style={styles.memberName}>{item.label}</Text><Text style={styles.chevron}>›</Text></Pressable>)}</ScrollView>
           </>}
         </View>
@@ -265,8 +521,54 @@ export default function HomeScreen() {
   </SafeAreaView>;
 }
 
-function PersonRow({ name, detail, time, group, action, onPress, typingNames = [] }: { name: string; detail: string; time?: string | null; group?: boolean; action?: React.ReactNode; onPress?: () => void; typingNames?: string[] }) {
-  const content = <><View style={[styles.personAvatar, group && styles.groupAvatar]}>{group ? <UsersRound size={23} color={colors.primaryDark} /> : <Text style={styles.personInitial}>{name[0]?.toUpperCase()}</Text>}</View><View style={styles.personText}><Text style={styles.personName}>{name}</Text>{typingNames.length ? <View style={styles.typingRow}><Text numberOfLines={1} style={styles.typingText}>{group ? `${typingNames.slice(0, 2).join(', ')} typing` : 'typing'}</Text><TypingDots /></View> : <Text numberOfLines={1} style={styles.personDetail}>{detail}</Text>}</View>{!typingNames.length && time ? <Text style={styles.time}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text> : action}</>;
+function PersonRow({
+  name,
+  detail,
+  avatarUrl,
+  time,
+  group,
+  action,
+  onPress,
+  typingNames = []
+}: {
+  name: string;
+  detail: string;
+  avatarUrl?: string | null;
+  time?: string | null;
+  group?: boolean;
+  action?: React.ReactNode;
+  onPress?: () => void;
+  typingNames?: string[]
+}) {
+  const content = (
+    <>
+      <View style={[styles.personAvatar, group && styles.groupAvatar]}>
+        {avatarUrl ? (
+          <Image source={{ uri: avatarUrl }} style={styles.rowAvatarImg} />
+        ) : group ? (
+          <UsersRound size={23} color={colors.primaryDark} />
+        ) : (
+          <Text style={styles.personInitial}>{name[0]?.toUpperCase()}</Text>
+        )}
+      </View>
+      <View style={styles.personText}>
+        <Text style={styles.personName}>{name}</Text>
+        {typingNames.length ? (
+          <View style={styles.typingRow}>
+            <Text numberOfLines={1} style={styles.typingText}>
+              {group ? `${typingNames.slice(0, 2).join(', ')} typing` : 'typing'}
+            </Text>
+            <TypingDots />
+          </View>
+        ) : (
+          <Text numberOfLines={1} style={styles.personDetail}>{detail}</Text>
+        )}
+      </View>
+      {!typingNames.length && time ? (
+        <Text style={styles.time}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>
+      ) : action}
+    </>
+  );
   return onPress ? <Pressable onPress={onPress} style={styles.personRow}>{content}</Pressable> : <View style={styles.personRow}>{content}</View>;
 }
 function MenuAction({ Icon, label, onPress }: { Icon: typeof QrCode; label: string; onPress: () => void }) {
@@ -276,6 +578,11 @@ function MenuAction({ Icon, label, onPress }: { Icon: typeof QrCode; label: stri
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   top: { paddingHorizontal: 22, paddingTop: 15, paddingBottom: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  headerProfileBtn: { padding: 2 },
+  headerAvatarImg: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.surfaceRaised },
+  headerAvatarPlaceholder: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center' },
+  headerAvatarInitial: { color: colors.primaryDark, fontSize: 18, fontWeight: '800' },
+  brandContainer: { flex: 1, marginLeft: 12 },
   brand: { color: colors.text, fontSize: 31, fontWeight: '900', letterSpacing: -1.5 }, brandDot: { color: colors.amber },
   subBrand: { color: colors.primary, fontSize: 9, letterSpacing: 1.5, fontWeight: '800' }, iconButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   searchBox: { marginHorizontal: 20, marginBottom: 10, height: 52, borderRadius: 25, backgroundColor: colors.surfaceRaised, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 17, gap: 11 },
@@ -283,7 +590,8 @@ const styles = StyleSheet.create({
   content: { paddingHorizontal: 20, paddingBottom: 120, flexGrow: 1 }, loader: { marginTop: 40 },
   section: { color: colors.primaryDark, fontSize: 12, fontWeight: '800', letterSpacing: 0.8, marginTop: 22, marginBottom: 5 },
   personRow: { minHeight: 75, backgroundColor: colors.surface, flexDirection: 'row', alignItems: 'center', borderBottomColor: colors.border, borderBottomWidth: StyleSheet.hairlineWidth, paddingHorizontal: 3 },
-  personAvatar: { width: 52, height: 52, borderRadius: 26, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center' }, groupAvatar: { backgroundColor: colors.amberSoft },
+  personAvatar: { width: 52, height: 52, borderRadius: 26, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }, groupAvatar: { backgroundColor: colors.amberSoft },
+  rowAvatarImg: { width: 52, height: 52, borderRadius: 26 },
   personInitial: { color: colors.primaryDark, fontSize: 22, fontWeight: '800' }, personText: { flex: 1, marginLeft: 14 },
   personName: { color: colors.text, fontSize: 16, fontWeight: '700' }, personDetail: { color: colors.muted, fontSize: 13, marginTop: 4 },
   typingRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 }, typingText: { color: colors.primary, fontSize: 13, fontWeight: '700', flexShrink: 1 },
@@ -291,7 +599,11 @@ const styles = StyleSheet.create({
   addSmall: { padding: 10, borderRadius: 22, backgroundColor: colors.primarySoft },
   callActions: { flexDirection: 'row', gap: 5 }, callSmall: { padding: 10, borderRadius: 22, backgroundColor: colors.primarySoft },
   requestCard: { backgroundColor: colors.surface, borderRadius: 16, padding: 16, marginBottom: 12 },
-  requestActions: { flexDirection: 'row', gap: 10, marginTop: 14 },
+  requestHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 },
+  requestAvatarImg: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.surfaceRaised },
+  requestAvatarPlaceholder: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center' },
+  requestAvatarInitial: { color: colors.primaryDark, fontSize: 17, fontWeight: '800' },
+  requestActions: { flexDirection: 'row', gap: 10, marginTop: 10 },
   acceptButton: { backgroundColor: colors.primary, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 20 }, acceptText: { color: '#FFFFFF', fontWeight: '800' },
   declineButton: { backgroundColor: colors.surfaceRaised, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 20 }, declineText: { color: colors.text, fontWeight: '800' },
   empty: { alignItems: 'center', paddingVertical: 43, paddingHorizontal: 25, gap: 9 }, emptyTitle: { color: colors.text, fontSize: 18, fontWeight: '800' }, emptyCopy: { color: colors.muted, fontSize: 13, textAlign: 'center', lineHeight: 20 },
@@ -313,4 +625,6 @@ const styles = StyleSheet.create({
   memberList: { maxHeight: 300 }, memberRow: { flexDirection: 'row', alignItems: 'center', minHeight: 56, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, gap: 12 },
   checkbox: { width: 23, height: 23, borderWidth: 1.5, borderColor: colors.border, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }, checked: { backgroundColor: colors.primary, borderColor: colors.primary }, checkMark: { color: '#FFFFFF', fontWeight: '900' }, memberName: { color: colors.text, fontWeight: '700', fontSize: 14, flex: 1 }, memberUsername: { color: colors.muted, fontSize: 12 }, helper: { color: colors.muted, fontSize: 13, lineHeight: 20, marginBottom: 12 },
   characterIcon: { width: 36, height: 36, backgroundColor: colors.primarySoft, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, characterLetter: { color: colors.primaryDark, fontWeight: '800' },
+  sentBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(37, 211, 102, 0.12)', paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, gap: 4 },
+  sentBadgeText: { color: '#25D366', fontSize: 12, fontWeight: '700' },
 });
