@@ -9,14 +9,39 @@ import { env } from '../../config/env.js';
 
 export const socialRoutes = Router();
 
+const sessionCache = new Map<string, { userId: string; expiresAt: number }>();
+
 const authenticated: RequestHandler = async (request, response, next) => {
   try {
+    const authHeader = request.headers.authorization;
+    const cookieHeader = request.headers.cookie;
+    const cacheKey = authHeader || cookieHeader;
+    if (cacheKey) {
+      const cached = sessionCache.get(cacheKey);
+      if (cached && cached.expiresAt > Date.now()) {
+        response.locals.userId = cached.userId;
+        next();
+        return;
+      }
+    }
+
     const headers = new Headers();
     for (const [key, value] of Object.entries(request.headers)) {
       if (typeof value === 'string') headers.set(key, value);
     }
     const session = await auth.api.getSession({ headers });
     if (!session) { response.status(401).json({ error: 'Sign in to continue.' }); return; }
+
+    if (cacheKey) {
+      sessionCache.set(cacheKey, { userId: session.user.id, expiresAt: Date.now() + 60 * 1000 });
+      if (sessionCache.size > 2000) {
+        const now = Date.now();
+        for (const [k, v] of sessionCache.entries()) {
+          if (v.expiresAt <= now) sessionCache.delete(k);
+        }
+      }
+    }
+
     response.locals.userId = session.user.id;
     next();
   } catch (error) { next(error); }
@@ -27,6 +52,53 @@ const run = (handler: RequestHandler): RequestHandler => (request, response, nex
 };
 
 socialRoutes.use(authenticated);
+
+socialRoutes.get('/social/bundle', run(async (_request, response) => {
+  const userId = response.locals.userId;
+  const [me, contacts, groups, people, friendRequests] = await Promise.all([
+    ensureProfile(userId),
+    pool.query(
+      `SELECT u.id, u.name, u.username, u.image AS "avatarUrl", u.about FROM "contact" c
+       JOIN "user" u ON u.id = CASE WHEN c."userA" = $1 THEN c."userB" ELSE c."userA" END
+       WHERE c."userA" = $1 OR c."userB" = $1 ORDER BY u.name`,
+      [userId],
+    ),
+    pool.query(
+      `SELECT g.id, g.name, g."avatarUrl", g."createdAt", COUNT(m2."userId")::int AS "memberCount"
+       FROM "chat_group" g JOIN "chat_group_member" mine ON mine."groupId" = g.id AND mine."userId" = $1
+       JOIN "chat_group_member" m2 ON m2."groupId" = g.id
+       GROUP BY g.id, g.name, g."avatarUrl", g."createdAt" ORDER BY g."createdAt" DESC`,
+      [userId],
+    ),
+    pool.query(
+      `SELECT u.id, u.name, u.username, u.image AS "avatarUrl" FROM "user" u
+       WHERE u.id <> $1 AND u.username IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM "contact" c WHERE (c."userA" = $1 AND c."userB" = u.id) OR (c."userB" = $1 AND c."userA" = u.id))
+       ORDER BY u."createdAt" DESC LIMIT 20`,
+      [userId],
+    ),
+    pool.query(
+      `SELECT r.id, r."senderId", r."recipientId", r."createdAt", r.status,
+         sender.name AS "senderName", sender.username AS "senderUsername", sender.image AS "senderAvatarUrl",
+         recipient.name AS "recipientName", recipient.username AS "recipientUsername", recipient.image AS "recipientAvatarUrl"
+       FROM "friend_request" r JOIN "user" sender ON sender.id = r."senderId"
+         JOIN "user" recipient ON recipient.id = r."recipientId"
+       WHERE (r."senderId" = $1 OR r."recipientId" = $1) AND r.status = 'pending'
+       ORDER BY r."createdAt" DESC LIMIT 100`,
+      [userId],
+    ),
+  ]);
+
+  if (!me) { response.status(404).json({ error: 'User not found.' }); return; }
+
+  response.json({
+    me,
+    contacts: contacts.rows,
+    groups: groups.rows,
+    people: people.rows,
+    friendRequests: friendRequests.rows,
+  });
+}));
 
 socialRoutes.get('/calls/ice', run(async (_request, response) => {
   const iceServers: { urls: string; username?: string; credential?: string }[] = [{ urls: env.stunUrl }];
@@ -92,12 +164,9 @@ socialRoutes.patch('/me', run(async (request, response) => {
 
 socialRoutes.get('/contacts', run(async (_request, response) => {
   const result = await pool.query(
-    `SELECT u.id, u.name, u.username, u.image AS "avatarUrl", last.body AS "lastMessage", last."createdAt" AS "lastAt" FROM "contact" c
+    `SELECT u.id, u.name, u.username, u.image AS "avatarUrl", u.about FROM "contact" c
      JOIN "user" u ON u.id = CASE WHEN c."userA" = $1 THEN c."userB" ELSE c."userA" END
-     LEFT JOIN LATERAL (SELECT m.body, m."createdAt" FROM "chat_message" m
-       WHERE (m."senderId" = $1 AND m."recipientId" = u.id) OR (m."senderId" = u.id AND m."recipientId" = $1)
-       ORDER BY m."createdAt" DESC LIMIT 1) last ON TRUE
-     WHERE c."userA" = $1 OR c."userB" = $1 ORDER BY last."createdAt" DESC NULLS LAST, u.name`,
+     WHERE c."userA" = $1 OR c."userB" = $1 ORDER BY u.name`,
     [response.locals.userId],
   );
   response.json(result.rows);
@@ -278,11 +347,10 @@ socialRoutes.post('/friend-requests/:id/respond', run(async (request, response) 
 
 socialRoutes.get('/groups', run(async (_request, response) => {
   const result = await pool.query(
-    `SELECT g.id, g.name, g."avatarUrl", g."createdAt", COUNT(m2."userId")::int AS "memberCount", last.body AS "lastMessage", last."createdAt" AS "lastAt"
+    `SELECT g.id, g.name, g."avatarUrl", g."createdAt", COUNT(m2."userId")::int AS "memberCount"
      FROM "chat_group" g JOIN "chat_group_member" mine ON mine."groupId" = g.id AND mine."userId" = $1
      JOIN "chat_group_member" m2 ON m2."groupId" = g.id
-     LEFT JOIN LATERAL (SELECT body, "createdAt" FROM "chat_message" WHERE "groupId" = g.id ORDER BY "createdAt" DESC LIMIT 1) last ON TRUE
-     GROUP BY g.id, g."avatarUrl", last.body, last."createdAt" ORDER BY COALESCE(last."createdAt", g."createdAt") DESC`,
+     GROUP BY g.id, g.name, g."avatarUrl", g."createdAt" ORDER BY g."createdAt" DESC`,
     [response.locals.userId],
   );
   response.json(result.rows);
