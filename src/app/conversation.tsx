@@ -248,7 +248,7 @@ export default function ConversationScreen() {
   const searchMatches = useMemo(() => {
     if (!searchQuery.trim()) return [];
     const q = searchQuery.toLowerCase().trim();
-    return reversedMessages.filter(m => !m.body.startsWith('__adda_media__') && m.body !== '__adda_deleted__' && m.body.toLowerCase().includes(q));
+    return reversedMessages.filter(m => !m.body.startsWith('__adda_media__') && !m.body.startsWith('__adda_room_card__') && m.body !== '__adda_deleted__' && m.body.toLowerCase().includes(q));
   }, [searchQuery, reversedMessages]);
 
   useEffect(() => {
@@ -700,7 +700,12 @@ export default function ConversationScreen() {
 
   const triggerReply = (msg: LocalMessage) => {
     const media = mediaFromBody(msg.body);
-    const snippet = media ? (media.mediaKind === 'video' ? '🎥 Video' : '📷 Photo') : (msg.body.length > 80 ? msg.body.slice(0, 77) + '...' : msg.body);
+    const roomCard = roomCardFromBody(msg.body);
+    const snippet = media
+      ? (media.mediaKind === 'video' ? '🎥 Video' : '📷 Photo')
+      : roomCard
+      ? `🌴 Room Invite • ${roomCard.roomName || 'Hangout'}`
+      : (msg.body.length > 80 ? msg.body.slice(0, 77) + '...' : msg.body);
     setReplyingTo({
       messageId: msg.id,
       senderId: msg.senderId,

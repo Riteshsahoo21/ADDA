@@ -112,13 +112,17 @@ export function previewBody(body: string, isMine?: boolean): string {
   if (body === '__adda_deleted__') {
     return isMine ? '🚫 You deleted this message' : '🚫 This message was deleted';
   }
-  const roomCard = roomCardFromBody(body);
-  if (roomCard) {
-    const roomTitle = roomCard.roomKind === 'beach' ? 'Goa Beach'
-      : roomCard.roomKind === 'tea' ? 'Tea Party'
-      : roomCard.roomKind === 'roof' ? 'School Rooftop'
-      : 'Loft 16';
-    return `🌴 ${roomCard.creatorName} invited you: ${roomCard.roomName || roomTitle}`;
+  if (body && body.startsWith('__adda_room_card__:')) {
+    const roomCard = roomCardFromBody(body);
+    if (roomCard) {
+      const roomTitle = roomCard.roomKind === 'beach' ? 'Goa Beach'
+        : roomCard.roomKind === 'tea' ? 'Tea Party'
+        : roomCard.roomKind === 'roof' ? 'School Rooftop'
+        : 'Loft 16';
+      const label = roomCard.roomName || roomTitle;
+      return isMine ? `🌴 You invited to ${label}` : `🌴 ${roomCard.creatorName || 'Host'} invited you: ${label}`;
+    }
+    return '🌴 Room Invitation';
   }
   const media = mediaFromBody(body);
   return media ? (media.mediaKind === 'image' ? '📷 Photo' : '🎥 Video') : body;
@@ -146,6 +150,20 @@ export function formatChatPreview(
       return `${preview.senderName}: 🚫 This message was deleted`;
     }
     return '🚫 This message was deleted';
+  }
+
+  if (preview.body && preview.body.startsWith('__adda_room_card__:')) {
+    const roomCard = roomCardFromBody(preview.body);
+    const roomTitle = roomCard?.roomKind === 'beach' ? 'Goa Beach'
+      : roomCard?.roomKind === 'tea' ? 'Tea Party'
+      : roomCard?.roomKind === 'roof' ? 'School Rooftop'
+      : 'Loft 16';
+    const serverLabel = roomCard?.roomName || roomTitle;
+    if (preview.kind === 'group') {
+      const sender = isMine ? 'You' : (preview.senderName || roomCard?.creatorName || 'Member');
+      return `${sender}: 🌴 Room Invite • ${serverLabel}`;
+    }
+    return isMine ? `🌴 You sent an invite: ${serverLabel}` : `🌴 ${roomCard?.creatorName || preview.senderName || 'Host'} invited you: ${serverLabel}`;
   }
 
   const media = mediaFromBody(preview.body);
@@ -390,9 +408,10 @@ export async function sendEncryptedMessage(
   senderName: string,
   existingId?: string,
   replyTo?: QuotedReply | null,
-  mentions?: string[] | null
+  mentions?: string[] | null,
+  customPreviewText?: string
 ): Promise<LocalMessage> {
-  const previewText = body.length > 80 ? body.slice(0, 77) + '...' : body;
+  const previewText = customPreviewText || (body?.startsWith('__adda_room_card__:') ? previewBody(body) : (body.length > 80 ? body.slice(0, 77) + '...' : body));
   return sendEncryptedContent(target, body, senderName, existingId, undefined, undefined, previewText, replyTo, mentions);
 }
 
