@@ -69,27 +69,44 @@ export type SocialBundle = {
   friendRequests: FriendRequest[];
 };
 
+export type PublicServerInfo = {
+  id: string;
+  roomKind: 'loft' | 'roof' | 'tea' | 'beach';
+  creatorId: string;
+  creatorName: string;
+  creatorAvatarUrl?: string | null;
+  name: string;
+  code: string;
+  isPrivate: boolean;
+  peerCount: number;
+  createdAt: string;
+};
+
 export type ActiveGroupRoom = {
   id: string;
-  groupId: string;
+  groupId: string | null;
   groupName: string;
   groupAvatarUrl?: string | null;
   roomKind: 'loft' | 'roof' | 'tea' | 'beach';
   creatorId: string;
   creatorName: string;
+  name?: string;
+  isPrivate?: boolean;
   createdAt: string;
 };
 
 export type RoomInvitation = {
   id: string;
   roomId: string;
-  groupId: string;
+  groupId: string | null;
   groupName: string;
   roomKind: 'loft' | 'roof' | 'tea' | 'beach';
+  roomName?: string | null;
   inviterId: string;
   inviterName: string;
   inviterAvatarUrl?: string | null;
   createdAt: string;
+  isPrivate?: boolean;
 };
 
 export type HangoutUpdatesResponse = {

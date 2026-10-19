@@ -334,12 +334,13 @@ export default function ConversationScreen() {
       );
       setShowRoomModal(false);
       router.push({
-        pathname: '/hangout',
+        pathname: '/lobby',
         params: {
           room: theme,
           groupId: target.id,
           roomId: res.room.roomId,
           roomOwnerId: selfId,
+          groupName: name,
         },
       } as unknown as Href);
     } catch (err: any) {
@@ -1203,12 +1204,13 @@ export default function ConversationScreen() {
                       isLight={isLight}
                       onJoin={() => {
                         router.push({
-                          pathname: '/hangout',
+                          pathname: '/lobby',
                           params: {
                             room: roomCard.roomKind,
                             groupId: roomCard.groupId,
                             roomId: roomCard.roomId,
                             roomOwnerId: roomCard.creatorId,
+                            groupName: name,
                           },
                         } as unknown as Href);
                       }}
@@ -1435,12 +1437,13 @@ export default function ConversationScreen() {
                   onPress={() => {
                     setShowRoomModal(false);
                     router.push({
-                      pathname: '/hangout',
+                      pathname: '/lobby',
                       params: {
                         room: activeGroupRoom.roomKind,
                         groupId: target?.id,
                         roomId: activeGroupRoom.id,
                         roomOwnerId: activeGroupRoom.creatorId,
+                        groupName: name,
                       },
                     } as unknown as Href);
                   }}

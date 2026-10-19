@@ -57,3 +57,26 @@ export async function inviteGroupToRoom(targetGroupId: string): Promise<number> 
     else resolve(result.value?.invitedCount ?? 0);
   }));
 }
+
+export async function fetchPublicRooms(): Promise<import('./social-api').PublicServerInfo[]> {
+  const { socialApi } = await import('./social-api');
+  const res = await socialApi<{ rooms: import('./social-api').PublicServerInfo[] }>('/rooms/public');
+  return res.rooms || [];
+}
+
+export async function createRoomServer(payload: {
+  roomKind: string;
+  isPrivate: boolean;
+  name?: string;
+  groupInvites?: string[];
+  userInvites?: string[];
+}): Promise<import('./social-api').PublicServerInfo> {
+  const { socialApi } = await import('./social-api');
+  const res = await socialApi<{ ok: boolean; room: import('./social-api').PublicServerInfo }>('/rooms', 'POST', payload);
+  return res.room;
+}
+
+export async function deleteRoomServer(roomId: string): Promise<void> {
+  const { socialApi } = await import('./social-api');
+  await socialApi(`/rooms/${roomId}`, 'DELETE');
+}

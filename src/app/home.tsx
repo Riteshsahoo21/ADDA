@@ -3,17 +3,18 @@ import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform,
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
-import { Check, CirclePlus, DoorOpen, EllipsisVertical, MessageCircle, Phone, Plus, QrCode, Search, UserPlus, UsersRound, Video, X } from 'lucide-react-native';
+import { Check, CirclePlus, Compass, DoorOpen, EllipsisVertical, Globe, Lock, MessageCircle, Phone, Plus, QrCode, RefreshCw, Search, Shield, Sparkles, UserPlus, UsersRound, Video, X } from 'lucide-react-native';
 import { BottomNav, type HubTab } from '@/components/ui/BottomNav';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
-import { socialApi, type ActiveGroupRoom, type ChatGroup, type FriendRequest, type HangoutUpdatesResponse, type OwnProfile, type PublicProfile, type RoomInvitation, type SocialBundle } from '@/lib/social-api';
+import { socialApi, type ActiveGroupRoom, type ChatGroup, type FriendRequest, type HangoutUpdatesResponse, type OwnProfile, type PublicProfile, type PublicServerInfo, type RoomInvitation, type SocialBundle } from '@/lib/social-api';
 import { getRealtimeSocket, type TypingEvent } from '@/lib/realtime';
 import { TypingDots } from '@/components/ui/TypingDots';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { type AvatarBody, AVATAR_NAMES, AVATAR_TAGLINES } from '@/three/player/avatarStyle';
 import { initEncryptedChat, localPreviews, onChatChanged, previewBody, formatChatPreview, setCachedProfile, getCachedProfile } from '@/lib/encrypted-chat';
 import { getCachedSocialBundle, initSocialCache, setCachedSocialBundle, updateCachedContacts, updateCachedGroups, updateCachedFriendRequests } from '@/lib/social-cache';
+import { createRoomServer, fetchPublicRooms } from '@/lib/rooms';
 
 const avatars: { body: AvatarBody; label: string; tagline: string }[] = [
   { body: 'man', label: AVATAR_NAMES.man, tagline: AVATAR_TAGLINES.man },
@@ -25,8 +26,15 @@ const avatars: { body: AvatarBody; label: string; tagline: string }[] = [
   { body: 'nepali_woman', label: AVATAR_NAMES.nepali_woman, tagline: AVATAR_TAGLINES.nepali_woman },
   { body: 'white_top_woman', label: AVATAR_NAMES.white_top_woman, tagline: AVATAR_TAGLINES.white_top_woman },
 ];
-type Sheet = 'add' | 'group' | 'menu' | 'room' | null;
-type Room = 'loft' | 'tea' | 'beach';
+type Sheet = 'add' | 'group' | 'menu' | null;
+type RoomKind = 'loft' | 'tea' | 'beach' | 'roof';
+
+const THEMES: { id: RoomKind; title: string; subtitle: string; emoji: string; color: string }[] = [
+  { id: 'tea', title: 'Chai Shop', subtitle: 'Roadside adda with warm tea & bench talks', emoji: '☕', color: '#B26E3A' },
+  { id: 'beach', title: 'Sunset Beach', subtitle: 'Sunset shores, ocean breeze & waves', emoji: '🏖️', color: '#F38D68' },
+  { id: 'loft', title: 'Lounge Loft', subtitle: 'Modern apartment lounge & sofas', emoji: '🏢', color: '#277A55' },
+  { id: 'roof', title: 'School Rooftop', subtitle: 'Open sky rooftop overlooking the city', emoji: '🏫', color: '#5C6BC0' },
+];
 
 export default function HomeScreen() {
   const { username, logout, avatarStyle, setAvatarStyle } = useSession();
@@ -37,14 +45,25 @@ export default function HomeScreen() {
   const initialCache = getCachedSocialBundle();
   const [profile, setProfile] = useState<OwnProfile | null>(initialCache?.me || getCachedProfile() || null);
   const [contacts, setContacts] = useState<PublicProfile[]>(initialCache?.contacts || []);
-  const [people, setPeople] = useState<PublicProfile[]>(initialCache?.people || []);
+  const [people, setPeople] = useState<PublicProfile[]>([]);
   const [groups, setGroups] = useState<ChatGroup[]>(initialCache?.groups || []);
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>(initialCache?.friendRequests || []);
   const [activeHangouts, setActiveHangouts] = useState<ActiveGroupRoom[]>([]);
   const [roomInvites, setRoomInvites] = useState<RoomInvitation[]>([]);
   const [search, setSearch] = useState('');
+
+  // Rooms State
+  const [roomsSubTab, setRoomsSubTab] = useState<'create' | 'join'>('create');
+  const [publicRooms, setPublicRooms] = useState<PublicServerInfo[]>([]);
+  const [loadingPublicRooms, setLoadingPublicRooms] = useState(false);
+  const [selectedTheme, setSelectedTheme] = useState<RoomKind>('tea');
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [isPrivateServer, setIsPrivateServer] = useState(false);
+  const [customServerName, setCustomServerName] = useState('');
+  const [selectedGroupInvites, setSelectedGroupInvites] = useState<string[]>([]);
+  const [selectedContactInvites, setSelectedContactInvites] = useState<string[]>([]);
+  const [creatingServer, setCreatingServer] = useState(false);
   const [sheet, setSheet] = useState<Sheet>(null);
-  const [room, setRoom] = useState<Room>('loft');
   const [newUsername, setNewUsername] = useState('');
   const [groupName, setGroupName] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -103,12 +122,13 @@ export default function HomeScreen() {
       try {
         bundle = await socialApi<SocialBundle>('/social/bundle');
       } catch {
-        const [me, friends, suggested, joined, requests] = await Promise.all([
-          socialApi<OwnProfile>('/me'), socialApi<PublicProfile[]>('/contacts'),
-          socialApi<PublicProfile[]>('/people'), socialApi<ChatGroup[]>('/groups'),
+        const [me, friends, joined, requests] = await Promise.all([
+          socialApi<OwnProfile>('/me'),
+          socialApi<PublicProfile[]>('/contacts'),
+          socialApi<ChatGroup[]>('/groups'),
           socialApi<FriendRequest[]>('/friend-requests'),
         ]);
-        bundle = { me, contacts: friends, people: suggested, groups: joined, friendRequests: requests };
+        bundle = { me, contacts: friends, people: [], groups: joined, friendRequests: requests };
       }
 
       void initEncryptedChat(bundle.me.id);
@@ -136,7 +156,7 @@ export default function HomeScreen() {
       setProfile(bundle.me);
       setCachedProfile(bundle.me);
       setContacts(enrichedContacts);
-      setPeople(bundle.people);
+      setPeople([]);
       setGroups(enrichedGroups);
       setFriendRequests(bundle.friendRequests);
       setError('');
@@ -145,7 +165,7 @@ export default function HomeScreen() {
         me: bundle.me,
         contacts: enrichedContacts,
         groups: enrichedGroups,
-        people: bundle.people,
+        people: [],
         friendRequests: bundle.friendRequests,
       });
     } catch (cause) {
@@ -166,6 +186,17 @@ export default function HomeScreen() {
     } catch {}
   }, []);
 
+  const loadPublicRooms = useCallback(async () => {
+    try {
+      setLoadingPublicRooms(true);
+      const rooms = await fetchPublicRooms();
+      setPublicRooms(rooms);
+    } catch {}
+    finally {
+      setLoadingPublicRooms(false);
+    }
+  }, []);
+
   const respondToInvite = async (inviteId: string, decision: 'accept' | 'dismiss') => {
     const invite = roomInvites.find(i => i.id === inviteId);
     setRoomInvites(curr => curr.filter(i => i.id !== inviteId));
@@ -174,12 +205,15 @@ export default function HomeScreen() {
     } catch {}
     if (decision === 'accept' && invite) {
       router.push({
-        pathname: '/hangout',
+        pathname: '/lobby',
         params: {
           room: invite.roomKind,
-          groupId: invite.groupId,
+          groupId: invite.groupId || '',
           roomId: invite.roomId,
           roomOwnerId: '',
+          roomName: invite.roomName || invite.groupName,
+          inviterName: invite.inviterName,
+          isPrivate: 'true',
         },
       } as unknown as Href);
     }
@@ -190,7 +224,8 @@ export default function HomeScreen() {
     if (cached) setProfile(cached);
     void refresh();
     void refreshHangouts();
-  }, [refresh, refreshHangouts]));
+    void loadPublicRooms();
+  }, [refresh, refreshHangouts, loadPublicRooms]));
 
   const refreshSocial = useCallback(async () => {
     try {
@@ -198,12 +233,11 @@ export default function HomeScreen() {
       try {
         bundle = await socialApi<SocialBundle>('/social/bundle');
       } catch {
-        const [friends, requests, suggested] = await Promise.all([
+        const [friends, requests] = await Promise.all([
           socialApi<PublicProfile[]>('/contacts'),
           socialApi<FriendRequest[]>('/friend-requests'),
-          socialApi<PublicProfile[]>('/people'),
         ]);
-        bundle = { me: profile!, contacts: friends, groups: [], people: suggested, friendRequests: requests };
+        bundle = { me: profile!, contacts: friends, groups: [], people: [], friendRequests: requests };
       }
 
       setContacts(current => {
@@ -218,7 +252,7 @@ export default function HomeScreen() {
         });
       });
       setFriendRequests(bundle.friendRequests);
-      setPeople(bundle.people);
+      setPeople([]);
     } catch { /* Silent background sync */ }
   }, [profile]);
 
@@ -274,7 +308,6 @@ export default function HomeScreen() {
               ...curr,
             ];
           });
-          setPeople(curr => curr.filter(p => p.id !== newContact.id));
         }
         return;
       }
@@ -313,6 +346,8 @@ export default function HomeScreen() {
     const onRoomInvite = (inv: RoomInvitation) => {
       setRoomInvites(curr => [inv, ...curr.filter(i => i.id !== inv.id)]);
     };
+    const onPublicRoomsUpdated = () => { void loadPublicRooms(); };
+
     void getRealtimeSocket().then(value => {
       if (!active) return;
       live = value;
@@ -321,6 +356,8 @@ export default function HomeScreen() {
       value.on('friends:updated', onFriendUpdate);
       value.on('group:room_updated', onRoomUpdated);
       value.on('room:invitation', onRoomInvite);
+      value.on('rooms:public_updated', onPublicRoomsUpdated);
+      value.on('room:public_closed', onPublicRoomsUpdated);
       value.on('connect', onUpdate);
       value.on('disconnect', clearTyping);
       value.on('chat:typing', onTyping);
@@ -333,11 +370,13 @@ export default function HomeScreen() {
       live?.off('friends:updated', onFriendUpdate);
       live?.off('group:room_updated', onRoomUpdated);
       live?.off('room:invitation', onRoomInvite);
+      live?.off('rooms:public_updated', onPublicRoomsUpdated);
+      live?.off('room:public_closed', onPublicRoomsUpdated);
       live?.off('connect', onUpdate);
       live?.off('disconnect', clearTyping);
       live?.off('chat:typing', onTyping);
     };
-  }, [username, refresh, profile?.id, refreshSocial, refreshHangouts]);
+  }, [username, refresh, profile?.id, refreshSocial, refreshHangouts, loadPublicRooms]);
 
   const visibleContacts = useMemo(() => {
     return contacts
@@ -350,10 +389,6 @@ export default function HomeScreen() {
       .filter((item) => item.name.toLowerCase().includes(search.toLowerCase()))
       .sort((a, b) => (b.lastAt || '').localeCompare(a.lastAt || ''));
   }, [groups, search]);
-  const contactIds = useMemo(() => new Set(contacts.map(c => c.id)), [contacts]);
-  const visiblePeople = useMemo(() => {
-    return people.filter((item) => !contactIds.has(item.id) && `${item.name} ${item.username}`.toLowerCase().includes(search.toLowerCase()));
-  }, [people, contactIds, search]);
 
   const openSheet = (next: Sheet) => { setSheetError(''); setSheet(next); };
   const addFriend = async (value: string, explicitTarget?: PublicProfile) => {
@@ -361,8 +396,7 @@ export default function HomeScreen() {
     if (!cleanUsername && !explicitTarget) return;
 
     // 1. INSTANT OPTIMISTIC UI UPDATE (0ms)
-    const targetUser = explicitTarget || people.find(p => p.username.toLowerCase() === cleanUsername);
-    const targetId = explicitTarget?.id || targetUser?.id || `user-${cleanUsername}`;
+    const targetId = explicitTarget?.id || `user-${cleanUsername}`;
     const tempId = `temp-${Date.now()}`;
 
     const optimisticRequest: FriendRequest = {
@@ -372,9 +406,9 @@ export default function HomeScreen() {
       senderName: profile?.name || '',
       senderUsername: profile?.username || '',
       senderAvatarUrl: profile?.avatarUrl || null,
-      recipientName: explicitTarget?.name || targetUser?.name || cleanUsername,
-      recipientUsername: explicitTarget?.username || targetUser?.username || cleanUsername,
-      recipientAvatarUrl: explicitTarget?.avatarUrl || targetUser?.avatarUrl || null,
+      recipientName: explicitTarget?.name || cleanUsername,
+      recipientUsername: explicitTarget?.username || cleanUsername,
+      recipientAvatarUrl: explicitTarget?.avatarUrl || null,
       createdAt: new Date().toISOString(),
       status: 'pending',
     };
@@ -384,7 +418,7 @@ export default function HomeScreen() {
     setSheetError('');
 
     setFriendRequests(curr => {
-      const matchUsername = (explicitTarget?.username || targetUser?.username || cleanUsername).toLowerCase();
+      const matchUsername = (explicitTarget?.username || cleanUsername).toLowerCase();
       if (curr.some(r => r.recipientUsername.toLowerCase() === matchUsername || r.recipientId === targetId)) {
         return curr;
       }
@@ -395,9 +429,7 @@ export default function HomeScreen() {
     try {
       const added = explicitTarget?.id
         ? await socialApi<PublicProfile>(`/contacts/user/${encodeURIComponent(explicitTarget.id)}`, 'POST')
-        : targetUser?.id
-          ? await socialApi<PublicProfile>(`/contacts/user/${encodeURIComponent(targetUser.id)}`, 'POST')
-          : await socialApi<PublicProfile>('/contacts/username', 'POST', { username: cleanUsername });
+        : await socialApi<PublicProfile>('/contacts/username', 'POST', { username: cleanUsername });
 
       setFriendRequests(curr => curr.map(r => r.id === tempId ? {
         ...r,
@@ -458,10 +490,58 @@ export default function HomeScreen() {
   };
   const handleLogout = async () => { setSheet(null); await logout(); router.replace('/login'); };
   const selectTab = (next: HubTab) => { if (next === 'you') router.push('/profile' as Href); else setTab(next); };
-  const joinRoom = (body: AvatarBody) => {
-    setAvatarStyle({ body }); setSheet(null);
-    router.push({ pathname: '/hangout', params: { room, avatar: body } });
+
+  const handleOpenCreateModal = (theme?: RoomKind) => {
+    if (theme) setSelectedTheme(theme);
+    setIsPrivateServer(false);
+    setCustomServerName('');
+    setSelectedGroupInvites([]);
+    setSelectedContactInvites([]);
+    setCreateModalOpen(true);
   };
+
+  const handleCreateServer = async () => {
+    if (creatingServer) return;
+    setCreatingServer(true);
+    try {
+      const created = await createRoomServer({
+        roomKind: selectedTheme,
+        isPrivate: isPrivateServer,
+        name: customServerName.trim() || undefined,
+        groupInvites: isPrivateServer ? selectedGroupInvites : undefined,
+        userInvites: isPrivateServer ? selectedContactInvites : undefined,
+      });
+      setCreateModalOpen(false);
+      router.push({
+        pathname: '/lobby',
+        params: {
+          room: created.roomKind,
+          roomId: created.id,
+          roomOwnerId: created.creatorId,
+          roomName: created.name,
+          isPrivate: String(created.isPrivate),
+        },
+      } as unknown as Href);
+    } catch (err: any) {
+      Alert.alert('Server Creation Failed', err.message || 'Could not create server.');
+    } finally {
+      setCreatingServer(false);
+    }
+  };
+
+  const handleJoinServer = (server: PublicServerInfo) => {
+    router.push({
+      pathname: '/lobby',
+      params: {
+        room: server.roomKind,
+        roomId: server.id,
+        roomOwnerId: server.creatorId,
+        roomName: server.name,
+        isPrivate: String(server.isPrivate),
+      },
+    } as unknown as Href);
+  };
+
   const openConversation = (kind: 'direct' | 'group', id: string, name: string, avatar?: string | null) => {
     router.push({
       pathname: '/conversation',
@@ -497,7 +577,7 @@ export default function HomeScreen() {
       <Pressable accessibilityLabel="More options" onPress={() => openSheet('menu')} style={styles.iconButton}><EllipsisVertical size={25} color={colors.text} /></Pressable>
     </View>
 
-    {tab === 'chats' && <View style={styles.searchBox}><Search size={21} color={colors.muted} /><TextInput style={styles.searchInput} placeholder="Search people and groups" placeholderTextColor={colors.muted} value={search} onChangeText={setSearch} autoCapitalize="none" /></View>}
+    {tab === 'chats' && <View style={styles.searchBox}><Search size={21} color={colors.muted} /><TextInput style={styles.searchInput} placeholder="Search contacts and groups" placeholderTextColor={colors.muted} value={search} onChangeText={setSearch} autoCapitalize="none" /></View>}
 
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       {tab === 'chats' && <>
@@ -507,40 +587,142 @@ export default function HomeScreen() {
           {visibleGroups.length > 0 && <><Text style={styles.section}>Groups</Text>{visibleGroups.map((item) => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={item.lastMessage || `${item.memberCount} members`} time={item.lastAt} typingNames={Object.values(typing[`group:${item.id}`] ?? {})} group onPress={() => openConversation('group', item.id, item.name, item.avatarUrl)} />)}</>}
           {visibleContacts.length > 0 && <><Text style={styles.section}>Contacts</Text>{visibleContacts.map((item) => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={item.lastMessage || `@${item.username}`} time={item.lastAt} typingNames={Object.values(typing[`direct:${item.id}`] ?? {})} onPress={() => openConversation('direct', item.id, item.name, item.avatarUrl)} />)}</>}
           {visibleGroups.length === 0 && visibleContacts.length === 0 && <View style={styles.empty}><MessageCircle size={34} color={colors.primary} /><Text style={styles.emptyTitle}>{search ? 'No matches' : 'Your chats start here'}</Text><Text style={styles.emptyCopy}>{search ? 'Try another name or username.' : 'Add a friend or create a group to get started.'}</Text></View>}
-          {visiblePeople.length > 0 && <><Text style={styles.section}>People on ADDA</Text>{visiblePeople.map((item) => {
-            const isRequested = friendRequests.some(request =>
-              (request.senderId === profile?.id && request.recipientId === item.id) ||
-              (request.recipientId === profile?.id && request.senderId === item.id) ||
-              (request.senderId === profile?.id && request.recipientUsername?.toLowerCase() === item.username.toLowerCase())
-            );
-            return (
-              <PersonRow
-                key={item.id}
-                name={item.name}
-                avatarUrl={item.avatarUrl}
-                detail={isRequested ? 'Request sent' : `@${item.username}`}
-                action={isRequested ? (
-                  <View style={styles.sentBadge}>
-                    <Check size={14} color="#25D366" />
-                    <Text style={styles.sentBadgeText}>Sent</Text>
-                  </View>
-                ) : (
-                  <Pressable accessibilityLabel={`Request ${item.name}`} onPress={() => void addFriend(item.username, item)} style={styles.addSmall}>
-                    <UserPlus size={19} color={colors.primary} />
-                  </Pressable>
-                )}
-              />
-            );
-          })}</>}
         </>}
       </>}
 
       {tab === 'rooms' && <>
-        <Text style={styles.pageTitle}>Choose your hangout</Text><Text style={styles.pageCopy}>Pick a place, then choose the character you’ll bring.</Text>
-        <Pressable style={styles.avatarCard} onPress={() => router.push('/avatar')}><View style={styles.avatarIcon}><Text style={styles.avatarLetter}>{username[0].toUpperCase()}</Text></View><View style={styles.fill}><Text style={styles.cardTitle}>Your character</Text><Text style={styles.cardSub}>{avatars.find((item) => item.body === avatarStyle.body) ? `${avatars.find((item) => item.body === avatarStyle.body)?.label} • ${avatars.find((item) => item.body === avatarStyle.body)?.tagline}` : 'Choose a character'}</Text></View><Text style={styles.chevron}>›</Text></Pressable>
-        <Pressable style={styles.roomCard} onPress={() => { setRoom('loft'); openSheet('room'); }}><View style={styles.roomIcon}><DoorOpen size={25} color={colors.primaryDark} /></View><View style={styles.fill}><Text style={styles.cardTitle}>Loft 16</Text><Text style={styles.cardSub}>A cozy place to gather</Text></View><Text style={styles.chevron}>›</Text></Pressable>
-        <Pressable style={styles.roomCard} onPress={() => { setRoom('tea'); openSheet('room'); }}><View style={[styles.roomIcon, styles.teaIcon]}><Text style={styles.teaEmoji}>☕</Text></View><View style={styles.fill}><Text style={styles.cardTitle}>Tea Party</Text><Text style={styles.cardSub}>Meet at the roadside adda</Text></View><Text style={styles.chevron}>›</Text></Pressable>
-        <Pressable style={styles.roomCard} onPress={() => { setRoom('beach'); openSheet('room'); }}><View style={[styles.roomIcon, { backgroundColor: '#F38D68' }]}><Text style={styles.teaEmoji}>🏖️</Text></View><View style={styles.fill}><Text style={styles.cardTitle}>Goa Beach</Text><Text style={styles.cardSub}>Sunset shores, shacks & ocean waves</Text></View><Text style={styles.chevron}>›</Text></Pressable>
+        {/* Sub-Tab Navigation Bar */}
+        <View style={styles.roomsTabBar}>
+          <Pressable
+            onPress={() => setRoomsSubTab('create')}
+            style={[styles.roomsTabBtn, roomsSubTab === 'create' && styles.roomsTabBtnActive]}
+          >
+            <Plus size={16} color={roomsSubTab === 'create' ? '#FFFFFF' : colors.text} />
+            <Text style={[styles.roomsTabBtnText, roomsSubTab === 'create' && styles.roomsTabBtnTextActive]}>
+              Create Server
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              setRoomsSubTab('join');
+              void loadPublicRooms();
+            }}
+            style={[styles.roomsTabBtn, roomsSubTab === 'join' && styles.roomsTabBtnActive]}
+          >
+            <Globe size={16} color={roomsSubTab === 'join' ? '#FFFFFF' : colors.text} />
+            <Text style={[styles.roomsTabBtnText, roomsSubTab === 'join' && styles.roomsTabBtnTextActive]}>
+              Join Server
+            </Text>
+            {publicRooms.length > 0 && (
+              <View style={[styles.serverCountBadge, roomsSubTab === 'join' && styles.serverCountBadgeActive]}>
+                <Text style={[styles.serverCountBadgeText, roomsSubTab === 'join' && styles.serverCountBadgeTextActive]}>
+                  {publicRooms.length}
+                </Text>
+              </View>
+            )}
+          </Pressable>
+        </View>
+
+        {roomsSubTab === 'create' && (
+          <>
+            <Text style={styles.pageTitle}>Create a Server</Text>
+            <Text style={styles.pageCopy}>Pick a map environment to launch a live public or private server instance.</Text>
+
+            <View style={styles.themeList}>
+              {THEMES.map(theme => {
+                const isSelected = selectedTheme === theme.id;
+                return (
+                  <Pressable
+                    key={theme.id}
+                    onPress={() => setSelectedTheme(theme.id)}
+                    style={[styles.themeCard, isSelected && styles.themeCardSelected]}
+                  >
+                    <View style={[styles.themeCardEmojiBox, { backgroundColor: theme.color + '22' }]}>
+                      <Text style={{ fontSize: 26 }}>{theme.emoji}</Text>
+                    </View>
+                    <View style={styles.fill}>
+                      <Text style={[styles.cardTitle, isSelected && { color: colors.primaryDark }]}>{theme.title}</Text>
+                      <Text style={styles.cardSub}>{theme.subtitle}</Text>
+                    </View>
+                    <View style={[styles.themeCardRadio, isSelected && styles.themeCardRadioSelected]}>
+                      {isSelected && <View style={styles.themeCardRadioDot} />}
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <Pressable
+              onPress={() => handleOpenCreateModal(selectedTheme)}
+              style={styles.launchServerButton}
+            >
+              <CirclePlus size={20} color="#FFFFFF" />
+              <Text style={styles.launchServerButtonText}>CONFIGURE & CREATE SERVER</Text>
+            </Pressable>
+          </>
+        )}
+
+        {roomsSubTab === 'join' && (
+          <>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
+              <Text style={[styles.pageTitle, { marginTop: 0 }]}>Active Servers</Text>
+              <Pressable onPress={() => void loadPublicRooms()} style={styles.refreshIconBtn}>
+                <RefreshCw size={18} color={colors.primary} />
+              </Pressable>
+            </View>
+            <Text style={styles.pageCopy}>Real-time public servers. Pick one to select your character and enter.</Text>
+
+            {loadingPublicRooms && (
+              <ActivityIndicator color={colors.primary} style={{ marginVertical: 30 }} />
+            )}
+
+            {!loadingPublicRooms && publicRooms.length === 0 && (
+              <View style={styles.empty}>
+                <DoorOpen size={42} color={colors.primary} />
+                <Text style={styles.emptyTitle}>No active servers</Text>
+                <Text style={styles.emptyCopy}>There are no public rooms online right now. Be the first to start one!</Text>
+                <Pressable
+                  onPress={() => setRoomsSubTab('create')}
+                  style={[styles.acceptButton, { marginTop: 8 }]}
+                >
+                  <Text style={styles.acceptText}>Create a Server</Text>
+                </Pressable>
+              </View>
+            )}
+
+            {!loadingPublicRooms && publicRooms.length > 0 && (
+              <View style={{ gap: 12, marginBottom: 20 }}>
+                {publicRooms.map(server => {
+                  const theme = THEMES.find(t => t.id === server.roomKind) || THEMES[0];
+                  return (
+                    <View key={server.id} style={styles.serverCard}>
+                      <View style={styles.serverCardHeader}>
+                        <View style={[styles.roomIcon, { backgroundColor: theme.color + '22', width: 44, height: 44, borderRadius: 12 }]}>
+                          <Text style={{ fontSize: 22 }}>{theme.emoji}</Text>
+                        </View>
+                        <View style={{ flex: 1, marginLeft: 12 }}>
+                          <Text style={styles.serverCardTitle} numberOfLines={1}>{server.name}</Text>
+                          <Text style={styles.serverCardHost}>Hosted by {server.creatorName}</Text>
+                        </View>
+                        <View style={styles.peerCountBadge}>
+                          <View style={styles.onlineDot} />
+                          <Text style={styles.peerCountText}>{server.peerCount} online</Text>
+                        </View>
+                      </View>
+                      <Pressable
+                        onPress={() => handleJoinServer(server)}
+                        style={styles.serverJoinButton}
+                      >
+                        <DoorOpen size={17} color="#FFFFFF" />
+                        <Text style={styles.serverJoinButtonText}>JOIN SERVER</Text>
+                      </Pressable>
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </>
+        )}
       </>}
 
       {tab === 'updates' && <>
@@ -578,12 +760,14 @@ export default function HomeScreen() {
                     <Pressable
                       onPress={() => {
                         router.push({
-                          pathname: '/hangout',
+                          pathname: '/lobby',
                           params: {
                             room: item.roomKind,
-                            groupId: item.groupId,
+                            groupId: item.groupId || '',
                             roomId: item.id,
                             roomOwnerId: item.creatorId,
+                            roomName: item.name || item.groupName,
+                            isPrivate: String(item.isPrivate ?? false),
                           },
                         } as unknown as Href);
                       }}
@@ -689,7 +873,7 @@ export default function HomeScreen() {
       <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <Pressable style={styles.scrim} onPress={() => setSheet(null)} />
         <View style={styles.sheet}>
-          <View style={styles.sheetTop}><Text style={styles.sheetTitle}>{sheet === 'group' ? 'New group' : sheet === 'room' ? 'Choose a character' : sheet === 'menu' ? 'More' : 'Start something'}</Text><Pressable onPress={() => setSheet(null)} accessibilityLabel="Close"><X size={23} color={colors.text} /></Pressable></View>
+          <View style={styles.sheetTop}><Text style={styles.sheetTitle}>{sheet === 'group' ? 'New group' : sheet === 'menu' ? 'More' : 'Start something'}</Text><Pressable onPress={() => setSheet(null)} accessibilityLabel="Close"><X size={23} color={colors.text} /></Pressable></View>
           {!!sheetError && <Text style={styles.sheetError}>{sheetError}</Text>}
           {sheet === 'menu' && <>
             <MenuAction Icon={QrCode} label="My friend QR" onPress={() => { setSheet(null); router.push('/profile' as Href); }} />
@@ -710,10 +894,148 @@ export default function HomeScreen() {
             <ScrollView style={styles.memberList}>{contacts.length === 0 ? <Text style={styles.helper}>Add a contact before creating a group.</Text> : contacts.map((item) => <Pressable key={item.id} style={styles.memberRow} onPress={() => setSelectedIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])}><View style={[styles.checkbox, selectedIds.includes(item.id) && styles.checked]}>{selectedIds.includes(item.id) && <Text style={styles.checkMark}>✓</Text>}</View><Text style={styles.memberName}>{item.name}</Text><Text style={styles.memberUsername}>@{item.username}</Text></Pressable>)}</ScrollView>
             <Pressable disabled={busy || !groupName.trim() || selectedIds.length === 0} onPress={() => void createGroup()} style={[styles.primaryAction, (busy || !groupName.trim() || selectedIds.length === 0) && styles.disabled]}><CirclePlus size={19} color="#FFFFFF" /><Text style={styles.primaryActionText}>{busy ? 'Creating…' : 'Create group'}</Text></Pressable>
           </>}
-          {sheet === 'room' && <>
-            <Text style={styles.helper}>Enter {room === 'beach' ? 'Goa Beach' : room === 'loft' ? 'Loft 16' : 'Tea Party'} as:</Text>
-            <ScrollView style={styles.memberList}>{avatars.map((item) => <Pressable key={item.body} style={styles.memberRow} onPress={() => joinRoom(item.body)}><View style={styles.characterIcon}><Text style={styles.characterLetter}>{item.label[0]}</Text></View><View style={{ flex: 1 }}><Text style={styles.memberName}>{item.label}</Text><Text style={styles.memberUsername}>{item.tagline}</Text></View><Text style={styles.chevron}>›</Text></Pressable>)}</ScrollView>
-          </>}
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+
+    {/* Create Server Modal */}
+    <Modal visible={createModalOpen} transparent animationType="slide" onRequestClose={() => setCreateModalOpen(false)}>
+      <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <Pressable style={styles.scrim} onPress={() => setCreateModalOpen(false)} />
+        <View style={[styles.sheet, { maxHeight: '90%' }]}>
+          <View style={styles.sheetTop}>
+            <Text style={styles.sheetTitle}>Create Server</Text>
+            <Pressable onPress={() => setCreateModalOpen(false)} accessibilityLabel="Close">
+              <X size={23} color={colors.text} />
+            </Pressable>
+          </View>
+
+          <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+            {/* Selected Theme Header */}
+            <View style={styles.modalThemeHeader}>
+              <Text style={{ fontSize: 28 }}>{THEMES.find(t => t.id === selectedTheme)?.emoji}</Text>
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={styles.cardTitle}>{THEMES.find(t => t.id === selectedTheme)?.title}</Text>
+                <Text style={styles.cardSub}>{THEMES.find(t => t.id === selectedTheme)?.subtitle}</Text>
+              </View>
+            </View>
+
+            {/* Privacy Mode Selector */}
+            <Text style={styles.fieldLabel}>SERVER TYPE</Text>
+            <View style={styles.privacyToggleRow}>
+              <Pressable
+                onPress={() => setIsPrivateServer(false)}
+                style={[styles.privacyOption, !isPrivateServer && styles.privacyOptionSelected]}
+              >
+                <Globe size={18} color={!isPrivateServer ? colors.primaryDark : colors.muted} />
+                <Text style={[styles.privacyOptionTitle, !isPrivateServer && styles.privacyOptionTitleSelected]}>
+                  Public Server
+                </Text>
+                <Text style={styles.privacyOptionDesc}>Open for anyone on ADDA to discover & join</Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => setIsPrivateServer(true)}
+                style={[styles.privacyOption, isPrivateServer && styles.privacyOptionSelected]}
+              >
+                <Lock size={18} color={isPrivateServer ? colors.primaryDark : colors.muted} />
+                <Text style={[styles.privacyOptionTitle, isPrivateServer && styles.privacyOptionTitleSelected]}>
+                  Private Server
+                </Text>
+                <Text style={styles.privacyOptionDesc}>Invite-only for selected groups & contacts</Text>
+              </Pressable>
+            </View>
+
+            {/* Server Name input */}
+            <Text style={styles.fieldLabel}>SERVER NAME (OPTIONAL)</Text>
+            <TextInput
+              style={styles.groupInput}
+              placeholder={isPrivateServer ? "e.g. Private Server#2400" : `e.g. ADDA Server ${THEMES.find(t => t.id === selectedTheme)?.title}#2400`}
+              placeholderTextColor={colors.muted}
+              value={customServerName}
+              onChangeText={setCustomServerName}
+              maxLength={50}
+            />
+
+            {/* If Private: Invite Groups & Contacts multi-selectors */}
+            {isPrivateServer && (
+              <>
+                <Text style={styles.fieldLabel}>INVITE GROUPS ({selectedGroupInvites.length} SELECTED)</Text>
+                {groups.length === 0 ? (
+                  <Text style={styles.helper}>You have not joined any groups yet.</Text>
+                ) : (
+                  <View style={styles.inviteListContainer}>
+                    {groups.map(group => {
+                      const isSelected = selectedGroupInvites.includes(group.id);
+                      return (
+                        <Pressable
+                          key={group.id}
+                          style={styles.memberRow}
+                          onPress={() => {
+                            setSelectedGroupInvites(curr =>
+                              isSelected ? curr.filter(id => id !== group.id) : [...curr, group.id]
+                            );
+                          }}
+                        >
+                          <View style={[styles.checkbox, isSelected && styles.checked]}>
+                            {isSelected && <Text style={styles.checkMark}>✓</Text>}
+                          </View>
+                          <UsersRound size={18} color={colors.primaryDark} style={{ marginRight: 6 }} />
+                          <Text style={styles.memberName}>{group.name}</Text>
+                          <Text style={styles.memberUsername}>{group.memberCount} members</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                )}
+
+                <Text style={[styles.fieldLabel, { marginTop: 14 }]}>
+                  INVITE CONTACTS ({selectedContactInvites.length} SELECTED)
+                </Text>
+                {contacts.length === 0 ? (
+                  <Text style={styles.helper}>No contacts yet.</Text>
+                ) : (
+                  <View style={styles.inviteListContainer}>
+                    {contacts.map(contact => {
+                      const isSelected = selectedContactInvites.includes(contact.id);
+                      return (
+                        <Pressable
+                          key={contact.id}
+                          style={styles.memberRow}
+                          onPress={() => {
+                            setSelectedContactInvites(curr =>
+                              isSelected ? curr.filter(id => id !== contact.id) : [...curr, contact.id]
+                            );
+                          }}
+                        >
+                          <View style={[styles.checkbox, isSelected && styles.checked]}>
+                            {isSelected && <Text style={styles.checkMark}>✓</Text>}
+                          </View>
+                          <Text style={styles.memberName}>{contact.name}</Text>
+                          <Text style={styles.memberUsername}>@{contact.username}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                )}
+              </>
+            )}
+
+            <Pressable
+              disabled={creatingServer}
+              onPress={() => void handleCreateServer()}
+              style={[styles.primaryAction, { marginTop: 20 }, creatingServer && styles.disabled]}
+            >
+              {creatingServer ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <>
+                  <CirclePlus size={19} color="#FFFFFF" />
+                  <Text style={styles.primaryActionText}>Create Server & Choose Character</Text>
+                </>
+              )}
+            </Pressable>
+          </ScrollView>
         </View>
       </KeyboardAvoidingView>
     </Modal>
@@ -826,4 +1148,48 @@ const styles = StyleSheet.create({
   characterIcon: { width: 36, height: 36, backgroundColor: colors.primarySoft, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, characterLetter: { color: colors.primaryDark, fontWeight: '800' },
   sentBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(37, 211, 102, 0.12)', paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, gap: 4 },
   sentBadgeText: { color: '#25D366', fontSize: 12, fontWeight: '700' },
+
+  // Rooms Tab Navigation
+  roomsTabBar: { flexDirection: 'row', backgroundColor: colors.surfaceRaised, borderRadius: 14, padding: 4, marginBottom: 16 },
+  roomsTabBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10 },
+  roomsTabBtnActive: { backgroundColor: colors.primary },
+  roomsTabBtnText: { fontSize: 13, fontWeight: '700', color: colors.text },
+  roomsTabBtnTextActive: { color: '#FFFFFF' },
+  serverCountBadge: { backgroundColor: colors.surface, paddingHorizontal: 7, paddingVertical: 1, borderRadius: 10, marginLeft: 2 },
+  serverCountBadgeActive: { backgroundColor: 'rgba(255, 255, 255, 0.25)' },
+  serverCountBadgeText: { fontSize: 11, fontWeight: '800', color: colors.primaryDark },
+  serverCountBadgeTextActive: { color: '#FFFFFF' },
+
+  // Themes
+  themeList: { gap: 12, marginBottom: 20 },
+  themeCard: { flexDirection: 'row', alignItems: 'center', padding: 14, backgroundColor: colors.surface, borderWidth: 1.5, borderColor: colors.border, borderRadius: 18 },
+  themeCardSelected: { borderColor: colors.primary, backgroundColor: colors.primarySoft },
+  themeCardEmojiBox: { width: 50, height: 50, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  themeCardRadio: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+  themeCardRadioSelected: { borderColor: colors.primary },
+  themeCardRadioDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: colors.primary },
+  launchServerButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: colors.primary, borderRadius: 16, paddingVertical: 16, marginBottom: 24, elevation: 2 },
+  launchServerButtonText: { color: '#FFFFFF', fontSize: 15, fontWeight: '900', letterSpacing: 0.5 },
+
+  // Join Server Cards
+  refreshIconBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center' },
+  serverCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, padding: 14, gap: 12 },
+  serverCardHeader: { flexDirection: 'row', alignItems: 'center' },
+  serverCardTitle: { color: colors.text, fontSize: 16, fontWeight: '800' },
+  serverCardHost: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  peerCountBadge: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#DCFCE7', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  onlineDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#22C55E' },
+  peerCountText: { color: '#15803D', fontSize: 11, fontWeight: '800' },
+  serverJoinButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: '#25D366', borderRadius: 12, paddingVertical: 11 },
+  serverJoinButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
+
+  // Create Server Modal
+  modalThemeHeader: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceRaised, padding: 12, borderRadius: 14, marginBottom: 16 },
+  privacyToggleRow: { flexDirection: 'row', gap: 10, marginBottom: 16 },
+  privacyOption: { flex: 1, backgroundColor: colors.surfaceRaised, borderWidth: 1.5, borderColor: colors.border, borderRadius: 14, padding: 12, alignItems: 'center', gap: 4 },
+  privacyOptionSelected: { borderColor: colors.primary, backgroundColor: colors.primarySoft },
+  privacyOptionTitle: { fontSize: 14, fontWeight: '800', color: colors.text },
+  privacyOptionTitleSelected: { color: colors.primaryDark },
+  privacyOptionDesc: { fontSize: 10, color: colors.muted, textAlign: 'center', marginTop: 2 },
+  inviteListContainer: { maxHeight: 180, borderWidth: 1, borderColor: colors.border, borderRadius: 14, paddingHorizontal: 12, marginBottom: 12 },
 });

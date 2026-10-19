@@ -159,15 +159,18 @@ export function SessionProvider({ children }: PropsWithChildren) {
         } as unknown as Href);
         return;
       }
-      if (data?.kind === 'room_invite' && typeof data.groupId === 'string') {
+      if (data?.kind === 'room_invite' && (typeof data.roomId === 'string' || typeof data.groupId === 'string')) {
         void Notifications.clearLastNotificationResponseAsync();
         router.push({
-          pathname: '/hangout',
+          pathname: '/lobby',
           params: {
             room: data.roomKind || 'loft',
-            groupId: data.groupId,
-            roomId: data.roomId,
-            roomOwnerId: data.ownerId,
+            groupId: data.groupId || '',
+            roomId: data.roomId || '',
+            roomOwnerId: data.ownerId || '',
+            roomName: data.roomName || '',
+            inviterName: data.inviterName || '',
+            isPrivate: 'true',
           },
         } as unknown as Href);
         return;
