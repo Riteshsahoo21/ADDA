@@ -18,18 +18,36 @@ type Peer = {
 type Session = {
   key: string;
   router: Router;
+  workerIndex: number;
   peers: Map<string, Peer>;
   audibleTimer?: NodeJS.Timeout | null;
 };
 type Ack<T> = (result: { ok: true; value: T } | { ok: false; error: string }) => void;
 
 const sessions = new Map<string, Promise<Session>>();
+
+// Worker configuration:
+// Base load: Hard capped at 2 cores (25% CPU) so 6 cores remain totally free.
+// High load: Dynamically scales up to 4 cores max when traffic surges, keeping 4 cores strictly reserved for OS/Node/DB.
+const MIN_WORKERS = 2;
+const MAX_WORKERS = 4;
+const PORTS_PER_WORKER = 2500;
+const BASE_RTC_PORT = 40000;
+
 let workers: Worker[] = [];
-let nextWorkerIdx = 0;
 let workerInitPromise: Promise<Worker[]> | null = null;
+let isScaling = false;
 
 const audibleRadius = 12;
 const disconnectRadius = 15; // Hysteresis threshold to prevent connect/disconnect thrashing
+
+const KNOWN_BASE_ROOMS = new Set(['loft', 'roof', 'tea', 'beach']);
+
+function isKnownRoom(id: string): boolean {
+  if (KNOWN_BASE_ROOMS.has(id)) return true;
+  const base = id.split(':')[0];
+  return KNOWN_BASE_ROOMS.has(base);
+}
 
 function publicAddress() {
   if (env.mediaAnnouncedAddress) return env.mediaAnnouncedAddress;
@@ -42,54 +60,102 @@ function publicAddress() {
 function validKey(value: unknown): value is MediaKey {
   return !!value && typeof value === 'object' && 'kind' in value && 'id' in value &&
     (value.kind === 'call' && typeof value.id === 'string' && value.id.length < 100 ||
-      value.kind === 'room' && (value.id === 'loft' || value.id === 'roof' || value.id === 'tea' || value.id === 'beach'));
+      value.kind === 'room' && typeof value.id === 'string' && isKnownRoom(value.id));
 }
 
 function sessionKey(value: MediaKey) { return `${value.kind}:${value.id}`; }
 
-async function getWorker(): Promise<Worker> {
+async function createWorkerInstance(index: number): Promise<Worker> {
+  const rtcMinPort = BASE_RTC_PORT + (index * PORTS_PER_WORKER);
+  const rtcMaxPort = rtcMinPort + PORTS_PER_WORKER - 1;
+  const worker = await mediasoup.createWorker({
+    logLevel: 'warn',
+    rtcMinPort,
+    rtcMaxPort,
+  });
+  console.log(`[mediasoup] Worker #${index} online on UDP/TCP ports ${rtcMinPort}-${rtcMaxPort}`);
+  worker.on('died', () => {
+    console.error(`[mediasoup] Worker #${index} died. Re-initializing replacement worker...`);
+    const idx = workers.indexOf(worker);
+    if (idx !== -1) {
+      createWorkerInstance(index).then(replacement => {
+        workers[idx] = replacement;
+      }).catch(err => console.error(`[mediasoup] Worker #${index} replacement failed`, err));
+    }
+  });
+  return worker;
+}
+
+async function ensureBaseWorkers(): Promise<Worker[]> {
   if (!workerInitPromise) {
     workerInitPromise = (async () => {
-      // Cap at 2 workers (max 25% CPU) so 6 cores remain completely free and CPU never trips host email alerts
-      const maxWorkers = Number(process.env.MEDIASOUP_WORKERS) || 2;
-      const coreCount = Math.min(Math.max(cpus().length, 1), maxWorkers);
       const created: Worker[] = [];
-      const portsPerWorker = Math.floor(10000 / coreCount);
-
-      for (let i = 0; i < coreCount; i++) {
-        const rtcMinPort = 40000 + (i * portsPerWorker);
-        const rtcMaxPort = rtcMinPort + portsPerWorker - 1;
-        const worker = await mediasoup.createWorker({
-          logLevel: 'warn',
-          rtcMinPort,
-          rtcMaxPort,
-        });
-        worker.on('died', () => {
-          console.error(`[mediasoup] Worker ${i} died. Re-initializing replacement worker...`);
-          const idx = created.indexOf(worker);
-          if (idx !== -1) {
-            mediasoup.createWorker({ logLevel: 'warn', rtcMinPort, rtcMaxPort })
-              .then(replacement => { created[idx] = replacement; })
-              .catch(err => console.error('[mediasoup] Worker replacement failed', err));
-          }
-        });
+      for (let i = 0; i < MIN_WORKERS; i++) {
+        const worker = await createWorkerInstance(i);
         created.push(worker);
       }
       workers = created;
+      console.log(`[mediasoup] Initialized base pool with ${MIN_WORKERS} workers (cores 0-1). Dynamic scaling up to ${MAX_WORKERS} enabled.`);
       return created;
     })();
   }
-  const pool = await workerInitPromise;
-  const worker = pool[nextWorkerIdx % pool.length];
-  nextWorkerIdx = (nextWorkerIdx + 1) % pool.length;
-  return worker;
+  return workerInitPromise;
+}
+
+function getTotalActivePeerCount(): number {
+  let total = 0;
+  for (const pending of sessions.values()) {
+    // If promise is resolved, count peers
+    // Note: pending is Promise<Session>
+  }
+  return total;
+}
+
+async function getWorker(): Promise<{ worker: Worker; workerIndex: number }> {
+  await ensureBaseWorkers();
+
+  // Dynamic Scale-Up: If traffic is high (>= 3 active sessions), scale up to 4 workers on demand
+  const activeSessionCount = sessions.size;
+  if (activeSessionCount >= 3 && workers.length < MAX_WORKERS && !isScaling) {
+    isScaling = true;
+    const nextIdx = workers.length;
+    console.log(`[mediasoup] High load detected (${activeSessionCount} active media sessions). Scaling up worker pool: launching Worker #${nextIdx} (Core #${nextIdx})...`);
+    createWorkerInstance(nextIdx)
+      .then(newWorker => {
+        workers.push(newWorker);
+        console.log(`[mediasoup] Worker pool dynamically scaled to ${workers.length} cores.`);
+      })
+      .catch(err => console.error('[mediasoup] Failed to scale worker pool', err))
+      .finally(() => { isScaling = false; });
+  }
+
+  // Count active sessions per worker to pick the least loaded worker
+  const usage = new Array(workers.length).fill(0);
+  for (const pending of sessions.values()) {
+    // Check if session has resolved
+    const session = await Promise.race([pending, Promise.resolve(null)]);
+    if (session && session.workerIndex < workers.length) {
+      usage[session.workerIndex] += (session.peers.size + 1);
+    }
+  }
+
+  let bestIdx = 0;
+  let minLoad = usage[0];
+  for (let i = 1; i < workers.length; i++) {
+    if (usage[i] < minLoad) {
+      minLoad = usage[i];
+      bestIdx = i;
+    }
+  }
+
+  return { worker: workers[bestIdx], workerIndex: bestIdx };
 }
 
 async function getSession(key: string): Promise<Session> {
   let pending = sessions.get(key);
   if (!pending) {
     pending = (async () => {
-      const worker = await getWorker();
+      const { worker, workerIndex } = await getWorker();
       const router = await worker.createRouter({
         mediaCodecs: [
           {
@@ -107,7 +173,7 @@ async function getSession(key: string): Promise<Session> {
           { kind: 'video', mimeType: 'video/VP8', clockRate: 90000 },
         ],
       });
-      return { key, router, peers: new Map() };
+      return { key, router, workerIndex, peers: new Map() };
     })();
     sessions.set(key, pending);
     pending.catch(() => sessions.delete(key));
@@ -223,7 +289,14 @@ export function attachMediaHandlers(io: Server, socket: Socket) {
     try {
       if (!validKey(value)) throw new Error('Invalid media room.');
       if (value.kind === 'call' && !canJoinCallMedia(value.id, selfId)) throw new Error('Call unavailable.');
-      const key = sessionKey(value);
+
+      // Auto-bind 3D rooms to the user's specific room shard (e.g. 'beach:1' instead of generic 'beach')
+      const rawId = value.id;
+      const effectiveId = (value.kind === 'room' && typeof socket.data.roomId === 'string' && socket.data.roomId.startsWith(rawId))
+        ? socket.data.roomId
+        : rawId;
+
+      const key = sessionKey({ kind: value.kind, id: effectiveId });
       if (socket.data.mediaKey !== key) await leaveMedia(socket);
       const session = await getSession(key);
       let peer = session.peers.get(socket.id);
@@ -255,8 +328,8 @@ export function attachMediaHandlers(io: Server, socket: Socket) {
       const announcedAddress = publicAddress();
       const transport = await session.router.createWebRtcTransport({
         listenInfos: [
-          { protocol: 'udp', ip: '0.0.0.0', announcedAddress, portRange: { min: 40000, max: 49999 } },
-          { protocol: 'tcp', ip: '0.0.0.0', announcedAddress, portRange: { min: 40000, max: 49999 } },
+          { protocol: 'udp', ip: '0.0.0.0', announcedAddress },
+          { protocol: 'tcp', ip: '0.0.0.0', announcedAddress },
         ],
         enableUdp: true,
         enableTcp: true,
