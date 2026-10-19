@@ -30,8 +30,21 @@ function getUsernameCooldown(changedAt?: string | null): { canChange: boolean; r
 
 export default function ProfileScreen() {
   const { username, login } = useSession();
-  const cachedBundle = getCachedSocialBundle();
-  const initial = getCachedProfile() || cachedBundle?.me;
+  const cachedBundle = getCachedSocialBundle(username);
+  const isMatch = Boolean(
+    cachedBundle?.me &&
+      username &&
+      (cachedBundle.me.username?.toLowerCase().trim() === username.toLowerCase().trim() ||
+        cachedBundle.me.name?.toLowerCase().trim() === username.toLowerCase().trim())
+  );
+  const cachedProf = getCachedProfile();
+  const profMatch = Boolean(
+    cachedProf &&
+      username &&
+      (cachedProf.username?.toLowerCase().trim() === username.toLowerCase().trim() ||
+        cachedProf.name?.toLowerCase().trim() === username.toLowerCase().trim())
+  );
+  const initial = isMatch ? cachedBundle?.me : profMatch ? cachedProf : null;
 
   const [profile, setProfile] = useState<OwnProfile | null>(initial || null);
   const [name, setName] = useState(initial?.name || username || '');

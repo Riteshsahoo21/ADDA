@@ -1,34 +1,79 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import type { SocialBundle, OwnProfile, PublicProfile, ChatGroup, FriendRequest } from './social-api';
-import { setCachedProfile } from './encrypted-chat';
-
-const CACHE_FILE = `${FileSystem.documentDirectory || ''}adda_social_bundle_v1.json`;
+import { setCachedProfile, clearCachedProfile } from './encrypted-chat';
 
 let memoryCache: SocialBundle | null = null;
 let loadPromise: Promise<SocialBundle | null> | null = null;
 
-export function getCachedSocialBundle(): SocialBundle | null {
+function sanitizeId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function getCacheFilePath(userId: string): string {
+  return `${FileSystem.documentDirectory || ''}adda_social_bundle_${sanitizeId(userId)}.json`;
+}
+
+const LEGACY_CACHE_FILE = `${FileSystem.documentDirectory || ''}adda_social_bundle_v1.json`;
+
+function userMatches(bundle: SocialBundle, expectedUser: string): boolean {
+  if (!bundle.me) return false;
+  const exp = expectedUser.toLowerCase().trim();
+  const id = bundle.me.id?.toLowerCase().trim();
+  const username = bundle.me.username?.toLowerCase().trim();
+  const name = bundle.me.name?.toLowerCase().trim();
+  return id === exp || username === exp || name === exp;
+}
+
+export function getCachedSocialBundle(expectedUser?: string | null): SocialBundle | null {
+  if (!memoryCache) return null;
+  if (expectedUser && !userMatches(memoryCache, expectedUser)) {
+    return null;
+  }
   return memoryCache;
 }
 
-export async function initSocialCache(): Promise<SocialBundle | null> {
-  if (memoryCache) return memoryCache;
+export async function initSocialCache(expectedUser?: string | null): Promise<SocialBundle | null> {
+  if (memoryCache) {
+    if (expectedUser) {
+      if (userMatches(memoryCache, expectedUser)) {
+        return memoryCache;
+      }
+      memoryCache = null;
+    } else {
+      return memoryCache;
+    }
+  }
+
   if (loadPromise) return loadPromise;
 
   loadPromise = (async () => {
     try {
       if (!FileSystem.documentDirectory) return null;
-      const info = await FileSystem.getInfoAsync(CACHE_FILE);
+
+      // Clean up legacy single-tenant cache file if still present
+      try {
+        const legacyInfo = await FileSystem.getInfoAsync(LEGACY_CACHE_FILE);
+        if (legacyInfo.exists) {
+          await FileSystem.deleteAsync(LEGACY_CACHE_FILE, { idempotent: true });
+        }
+      } catch {}
+
+      if (!expectedUser) return null;
+
+      const cacheFile = getCacheFilePath(expectedUser);
+      const info = await FileSystem.getInfoAsync(cacheFile);
       if (!info.exists) return null;
 
-      const content = await FileSystem.readAsStringAsync(CACHE_FILE);
+      const content = await FileSystem.readAsStringAsync(cacheFile);
       if (!content) return null;
 
       const parsed = JSON.parse(content) as SocialBundle;
       if (parsed && parsed.me && Array.isArray(parsed.contacts)) {
-        memoryCache = parsed;
-        setCachedProfile(parsed.me);
-        return parsed;
+        if (userMatches(parsed, expectedUser)) {
+          memoryCache = parsed;
+          setCachedProfile(parsed.me);
+          return parsed;
+        }
       }
     } catch {
       // Ignore corrupted or unreadable cache
@@ -45,9 +90,16 @@ export function setCachedSocialBundle(bundle: SocialBundle): void {
   memoryCache = bundle;
   setCachedProfile(bundle.me);
 
-  // Write asynchronously to disk in background without blocking UI
-  if (FileSystem.documentDirectory) {
-    void FileSystem.writeAsStringAsync(CACHE_FILE, JSON.stringify(bundle)).catch(() => {});
+  // Write asynchronously to user-scoped cache file on disk
+  if (FileSystem.documentDirectory && bundle.me?.id) {
+    const userFile = getCacheFilePath(bundle.me.id);
+    void FileSystem.writeAsStringAsync(userFile, JSON.stringify(bundle)).catch(() => {});
+    if (bundle.me.username) {
+      const usernameFile = getCacheFilePath(bundle.me.username);
+      if (usernameFile !== userFile) {
+        void FileSystem.writeAsStringAsync(usernameFile, JSON.stringify(bundle)).catch(() => {});
+      }
+    }
   }
 }
 
@@ -57,9 +109,7 @@ export function updateCachedContacts(updater: (current: PublicProfile[]) => Publ
     ...memoryCache,
     contacts: updater(memoryCache.contacts),
   };
-  if (FileSystem.documentDirectory) {
-    void FileSystem.writeAsStringAsync(CACHE_FILE, JSON.stringify(memoryCache)).catch(() => {});
-  }
+  persistCurrentMemoryCache();
 }
 
 export function updateCachedGroups(updater: (current: ChatGroup[]) => ChatGroup[]): void {
@@ -68,9 +118,7 @@ export function updateCachedGroups(updater: (current: ChatGroup[]) => ChatGroup[
     ...memoryCache,
     groups: updater(memoryCache.groups),
   };
-  if (FileSystem.documentDirectory) {
-    void FileSystem.writeAsStringAsync(CACHE_FILE, JSON.stringify(memoryCache)).catch(() => {});
-  }
+  persistCurrentMemoryCache();
 }
 
 export function updateCachedFriendRequests(updater: (current: FriendRequest[]) => FriendRequest[]): void {
@@ -79,9 +127,7 @@ export function updateCachedFriendRequests(updater: (current: FriendRequest[]) =
     ...memoryCache,
     friendRequests: updater(memoryCache.friendRequests),
   };
-  if (FileSystem.documentDirectory) {
-    void FileSystem.writeAsStringAsync(CACHE_FILE, JSON.stringify(memoryCache)).catch(() => {});
-  }
+  persistCurrentMemoryCache();
 }
 
 export function updateCachedProfile(profile: OwnProfile): void {
@@ -91,16 +137,37 @@ export function updateCachedProfile(profile: OwnProfile): void {
     ...memoryCache,
     me: profile,
   };
-  if (FileSystem.documentDirectory) {
-    void FileSystem.writeAsStringAsync(CACHE_FILE, JSON.stringify(memoryCache)).catch(() => {});
+  persistCurrentMemoryCache();
+}
+
+function persistCurrentMemoryCache(): void {
+  if (!FileSystem.documentDirectory || !memoryCache?.me?.id) return;
+  const userFile = getCacheFilePath(memoryCache.me.id);
+  void FileSystem.writeAsStringAsync(userFile, JSON.stringify(memoryCache)).catch(() => {});
+  if (memoryCache.me.username) {
+    const usernameFile = getCacheFilePath(memoryCache.me.username);
+    if (usernameFile !== userFile) {
+      void FileSystem.writeAsStringAsync(usernameFile, JSON.stringify(memoryCache)).catch(() => {});
+    }
   }
 }
 
 export async function clearSocialCache(): Promise<void> {
+  const previousId = memoryCache?.me?.id;
+  const previousUsername = memoryCache?.me?.username;
   memoryCache = null;
+  loadPromise = null;
+  clearCachedProfile();
+
   try {
     if (FileSystem.documentDirectory) {
-      await FileSystem.deleteAsync(CACHE_FILE, { idempotent: true });
+      if (previousId) {
+        await FileSystem.deleteAsync(getCacheFilePath(previousId), { idempotent: true }).catch(() => {});
+      }
+      if (previousUsername) {
+        await FileSystem.deleteAsync(getCacheFilePath(previousUsername), { idempotent: true }).catch(() => {});
+      }
+      await FileSystem.deleteAsync(LEGACY_CACHE_FILE, { idempotent: true }).catch(() => {});
     }
   } catch {}
 }

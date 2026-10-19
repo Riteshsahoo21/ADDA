@@ -219,6 +219,7 @@ export function setCachedProfile(profile: OwnProfile | ({ id: string; name: stri
   cachedProfile = { ...(cachedProfile || {}), ...profile } as OwnProfile;
 }
 export function getCachedProfile(): OwnProfile | null { return cachedProfile; }
+export function clearCachedProfile(): void { cachedProfile = null; }
 export function isEncryptedChatReady(): boolean { return active !== null && active.db !== null; }
 export function getActiveUserId(): string | null { return active?.userId ?? cachedProfile?.id ?? null; }
 export function currentChatDeviceId(): string | null { return active?.deviceId ?? null; }
@@ -275,7 +276,12 @@ export async function initEncryptedChat(userId: string): Promise<void> {
 async function initializeForUser(userId: string): Promise<void> {
   clearDecryptedMediaCache();
   if (active?.userId === userId) return;
-  if (active) { await active.db.closeAsync(); active = null; }
+  if (active) {
+    cachedProfile = null;
+    clearKeyCache();
+    try { await active.db.closeAsync(); } catch {}
+    active = null;
+  }
 
   const secretName = `adda_chat_secret_${userId}`;
   const deviceName = `adda_chat_device_${userId}`;
@@ -323,7 +329,11 @@ async function initializeForUser(userId: string): Promise<void> {
 export async function closeEncryptedChat() {
   if (initializing) await initializing.catch(() => {});
   clearDecryptedMediaCache();
-  if (active) await active.db.closeAsync();
+  cachedProfile = null;
+  clearKeyCache();
+  if (active) {
+    try { await active.db.closeAsync(); } catch {}
+  }
   active = null;
 }
 
@@ -360,24 +370,34 @@ export function parseRow(row: any): LocalMessage {
 }
 
 export async function localMessages(target: ChatTarget): Promise<LocalMessage[]> {
-  const rows = await identity().db.getAllAsync<any>(
-    'SELECT * FROM message WHERE kind = ? AND targetId = ? ORDER BY createdAt ASC, id ASC LIMIT 300',
-    target.kind, target.id
-  );
-  return rows.map(parseRow);
+  if (!active || !active.db) return [];
+  try {
+    const rows = await active.db.getAllAsync<any>(
+      'SELECT * FROM message WHERE kind = ? AND targetId = ? ORDER BY createdAt ASC, id ASC LIMIT 300',
+      target.kind, target.id
+    );
+    return rows.map(parseRow);
+  } catch {
+    return [];
+  }
 }
 
 export async function localPreviews(): Promise<ChatPreview[]> {
-  return identity().db.getAllAsync<ChatPreview>(
-    `SELECT m.kind, m.targetId, m.senderId, m.senderName, m.body, m.createdAt
-     FROM message m
-     WHERE m.id = (
-       COALESCE(
-         (SELECT m2.id FROM message m2 WHERE m2.kind = m.kind AND m2.targetId = m.targetId AND m2.body <> '__adda_deleted__' ORDER BY m2.createdAt DESC, m2.id DESC LIMIT 1),
-         (SELECT m3.id FROM message m3 WHERE m3.kind = m.kind AND m3.targetId = m.targetId ORDER BY m3.createdAt DESC, m3.id DESC LIMIT 1)
-       )
-     )`
-  );
+  if (!active || !active.db) return [];
+  try {
+    return await active.db.getAllAsync<ChatPreview>(
+      `SELECT m.kind, m.targetId, m.senderId, m.senderName, m.body, m.createdAt
+       FROM message m
+       WHERE m.id = (
+         COALESCE(
+           (SELECT m2.id FROM message m2 WHERE m2.kind = m.kind AND m2.targetId = m.targetId AND m2.body <> '__adda_deleted__' ORDER BY m2.createdAt DESC, m2.id DESC LIMIT 1),
+           (SELECT m3.id FROM message m3 WHERE m3.kind = m.kind AND m3.targetId = m.targetId ORDER BY m3.createdAt DESC, m3.id DESC LIMIT 1)
+         )
+       )`
+    );
+  } catch {
+    return [];
+  }
 }
 
 async function pinKeysInternal(db: SQLite.SQLiteDatabase, devices: DeviceKey[]) {
@@ -854,6 +874,7 @@ export async function handleRemoteMessageDeleted(messageId: string): Promise<voi
 
 export async function toggleMessageReaction(target: ChatTarget, messageId: string, emoji: string): Promise<void> {
   const me = identity();
+  let action: 'set' | 'remove' = 'set';
   await withDbLock(async () => {
     const row = await me.db.getFirstAsync<any>('SELECT reactions FROM message WHERE id = ?', messageId);
     let reactions: Record<string, string> = {};
@@ -862,22 +883,26 @@ export async function toggleMessageReaction(target: ChatTarget, messageId: strin
     }
     if (reactions[me.userId] === emoji) {
       delete reactions[me.userId];
+      action = 'remove';
     } else {
       reactions[me.userId] = emoji;
+      action = 'set';
     }
-    await me.db.runAsync('UPDATE message SET reactions = ? WHERE id = ?', JSON.stringify(reactions), messageId);
+    const hasKeys = Object.keys(reactions).length > 0;
+    await me.db.runAsync('UPDATE message SET reactions = ? WHERE id = ?', hasKeys ? JSON.stringify(reactions) : null, messageId);
   });
   changed();
 
   const live = await getRealtimeSocket(me.deviceId).catch(() => null);
   if (live?.connected) {
-    live.emit('chat:reaction', { messageId, target, emoji });
+    live.emit('chat:reaction', { messageId, target, emoji, action });
   }
 }
 
-export async function handleRemoteReaction(data: { messageId: string; userId: string; emoji: string }): Promise<void> {
+export async function handleRemoteReaction(data: { messageId: string; userId: string; emoji: string; action?: 'set' | 'remove' }): Promise<void> {
   if (!active) return;
   const me = active;
+  if (data.userId === me.userId) return; // Do not invert own reaction echo
   await withDbLock(async () => {
     const row = await me.db.getFirstAsync<any>('SELECT reactions FROM message WHERE id = ?', data.messageId);
     if (!row) return;
@@ -885,12 +910,13 @@ export async function handleRemoteReaction(data: { messageId: string; userId: st
     if (row.reactions) {
       try { reactions = typeof row.reactions === 'string' ? JSON.parse(row.reactions) : row.reactions; } catch {}
     }
-    if (reactions[data.userId] === data.emoji) {
+    if (data.action === 'remove' || (data.action === undefined && reactions[data.userId] === data.emoji)) {
       delete reactions[data.userId];
     } else {
       reactions[data.userId] = data.emoji;
     }
-    await me.db.runAsync('UPDATE message SET reactions = ? WHERE id = ?', JSON.stringify(reactions), data.messageId);
+    const hasKeys = Object.keys(reactions).length > 0;
+    await me.db.runAsync('UPDATE message SET reactions = ? WHERE id = ?', hasKeys ? JSON.stringify(reactions) : null, data.messageId);
   });
   changed();
 }

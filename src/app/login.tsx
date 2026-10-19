@@ -23,6 +23,8 @@ import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
 import { API_BASE_URL, authClient, authStorage } from '@/lib/auth-client';
 import { configureGoogleSignIn } from '@/lib/google-sign-in';
+import { clearSocialCache } from '@/lib/social-cache';
+import { closeEncryptedChat } from '@/lib/encrypted-chat';
 
 type AuthMode = 'login' | 'register';
 
@@ -105,6 +107,8 @@ export default function LoginScreen() {
         authenticatedName = result.data?.user?.name || identifier.trim();
       }
       if (!(await authStorage.getAccessToken())) throw new Error('Could not start your ADDA session. Please try again.');
+      await clearSocialCache();
+      await closeEncryptedChat();
       login(authenticatedName);
       router.replace('/home');
     } catch (err: unknown) {
@@ -151,6 +155,8 @@ export default function LoginScreen() {
       });
       if (!confirmed) { await GoogleSignin.signOut(); return; }
       await authStorage.clearTokens();
+      await clearSocialCache();
+      await closeEncryptedChat();
 
       // Authenticate with Better Auth backend via ID token
       try {
@@ -172,6 +178,8 @@ export default function LoginScreen() {
         const signedInEmail = result.data && 'user' in result.data ? result.data.user?.email?.toLowerCase() : undefined;
         if (!signedInEmail || signedInEmail !== chosenEmail) {
           await authStorage.clearTokens();
+          await clearSocialCache();
+          await closeEncryptedChat();
           await GoogleSignin.signOut();
           throw new Error('Google returned a different account than the one selected. Please choose again.');
         }
@@ -181,6 +189,8 @@ export default function LoginScreen() {
           authenticatedName = result.data.user.name;
         }
         if (!(await authStorage.getAccessToken())) throw new Error('Could not start your ADDA session. Please try again.');
+        await clearSocialCache();
+        await closeEncryptedChat();
         login(authenticatedName);
         router.replace('/home');
       } catch (serverErr: unknown) {

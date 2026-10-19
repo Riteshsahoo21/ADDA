@@ -41,9 +41,21 @@ export default function HomeScreen() {
   const params = useLocalSearchParams<{ tab?: string }>();
   const [tab, setTab] = useState<HubTab>(params.tab === 'rooms' || params.tab === 'updates' || params.tab === 'calls' ? params.tab : 'chats');
   
-  // 1. INSTANT FRAME 0 INITIALIZATION FROM IN-MEMORY / DISK CACHE
-  const initialCache = getCachedSocialBundle();
-  const [profile, setProfile] = useState<OwnProfile | null>(initialCache?.me || getCachedProfile() || null);
+  // 1. INSTANT FRAME 0 INITIALIZATION FROM IN-MEMORY / DISK CACHE (STRICTLY VALIDATED AGAINST USERNAME)
+  const rawCache = getCachedSocialBundle(username);
+  const isMatch = Boolean(rawCache?.me && username && (
+    rawCache.me.username?.toLowerCase().trim() === username.toLowerCase().trim() ||
+    rawCache.me.name?.toLowerCase().trim() === username.toLowerCase().trim()
+  ));
+  const initialCache = isMatch ? rawCache : null;
+  const rawProfile = getCachedProfile();
+  const profileMatches = Boolean(rawProfile && username && (
+    rawProfile.username?.toLowerCase().trim() === username.toLowerCase().trim() ||
+    rawProfile.name?.toLowerCase().trim() === username.toLowerCase().trim()
+  ));
+  const initialProfile = isMatch ? rawCache?.me : (profileMatches ? rawProfile : null);
+
+  const [profile, setProfile] = useState<OwnProfile | null>(initialProfile || null);
   const [contacts, setContacts] = useState<PublicProfile[]>(initialCache?.contacts || []);
   const [people, setPeople] = useState<PublicProfile[]>([]);
   const [groups, setGroups] = useState<ChatGroup[]>(initialCache?.groups || []);
@@ -102,8 +114,12 @@ export default function HomeScreen() {
   useEffect(() => { if (!username) router.replace('/login'); }, [username]);
 
   useEffect(() => {
-    void initSocialCache().then(disk => {
-      if (disk) {
+    if (!username) return;
+    void initSocialCache(username).then(disk => {
+      if (disk && username && (
+        disk.me.username?.toLowerCase().trim() === username.toLowerCase().trim() ||
+        disk.me.name?.toLowerCase().trim() === username.toLowerCase().trim()
+      )) {
         setProfile(curr => curr || disk.me);
         setContacts(curr => curr.length ? curr : disk.contacts);
         setGroups(curr => curr.length ? curr : disk.groups);
@@ -112,7 +128,7 @@ export default function HomeScreen() {
         setLoading(false);
       }
     });
-  }, []);
+  }, [username]);
 
   const refresh = useCallback(async () => {
     if (!username || refreshingRef.current) return;
@@ -220,12 +236,17 @@ export default function HomeScreen() {
   };
 
   useFocusEffect(useCallback(() => {
-    const cached = getCachedProfile() || getCachedSocialBundle()?.me;
-    if (cached) setProfile(cached);
+    const raw = getCachedProfile() || getCachedSocialBundle(username)?.me;
+    if (raw && username && (
+      raw.username?.toLowerCase().trim() === username.toLowerCase().trim() ||
+      raw.name?.toLowerCase().trim() === username.toLowerCase().trim()
+    )) {
+      setProfile(raw);
+    }
     void refresh();
     void refreshHangouts();
     void loadPublicRooms();
-  }, [refresh, refreshHangouts, loadPublicRooms]));
+  }, [refresh, refreshHangouts, loadPublicRooms, username]));
 
   const refreshSocial = useCallback(async () => {
     try {

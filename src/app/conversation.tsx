@@ -109,12 +109,14 @@ function SwipeableBubbleRow({
   children,
   onSwipeReply,
   onLongPress,
+  onPress,
   isSelected,
   disabled,
 }: {
   children: React.ReactNode;
   onSwipeReply: () => void;
   onLongPress: () => void;
+  onPress?: () => void;
   isSelected?: boolean;
   disabled?: boolean;
 }) {
@@ -183,7 +185,7 @@ function SwipeableBubbleRow({
         {...panResponder.panHandlers}
         style={{ transform: [{ translateX: panX }] }}
       >
-        <Pressable onLongPress={onLongPress} delayLongPress={280}>
+        <Pressable onPress={onPress} onLongPress={onLongPress} delayLongPress={280}>
           {children}
         </Pressable>
       </Animated.View>
@@ -197,8 +199,8 @@ export default function ConversationScreen() {
   const [chatTitle, setChatTitle] = useState(name || '');
   const [chatAvatarUrl, setChatAvatarUrl] = useState<string | null>(avatar || null);
   const [wallpaperTheme, setWallpaperTheme] = useState<ChatWallpaperTheme>('light');
-  const [selfId, setSelfId] = useState('');
-  const [selfName, setSelfName] = useState('');
+  const [selfId, setSelfId] = useState(() => getActiveUserId() || getCachedProfile()?.id || '');
+  const [selfName, setSelfName] = useState(() => getCachedProfile()?.name || '');
   const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
@@ -567,18 +569,24 @@ export default function ConversationScreen() {
       }
     };
 
-    const onRemoteReaction = (payload: { messageId: string; userId: string; emoji: string }) => {
+    const onRemoteReaction = (payload: { messageId: string; userId: string; emoji: string; action?: 'set' | 'remove' }) => {
       if (payload?.messageId) {
+        const activeUserId = selfId || getActiveUserId() || getCachedProfile()?.id || '';
+        if (activeUserId && payload.userId === activeUserId) {
+          // Already applied optimistically locally; ignore echo to prevent double-toggle inversion!
+          return;
+        }
         void handleRemoteReaction(payload);
         setMessages(curr => curr.map(m => {
           if (m.id !== payload.messageId) return m;
           const reactions = { ...(m.reactions || {}) };
-          if (reactions[payload.userId] === payload.emoji) {
+          if (payload.action === 'remove' || (payload.action === undefined && reactions[payload.userId] === payload.emoji)) {
             delete reactions[payload.userId];
           } else {
             reactions[payload.userId] = payload.emoji;
           }
-          return { ...m, reactions };
+          const hasKeys = Object.keys(reactions).length > 0;
+          return { ...m, reactions: hasKeys ? reactions : null };
         }));
       }
     };
@@ -738,14 +746,17 @@ export default function ConversationScreen() {
 
   const handleReact = async (msg: LocalMessage, emoji: string) => {
     if (!target) return;
+    const activeUserId = selfId || getActiveUserId() || getCachedProfile()?.id || '';
+    if (!activeUserId) return;
     const currentReactions: Record<string, string> = { ...(msg.reactions || {}) };
-    if (currentReactions[selfId] === emoji) {
-      delete currentReactions[selfId];
+    if (currentReactions[activeUserId] === emoji) {
+      delete currentReactions[activeUserId];
     } else {
-      currentReactions[selfId] = emoji;
+      currentReactions[activeUserId] = emoji;
     }
+    const hasKeys = Object.keys(currentReactions).length > 0;
     setMessages(curr =>
-      curr.map(m => (m.id === msg.id ? { ...m, reactions: currentReactions } : m))
+      curr.map(m => (m.id === msg.id ? { ...m, reactions: hasKeys ? currentReactions : null } : m))
     );
     setSelectedMessage(null);
     try {
@@ -1250,11 +1261,20 @@ export default function ConversationScreen() {
               <SwipeableBubbleRow
                 onSwipeReply={() => triggerReply(item)}
                 onLongPress={() => onMessageLongPress(item)}
+                onPress={() => {
+                  if (selectedMessage) {
+                    setSelectedMessage(null);
+                  }
+                }}
                 isSelected={isSelected}
               >
                 {/* Floating WhatsApp Emoji Reaction Pill directly above selected message */}
                 {isSelected && (
-                  <View style={[styles.floatingReactionPill, mine ? styles.myReactionFloating : styles.theirReactionFloating]}>
+                  <View style={[
+                    styles.floatingReactionPill,
+                    mine ? styles.myReactionFloating : styles.theirReactionFloating,
+                    isLight && styles.floatingReactionPillLight,
+                  ]}>
                     {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => (
                       <Pressable
                         key={emoji}
@@ -1268,140 +1288,163 @@ export default function ConversationScreen() {
                       onPress={() => {
                         setShowEmojiPicker(true);
                       }}
-                      style={styles.reactionPlusBtn}
+                      style={[styles.reactionPlusBtn, isLight && styles.reactionPlusBtnLight]}
                     >
-                      <Text style={styles.reactionPlusText}>＋</Text>
+                      <Text style={[styles.reactionPlusText, isLight && styles.reactionPlusTextLight]}>＋</Text>
                     </Pressable>
                   </View>
                 )}
 
-                <View
-                  style={[
-                    styles.bubble,
-                    mine ? (isLight ? styles.myBubbleLight : styles.myBubble) : (isLight ? styles.theirBubbleLight : styles.theirBubble),
-                    media && styles.mediaBubble,
-                    isTagged && styles.taggedBubble,
-                    hasReactions && styles.bubbleWithReactions,
-                  ]}
-                >
-                  {kind === 'group' && !mine && <Text style={[styles.sender, isLight && styles.senderLight]}>{item.senderName}</Text>}
+                <View style={[styles.bubbleWrapper, mine ? styles.myBubbleWrapper : styles.theirBubbleWrapper]}>
+                  <View
+                    style={[
+                      styles.bubble,
+                      mine ? (isLight ? styles.myBubbleLight : styles.myBubble) : (isLight ? styles.theirBubbleLight : styles.theirBubble),
+                      media && styles.mediaBubble,
+                      isTagged && styles.taggedBubble,
+                    ]}
+                  >
+                    {kind === 'group' && !mine && <Text style={[styles.sender, isLight && styles.senderLight]}>{item.senderName}</Text>}
 
-                  {/* Quoted Reply inside message bubble */}
-                  {item.replyTo && (
-                    <Pressable
-                      onPress={() => {
-                        const idx = reversedMessages.findIndex(m => m.id === item.replyTo?.messageId);
-                        if (idx !== -1) {
-                          try {
-                            flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 });
-                          } catch {}
-                        }
-                      }}
-                      style={[
-                        styles.quotedBubbleCard,
-                        mine ? (isLight ? styles.myQuotedBubbleCardLight : styles.myQuotedBubbleCard) : (isLight ? styles.theirQuotedBubbleCardLight : styles.theirQuotedBubbleCard)
-                      ]}
-                    >
-                      <View style={styles.quotedAccentBar} />
-                      <View style={styles.quotedBubbleContent}>
-                        <Text style={[styles.quotedSenderName, isLight && styles.quotedSenderNameLight]} numberOfLines={1}>
-                          {item.replyTo.senderId === selfId ? 'You' : item.replyTo.senderName}
-                        </Text>
-                        <Text style={[styles.quotedSnippet, mine ? styles.myQuotedSnippet : styles.theirQuotedSnippet, isLight && styles.quotedSnippetLight]} numberOfLines={2}>
-                          {item.replyTo.snippet}
-                        </Text>
-                      </View>
-                      {item.replyTo.mediaId && (
-                        <View style={styles.quotedBubbleThumbnail}>
-                          <Text style={{ fontSize: 16 }}>{item.replyTo.mediaKind === 'video' ? '🎥' : '📷'}</Text>
+                    {/* Quoted Reply inside message bubble */}
+                    {item.replyTo && (
+                      <Pressable
+                        onPress={() => {
+                          const idx = reversedMessages.findIndex(m => m.id === item.replyTo?.messageId);
+                          if (idx !== -1) {
+                            try {
+                              flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 });
+                            } catch {}
+                          }
+                        }}
+                        style={[
+                          styles.quotedBubbleCard,
+                          mine ? (isLight ? styles.myQuotedBubbleCardLight : styles.myQuotedBubbleCard) : (isLight ? styles.theirQuotedBubbleCardLight : styles.theirQuotedBubbleCard)
+                        ]}
+                      >
+                        <View style={styles.quotedAccentBar} />
+                        <View style={styles.quotedBubbleContent}>
+                          <Text style={[styles.quotedSenderName, isLight && styles.quotedSenderNameLight]} numberOfLines={1}>
+                            {item.replyTo.senderId === selfId ? 'You' : item.replyTo.senderName}
+                          </Text>
+                          <Text style={[styles.quotedSnippet, mine ? styles.myQuotedSnippet : styles.theirQuotedSnippet, isLight && styles.quotedSnippetLight]} numberOfLines={2}>
+                            {item.replyTo.snippet}
+                          </Text>
                         </View>
-                      )}
-                    </Pressable>
-                  )}
-
-                  {roomCard ? (
-                    <RoomCardMessage
-                      card={roomCard}
-                      isMine={mine}
-                      isLight={isLight}
-                      onJoin={() => {
-                        router.push({
-                          pathname: '/lobby',
-                          params: {
-                            room: roomCard.roomKind,
-                            groupId: roomCard.groupId || '',
-                            roomId: roomCard.roomId,
-                            roomOwnerId: roomCard.creatorId,
-                            roomName: roomCard.roomName || name || 'Hangout',
-                            isPrivate: String(roomCard.isPrivate ?? false),
-                          },
-                        } as unknown as Href);
-                      }}
-                    />
-                  ) : media ? (
-                    <MediaMessage
-                      media={media}
-                      onPress={(mediaUri) => {
-                        if (selectedMessage) {
-                          setSelectedMessage(null);
-                          return;
-                        }
-                        setViewerMedia({
-                          uri: mediaUri,
-                          media,
-                          messageId: item.id,
-                          senderName: item.senderName,
-                          createdAt: item.createdAt,
-                          mine,
-                        });
-                      }}
-                      onLongPress={() => onMessageLongPress(item)}
-                    />
-                  ) : (
-                    renderMessageBody(item.body, mine, item.id, isLight)
-                  )}
-
-                  <View style={[styles.messageFooter, media && styles.mediaFooter]}>
-                    <Text style={[styles.messageTime, !mine && styles.theirMessageTime, isLight && styles.messageTimeLight]}>
-                      {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
-                    </Text>
-                    {mine && (
-                      <Text accessibilityLabel={item.status === 'read' ? 'Read' : item.status === 'delivered' ? 'Delivered' : item.status === 'sent' ? 'Sent' : 'Pending'} style={[styles.tick, isLight && styles.tickLight, item.status === 'read' && (isLight ? styles.readTickLight : styles.readTick)]}>
-                        {item.status === 'read' || item.status === 'delivered' ? '✓✓' : item.status === 'sent' ? '✓' : '○'}
-                      </Text>
+                        {item.replyTo.mediaId && (
+                          <View style={styles.quotedBubbleThumbnail}>
+                            <Text style={{ fontSize: 16 }}>{item.replyTo.mediaKind === 'video' ? '🎥' : '📷'}</Text>
+                          </View>
+                        )}
+                      </Pressable>
                     )}
+
+                    {roomCard ? (
+                      <RoomCardMessage
+                        card={roomCard}
+                        isMine={mine}
+                        isLight={isLight}
+                        onJoin={() => {
+                          router.push({
+                            pathname: '/lobby',
+                            params: {
+                              room: roomCard.roomKind,
+                              groupId: roomCard.groupId || '',
+                              roomId: roomCard.roomId,
+                              roomOwnerId: roomCard.creatorId,
+                              roomName: roomCard.roomName || name || 'Hangout',
+                              isPrivate: String(roomCard.isPrivate ?? false),
+                            },
+                          } as unknown as Href);
+                        }}
+                      />
+                    ) : media ? (
+                      <MediaMessage
+                        media={media}
+                        onPress={(mediaUri) => {
+                          if (selectedMessage) {
+                            setSelectedMessage(null);
+                            return;
+                          }
+                          setViewerMedia({
+                            uri: mediaUri,
+                            media,
+                            messageId: item.id,
+                            senderName: item.senderName,
+                            createdAt: item.createdAt,
+                            mine,
+                          });
+                        }}
+                        onLongPress={() => onMessageLongPress(item)}
+                      />
+                    ) : (
+                      renderMessageBody(item.body, mine, item.id, isLight)
+                    )}
+
+                    <View style={[styles.messageFooter, media && styles.mediaFooter]}>
+                      <Text style={[styles.messageTime, !mine && styles.theirMessageTime, isLight && styles.messageTimeLight]}>
+                        {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                      </Text>
+                      {mine && (
+                        <Text accessibilityLabel={item.status === 'read' ? 'Read' : item.status === 'delivered' ? 'Delivered' : item.status === 'sent' ? 'Sent' : 'Pending'} style={[styles.tick, isLight && styles.tickLight, item.status === 'read' && (isLight ? styles.readTickLight : styles.readTick)]}>
+                          {item.status === 'read' || item.status === 'delivered' ? '✓✓' : item.status === 'sent' ? '✓' : '○'}
+                        </Text>
+                      )}
+                    </View>
                   </View>
 
-                  {/* Reaction Badge on message bubble */}
+                  {/* Reaction Badge below message bubble */}
                   {(() => {
                     if (!item.reactions || typeof item.reactions !== 'object') return null;
                     const counts: Record<string, number> = {};
                     for (const e of Object.values(item.reactions)) {
-                      if (typeof e === 'string') counts[e] = (counts[e] || 0) + 1;
+                      if (typeof e === 'string' && e.trim()) counts[e] = (counts[e] || 0) + 1;
                     }
                     const entries = Object.entries(counts);
                     if (entries.length === 0) return null;
-                    const myEmoji = selfId && item.reactions[selfId];
+                    const activeUserId = selfId || getActiveUserId() || getCachedProfile()?.id || '';
+                    const myEmoji = activeUserId ? item.reactions[activeUserId] : null;
+                    const totalCount = entries.reduce((acc, [, c]) => acc + c, 0);
+
                     return (
-                      <Pressable
-                        onPress={() => {
-                          if (myEmoji) {
-                            void handleReact(item, myEmoji);
-                          } else {
+                      <View style={[styles.reactionBadgeRow, mine ? styles.myReactionBadgeRow : styles.theirReactionBadgeRow]}>
+                        <Pressable
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          onPress={(e) => {
+                            e.stopPropagation?.();
+                            if (myEmoji) {
+                              void handleReact(item, myEmoji);
+                            } else if (entries.length === 1) {
+                              void handleReact(item, entries[0][0]);
+                            } else {
+                              onMessageLongPress(item);
+                            }
+                          }}
+                          onLongPress={(e) => {
+                            e.stopPropagation?.();
                             onMessageLongPress(item);
-                          }
-                        }}
-                        style={[
-                          styles.reactionBadge,
-                          mine ? styles.myReactionBadge : styles.theirReactionBadge,
-                          isLight && styles.reactionBadgeLight,
-                          myEmoji && styles.myReactionActiveBadge,
-                        ]}
-                      >
-                        <Text style={[styles.reactionBadgeText, isLight && styles.reactionBadgeTextLight]}>
-                          {entries.map(([e]) => e).join('')} {entries.reduce((acc, [, c]) => acc + c, 0) > 1 ? entries.reduce((acc, [, c]) => acc + c, 0) : ''}
-                        </Text>
-                      </Pressable>
+                          }}
+                          style={({ pressed }) => [
+                            styles.reactionBadge,
+                            isLight ? styles.reactionBadgeLight : styles.reactionBadgeDark,
+                            Boolean(myEmoji) && (isLight ? styles.myReactionActiveBadgeLight : styles.myReactionActiveBadgeDark),
+                            pressed && { opacity: 0.8, transform: [{ scale: 0.96 }] },
+                          ]}
+                        >
+                          <View style={styles.reactionEmojisList}>
+                            {entries.slice(0, 3).map(([emoji]) => (
+                              <Text key={emoji} style={styles.reactionEmojiGlyph}>
+                                {emoji}
+                              </Text>
+                            ))}
+                          </View>
+                          {totalCount > 1 && (
+                            <Text style={[styles.reactionBadgeCount, isLight ? styles.reactionBadgeCountLight : styles.reactionBadgeCountDark]}>
+                              {totalCount}
+                            </Text>
+                          )}
+                        </Pressable>
+                      </View>
                     );
                   })()}
                 </View>
@@ -1748,7 +1791,8 @@ export default function ConversationScreen() {
               <View style={styles.viewerReactionPill}>
                 {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => {
                   const currentViewerMsg = messages.find(m => m.id === viewerMedia.messageId);
-                  const isReacted = currentViewerMsg?.reactions?.[selfId] === emoji;
+                  const activeUserId = selfId || getActiveUserId() || getCachedProfile()?.id || '';
+                  const isReacted = Boolean(activeUserId && currentViewerMsg?.reactions?.[activeUserId] === emoji);
                   return (
                     <Pressable
                       key={emoji}
@@ -2253,28 +2297,93 @@ const styles = StyleSheet.create({
     marginLeft: 4,
   },
   reactionPlusText: { color: '#8E9BA8', fontSize: 18, fontWeight: '700' },
-  bubbleWithReactions: {
-    marginBottom: 10,
+  bubbleWrapper: {
+    maxWidth: '82%',
+    position: 'relative',
+    marginVertical: 1,
+  },
+  myBubbleWrapper: {
+    alignSelf: 'flex-end',
+    alignItems: 'flex-end',
+  },
+  theirBubbleWrapper: {
+    alignSelf: 'flex-start',
+    alignItems: 'flex-start',
+  },
+  reactionBadgeRow: {
+    marginTop: -8,
+    zIndex: 10,
+    elevation: 4,
+  },
+  myReactionBadgeRow: {
+    alignSelf: 'flex-end',
+    marginRight: 6,
+  },
+  theirReactionBadgeRow: {
+    alignSelf: 'flex-start',
+    marginLeft: 6,
   },
   reactionBadge: {
-    position: 'absolute',
-    bottom: -10,
-    backgroundColor: '#202C33',
-    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 7,
-    paddingVertical: 2,
+    paddingVertical: 3,
+    borderRadius: 14,
     borderWidth: 1.5,
-    borderColor: '#0B1014',
+    gap: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.25,
+    shadowRadius: 2,
     elevation: 4,
-    zIndex: 10,
   },
-  myReactionBadge: { right: 8 },
-  theirReactionBadge: { left: 8 },
-  myReactionActiveBadge: {
+  reactionBadgeDark: {
+    backgroundColor: '#202C33',
+    borderColor: '#111B21',
+  },
+  reactionBadgeLight: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E9EDEF',
+  },
+  myReactionActiveBadgeDark: {
     borderColor: '#25D366',
-    backgroundColor: '#1E3A2F',
+    backgroundColor: '#0F382E',
   },
-  reactionBadgeText: { fontSize: 12, color: '#FFFFFF' },
+  myReactionActiveBadgeLight: {
+    borderColor: '#25D366',
+    backgroundColor: '#D9FDD3',
+  },
+  reactionEmojisList: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  reactionEmojiGlyph: {
+    fontSize: 13,
+    lineHeight: 17,
+  },
+  reactionBadgeCount: {
+    fontSize: 11,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  reactionBadgeCountDark: {
+    color: '#E9EDEF',
+  },
+  reactionBadgeCountLight: {
+    color: '#54656F',
+  },
+  floatingReactionPillLight: {
+    backgroundColor: '#FFFFFF',
+    borderColor: 'rgba(0, 0, 0, 0.08)',
+    shadowOpacity: 0.15,
+  },
+  reactionPlusBtnLight: {
+    backgroundColor: '#F0F2F5',
+  },
+  reactionPlusTextLight: {
+    color: '#54656F',
+  },
   viewerFooterBar: {
     position: 'absolute',
     bottom: 24,
@@ -2440,13 +2549,6 @@ const styles = StyleSheet.create({
   },
   deletedTextLight: {
     color: '#667781',
-  },
-  reactionBadgeLight: {
-    backgroundColor: '#FFFFFF',
-    borderColor: 'rgba(0, 0, 0, 0.1)',
-  },
-  reactionBadgeTextLight: {
-    color: '#111B21',
   },
   roomCardBox: {
     padding: 12,

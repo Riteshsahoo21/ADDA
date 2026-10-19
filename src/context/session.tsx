@@ -12,6 +12,7 @@ import { colors } from '@/constants/theme';
 import * as Notifications from 'expo-notifications';
 import { hasCallPushToken, registerCallNotifications, showSocketCallNotification, unregisterCallNotifications } from '@/lib/push-notifications';
 import { closeEncryptedChat, initEncryptedChat, receiveDirectEnvelope, handleMessageStatusUpdate, setCachedProfile, syncEncryptedChat, clearKeyCache, type Envelope } from '@/lib/encrypted-chat';
+import { clearSocialCache } from '@/lib/social-cache';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
 
 type Session = {
@@ -253,6 +254,9 @@ export function SessionProvider({ children }: PropsWithChildren) {
     } finally {
       await authStorage.clearTokens();
       await SecureStore.deleteItemAsync(SAVED_USER_KEY);
+      await clearSocialCache();
+      await closeEncryptedChat();
+      disconnectRealtime();
       setUsername(null);
     }
   };
