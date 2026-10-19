@@ -83,7 +83,7 @@ export default function HangoutScreen() {
   const [invitedGroupIds, setInvitedGroupIds] = useState<Set<string>>(() => new Set());
   const [invitingGroupId, setInvitingGroupId] = useState<string | null>(null);
 
-  const activeRoomId = shardId || (params.groupId ? `group:${params.groupId}:${roomKind}` : roomKind);
+  const activeRoomId = shardId || (params.roomId ? `room:${params.roomId}` : (params.groupId ? `group:${params.groupId}:${roomKind}` : roomKind));
 
   const mediaRef = useRef<GroupMedia | null>(null);
   const micMutedRef = useRef(false);

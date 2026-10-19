@@ -221,6 +221,15 @@ export default function ConversationScreen() {
   // Group Hangout Rooms
   const [showRoomModal, setShowRoomModal] = useState(false);
   const [activeGroupRoom, setActiveGroupRoom] = useState<ActiveGroupRoom | null>(null);
+  const [directRoomInvite, setDirectRoomInvite] = useState<{
+    id: string;
+    roomId: string;
+    roomName?: string;
+    roomKind: string;
+    inviterId: string;
+    inviterName: string;
+    isPrivate?: boolean;
+  } | null>(null);
   const [selectedRoomTheme, setSelectedRoomTheme] = useState<'beach' | 'tea' | 'loft' | 'roof'>('beach');
   const [creatingRoom, setCreatingRoom] = useState(false);
 
@@ -280,13 +289,31 @@ export default function ConversationScreen() {
   }, [avatar]);
 
   const checkActiveRoom = useCallback(async () => {
-    if (kind !== 'group' || !target?.id) return;
+    if (!target?.id) return;
     try {
-      const res = await socialApi<{ active: boolean; room: ActiveGroupRoom | null }>(`/groups/${target.id}/rooms/active`);
-      if (res.active && res.room) {
-        setActiveGroupRoom(res.room);
-      } else {
-        setActiveGroupRoom(null);
+      if (kind === 'group') {
+        const res = await socialApi<{ active: boolean; room: ActiveGroupRoom | null }>(`/groups/${target.id}/rooms/active`);
+        if (res.active && res.room) {
+          setActiveGroupRoom(res.room);
+        } else {
+          setActiveGroupRoom(null);
+        }
+      } else if (kind === 'direct') {
+        const res = await socialApi<{ activeRooms: any[]; invites: any[] }>('/updates/hangouts');
+        const match = res.invites?.find((i: any) => i.inviterId === target.id);
+        if (match) {
+          setDirectRoomInvite({
+            id: match.id,
+            roomId: match.roomId,
+            roomName: match.roomName || match.groupName,
+            roomKind: match.roomKind,
+            inviterId: match.inviterId,
+            inviterName: match.inviterName,
+            isPrivate: match.isPrivate,
+          });
+        } else {
+          setDirectRoomInvite(null);
+        }
       }
     } catch {}
   }, [kind, target?.id]);
@@ -299,17 +326,29 @@ export default function ConversationScreen() {
     let live: any = null;
     const onRoomUpdated = (data: any) => {
       if (data?.groupId === target?.id) {
-        setActiveGroupRoom(data);
+        setActiveGroupRoom(data.active === false ? null : data);
       }
+    };
+    const onRoomInvite = (inv: any) => {
+      if ((kind === 'direct' && inv.inviterId === target?.id) || (kind === 'group' && inv.groupId === target?.id)) {
+        setDirectRoomInvite(inv);
+      }
+    };
+    const onPublicClosed = () => {
+      void checkActiveRoom();
     };
     void getRealtimeSocket().then(sock => {
       live = sock;
       sock.on('group:room_updated', onRoomUpdated);
+      sock.on('room:invitation', onRoomInvite);
+      sock.on('room:public_closed', onPublicClosed);
     });
     return () => {
       live?.off('group:room_updated', onRoomUpdated);
+      live?.off('room:invitation', onRoomInvite);
+      live?.off('room:public_closed', onPublicClosed);
     };
-  }, [target?.id]);
+  }, [kind, target?.id, checkActiveRoom]);
 
   const handleCreateGroupRoom = async (theme: 'beach' | 'tea' | 'loft' | 'roof') => {
     if (!target?.id || creatingRoom) return;
@@ -1068,6 +1107,40 @@ export default function ConversationScreen() {
               <MoreVertical size={20} color={colors.text} />
             </Pressable>
           </View>
+        </View>
+      )}
+
+      {/* Active Room / In-Chat Room Invite Banner */}
+      {(activeGroupRoom || directRoomInvite) && (
+        <View style={styles.chatRoomBanner}>
+          <View style={styles.chatRoomBannerLeft}>
+            <View style={styles.chatRoomBannerDot} />
+            <Text style={styles.chatRoomBannerTitle} numberOfLines={1}>
+              {activeGroupRoom
+                ? (activeGroupRoom.name || `${activeGroupRoom.creatorName} started a room`)
+                : (directRoomInvite?.roomName || `${directRoomInvite?.inviterName} invited you`)}
+            </Text>
+          </View>
+          <Pressable
+            onPress={() => {
+              const item = activeGroupRoom || directRoomInvite!;
+              router.push({
+                pathname: '/lobby',
+                params: {
+                  room: item.roomKind,
+                  groupId: (item as any).groupId || '',
+                  roomId: (item as any).roomId || (item as any).id,
+                  roomOwnerId: (item as any).creatorId || (item as any).ownerId || (item as any).inviterId,
+                  roomName: (item as any).name || (item as any).roomName || 'Hangout',
+                  isPrivate: String((item as any).isPrivate ?? true),
+                },
+              } as unknown as Href);
+            }}
+            style={styles.chatRoomBannerBtn}
+          >
+            <DoorOpen size={14} color="#FFFFFF" />
+            <Text style={styles.chatRoomBannerBtnText}>Join Room</Text>
+          </Pressable>
         </View>
       )}
 
@@ -2542,5 +2615,49 @@ const styles = StyleSheet.create({
   },
   menuItemTextDanger: {
     color: colors.error,
+  },
+  chatRoomBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#10221DF5',
+    borderBottomWidth: 1,
+    borderBottomColor: '#277A5544',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    zIndex: 10,
+  },
+  chatRoomBannerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 10,
+    gap: 8,
+  },
+  chatRoomBannerDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#25D366',
+  },
+  chatRoomBannerTitle: {
+    color: '#F7FAF8',
+    fontSize: 13,
+    fontWeight: '700',
+    flex: 1,
+  },
+  chatRoomBannerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#25D366',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  chatRoomBannerBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
   },
 });

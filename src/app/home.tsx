@@ -508,8 +508,8 @@ export default function HomeScreen() {
         roomKind: selectedTheme,
         isPrivate: isPrivateServer,
         name: customServerName.trim() || undefined,
-        groupInvites: isPrivateServer ? selectedGroupInvites : undefined,
-        userInvites: isPrivateServer ? selectedContactInvites : undefined,
+        groupInvites: selectedGroupInvites.length > 0 ? selectedGroupInvites : undefined,
+        userInvites: selectedContactInvites.length > 0 ? selectedContactInvites : undefined,
       });
       setCreateModalOpen(false);
       router.push({
@@ -931,7 +931,7 @@ export default function HomeScreen() {
                 <Text style={[styles.privacyOptionTitle, !isPrivateServer && styles.privacyOptionTitleSelected]}>
                   Public Server
                 </Text>
-                <Text style={styles.privacyOptionDesc}>Open for anyone on ADDA to discover & join</Text>
+                <Text style={styles.privacyOptionDesc}>Listed in Join Server tab for anyone on ADDA to discover & join</Text>
               </Pressable>
 
               <Pressable
@@ -942,7 +942,7 @@ export default function HomeScreen() {
                 <Text style={[styles.privacyOptionTitle, isPrivateServer && styles.privacyOptionTitleSelected]}>
                   Private Server
                 </Text>
-                <Text style={styles.privacyOptionDesc}>Invite-only for selected groups & contacts</Text>
+                <Text style={styles.privacyOptionDesc}>Invite-only: hidden from Join Server tab</Text>
               </Pressable>
             </View>
 
@@ -957,68 +957,64 @@ export default function HomeScreen() {
               maxLength={50}
             />
 
-            {/* If Private: Invite Groups & Contacts multi-selectors */}
-            {isPrivateServer && (
-              <>
-                <Text style={styles.fieldLabel}>INVITE GROUPS ({selectedGroupInvites.length} SELECTED)</Text>
-                {groups.length === 0 ? (
-                  <Text style={styles.helper}>You have not joined any groups yet.</Text>
-                ) : (
-                  <View style={styles.inviteListContainer}>
-                    {groups.map(group => {
-                      const isSelected = selectedGroupInvites.includes(group.id);
-                      return (
-                        <Pressable
-                          key={group.id}
-                          style={styles.memberRow}
-                          onPress={() => {
-                            setSelectedGroupInvites(curr =>
-                              isSelected ? curr.filter(id => id !== group.id) : [...curr, group.id]
-                            );
-                          }}
-                        >
-                          <View style={[styles.checkbox, isSelected && styles.checked]}>
-                            {isSelected && <Text style={styles.checkMark}>✓</Text>}
-                          </View>
-                          <UsersRound size={18} color={colors.primaryDark} style={{ marginRight: 6 }} />
-                          <Text style={styles.memberName}>{group.name}</Text>
-                          <Text style={styles.memberUsername}>{group.memberCount} members</Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                )}
+            {/* Invite Groups & Contacts multi-selectors (Available for both public and private servers) */}
+            <Text style={styles.fieldLabel}>INVITE GROUPS ({selectedGroupInvites.length} SELECTED)</Text>
+            {groups.length === 0 ? (
+              <Text style={styles.helper}>You have not joined any groups yet.</Text>
+            ) : (
+              <View style={styles.inviteListContainer}>
+                {groups.map(group => {
+                  const isSelected = selectedGroupInvites.includes(group.id);
+                  return (
+                    <Pressable
+                      key={group.id}
+                      style={styles.memberRow}
+                      onPress={() => {
+                        setSelectedGroupInvites(curr =>
+                          isSelected ? curr.filter(id => id !== group.id) : [...curr, group.id]
+                        );
+                      }}
+                    >
+                      <View style={[styles.checkbox, isSelected && styles.checked]}>
+                        {isSelected && <Text style={styles.checkMark}>✓</Text>}
+                      </View>
+                      <UsersRound size={18} color={colors.primaryDark} style={{ marginRight: 6 }} />
+                      <Text style={styles.memberName}>{group.name}</Text>
+                      <Text style={styles.memberUsername}>{group.memberCount} members</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
 
-                <Text style={[styles.fieldLabel, { marginTop: 14 }]}>
-                  INVITE CONTACTS ({selectedContactInvites.length} SELECTED)
-                </Text>
-                {contacts.length === 0 ? (
-                  <Text style={styles.helper}>No contacts yet.</Text>
-                ) : (
-                  <View style={styles.inviteListContainer}>
-                    {contacts.map(contact => {
-                      const isSelected = selectedContactInvites.includes(contact.id);
-                      return (
-                        <Pressable
-                          key={contact.id}
-                          style={styles.memberRow}
-                          onPress={() => {
-                            setSelectedContactInvites(curr =>
-                              isSelected ? curr.filter(id => id !== contact.id) : [...curr, contact.id]
-                            );
-                          }}
-                        >
-                          <View style={[styles.checkbox, isSelected && styles.checked]}>
-                            {isSelected && <Text style={styles.checkMark}>✓</Text>}
-                          </View>
-                          <Text style={styles.memberName}>{contact.name}</Text>
-                          <Text style={styles.memberUsername}>@{contact.username}</Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                )}
-              </>
+            <Text style={[styles.fieldLabel, { marginTop: 14 }]}>
+              INVITE CONTACTS ({selectedContactInvites.length} SELECTED)
+            </Text>
+            {contacts.length === 0 ? (
+              <Text style={styles.helper}>No contacts yet.</Text>
+            ) : (
+              <View style={styles.inviteListContainer}>
+                {contacts.map(contact => {
+                  const isSelected = selectedContactInvites.includes(contact.id);
+                  return (
+                    <Pressable
+                      key={contact.id}
+                      style={styles.memberRow}
+                      onPress={() => {
+                        setSelectedContactInvites(curr =>
+                          isSelected ? curr.filter(id => id !== contact.id) : [...curr, contact.id]
+                        );
+                      }}
+                    >
+                      <View style={[styles.checkbox, isSelected && styles.checked]}>
+                        {isSelected && <Text style={styles.checkMark}>✓</Text>}
+                      </View>
+                      <Text style={styles.memberName}>{contact.name}</Text>
+                      <Text style={styles.memberUsername}>@{contact.username}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
             )}
 
             <Pressable

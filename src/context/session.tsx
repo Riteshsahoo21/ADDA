@@ -170,7 +170,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
             roomOwnerId: data.ownerId || '',
             roomName: data.roomName || '',
             inviterName: data.inviterName || '',
-            isPrivate: 'true',
+            isPrivate: data.isPrivate || 'false',
           },
         } as unknown as Href);
         return;
