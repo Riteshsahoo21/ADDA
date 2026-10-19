@@ -29,7 +29,8 @@ function writeRecord(view: DataView, offset: number, state: MotionState) {
   view.setInt16(offset + 4, Math.round(state.x * 100), true);
   view.setInt16(offset + 6, Math.round(state.y * 100), true);
   view.setInt16(offset + 8, Math.round(state.z * 100), true);
-  view.setInt16(offset + 10, Math.round(state.yaw * 10000), true);
+  const normalizedYaw = Math.atan2(Math.sin(state.yaw), Math.cos(state.yaw));
+  view.setInt16(offset + 10, Math.round(normalizedYaw * 10000), true);
   view.setInt16(offset + 12, Math.round(state.vx * 100), true);
   view.setInt16(offset + 14, Math.round(state.vz * 100), true);
   view.setUint16(offset + 16, state.motionId & 0xffff, true);
