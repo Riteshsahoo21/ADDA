@@ -7,18 +7,23 @@ import { Check, CirclePlus, DoorOpen, EllipsisVertical, MessageCircle, Phone, Pl
 import { BottomNav, type HubTab } from '@/components/ui/BottomNav';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
-import { socialApi, type ChatGroup, type FriendRequest, type OwnProfile, type PublicProfile } from '@/lib/social-api';
+import { socialApi, type ChatGroup, type FriendRequest, type OwnProfile, type PublicProfile, type SocialBundle } from '@/lib/social-api';
 import { getRealtimeSocket, type TypingEvent } from '@/lib/realtime';
 import { TypingDots } from '@/components/ui/TypingDots';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
-import { type AvatarBody } from '@/three/player/avatarStyle';
+import { type AvatarBody, AVATAR_NAMES, AVATAR_TAGLINES } from '@/three/player/avatarStyle';
 import { initEncryptedChat, localPreviews, onChatChanged, previewBody, formatChatPreview, setCachedProfile, getCachedProfile } from '@/lib/encrypted-chat';
+import { getCachedSocialBundle, initSocialCache, setCachedSocialBundle, updateCachedContacts, updateCachedGroups, updateCachedFriendRequests } from '@/lib/social-cache';
 
-const avatars: { body: AvatarBody; label: string }[] = [
-  { body: 'man', label: 'Indian Man' }, { body: 'uncle', label: 'Uncle' },
-  { body: 'photo_boy', label: 'Photo Boy' }, { body: 'self', label: 'My Avatar' },
-  { body: 'woman', label: 'Indian Woman' }, { body: 'chinese_woman', label: 'Chinese Woman' },
-  { body: 'nepali_woman', label: 'Nepali Woman' }, { body: 'white_top_woman', label: 'White Top Woman' },
+const avatars: { body: AvatarBody; label: string; tagline: string }[] = [
+  { body: 'man', label: AVATAR_NAMES.man, tagline: AVATAR_TAGLINES.man },
+  { body: 'uncle', label: AVATAR_NAMES.uncle, tagline: AVATAR_TAGLINES.uncle },
+  { body: 'photo_boy', label: AVATAR_NAMES.photo_boy, tagline: AVATAR_TAGLINES.photo_boy },
+  { body: 'self', label: AVATAR_NAMES.self, tagline: AVATAR_TAGLINES.self },
+  { body: 'woman', label: AVATAR_NAMES.woman, tagline: AVATAR_TAGLINES.woman },
+  { body: 'chinese_woman', label: AVATAR_NAMES.chinese_woman, tagline: AVATAR_TAGLINES.chinese_woman },
+  { body: 'nepali_woman', label: AVATAR_NAMES.nepali_woman, tagline: AVATAR_TAGLINES.nepali_woman },
+  { body: 'white_top_woman', label: AVATAR_NAMES.white_top_woman, tagline: AVATAR_TAGLINES.white_top_woman },
 ];
 type Sheet = 'add' | 'group' | 'menu' | 'room' | null;
 type Room = 'loft' | 'tea' | 'beach';
@@ -27,11 +32,14 @@ export default function HomeScreen() {
   const { username, logout, avatarStyle, setAvatarStyle } = useSession();
   const params = useLocalSearchParams<{ tab?: string }>();
   const [tab, setTab] = useState<HubTab>(params.tab === 'rooms' || params.tab === 'updates' || params.tab === 'calls' ? params.tab : 'chats');
-  const [profile, setProfile] = useState<OwnProfile | null>(null);
-  const [contacts, setContacts] = useState<PublicProfile[]>([]);
-  const [people, setPeople] = useState<PublicProfile[]>([]);
-  const [groups, setGroups] = useState<ChatGroup[]>([]);
-  const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
+  
+  // 1. INSTANT FRAME 0 INITIALIZATION FROM IN-MEMORY / DISK CACHE
+  const initialCache = getCachedSocialBundle();
+  const [profile, setProfile] = useState<OwnProfile | null>(initialCache?.me || getCachedProfile() || null);
+  const [contacts, setContacts] = useState<PublicProfile[]>(initialCache?.contacts || []);
+  const [people, setPeople] = useState<PublicProfile[]>(initialCache?.people || []);
+  const [groups, setGroups] = useState<ChatGroup[]>(initialCache?.groups || []);
+  const [friendRequests, setFriendRequests] = useState<FriendRequest[]>(initialCache?.friendRequests || []);
   const [search, setSearch] = useState('');
   const [sheet, setSheet] = useState<Sheet>(null);
   const [room, setRoom] = useState<Room>('loft');
@@ -39,7 +47,7 @@ export default function HomeScreen() {
   const [groupName, setGroupName] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialCache && !contacts.length && !groups.length);
   const [error, setError] = useState('');
   const [sheetError, setSheetError] = useState('');
   const [typing, setTyping] = useState<Record<string, Record<string, string>>>({});
@@ -72,61 +80,105 @@ export default function HomeScreen() {
   useEffect(() => { void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP); }, []);
   useEffect(() => { if (!username) router.replace('/login'); }, [username]);
 
+  useEffect(() => {
+    void initSocialCache().then(disk => {
+      if (disk) {
+        setProfile(curr => curr || disk.me);
+        setContacts(curr => curr.length ? curr : disk.contacts);
+        setGroups(curr => curr.length ? curr : disk.groups);
+        setPeople(curr => curr.length ? curr : disk.people);
+        setFriendRequests(curr => curr.length ? curr : disk.friendRequests);
+        setLoading(false);
+      }
+    });
+  }, []);
+
   const refresh = useCallback(async () => {
     if (!username || refreshingRef.current) return;
     refreshingRef.current = true;
     try {
-      const [me, friends, suggested, joined, requests] = await Promise.all([
-        socialApi<OwnProfile>('/me'), socialApi<PublicProfile[]>('/contacts'),
-        socialApi<PublicProfile[]>('/people'), socialApi<ChatGroup[]>('/groups'),
-        socialApi<FriendRequest[]>('/friend-requests'),
-      ]);
-      await initEncryptedChat(me.id);
-      const previews = await localPreviews();
+      let bundle: SocialBundle;
+      try {
+        bundle = await socialApi<SocialBundle>('/social/bundle');
+      } catch {
+        const [me, friends, suggested, joined, requests] = await Promise.all([
+          socialApi<OwnProfile>('/me'), socialApi<PublicProfile[]>('/contacts'),
+          socialApi<PublicProfile[]>('/people'), socialApi<ChatGroup[]>('/groups'),
+          socialApi<FriendRequest[]>('/friend-requests'),
+        ]);
+        bundle = { me, contacts: friends, people: suggested, groups: joined, friendRequests: requests };
+      }
+
+      void initEncryptedChat(bundle.me.id);
+      const previews = await localPreviews().catch(() => []);
       const byChat = new Map(previews.map(item => [`${item.kind}:${item.targetId}`, item]));
-      setProfile(me);
-      setCachedProfile(me);
-      setContacts(friends.map(item => {
+
+      const enrichedContacts = bundle.contacts.map(item => {
         const preview = byChat.get(`direct:${item.id}`);
         return {
           ...item,
-          lastMessage: preview ? formatChatPreview(preview, me.id) : null,
+          lastMessage: preview ? formatChatPreview(preview, bundle.me.id) : null,
           lastAt: preview?.createdAt ?? null,
         };
-      }));
-      setPeople(suggested);
-      setGroups(joined.map(item => {
+      });
+
+      const enrichedGroups = bundle.groups.map(item => {
         const preview = byChat.get(`group:${item.id}`);
         return {
           ...item,
-          lastMessage: preview ? formatChatPreview(preview, me.id) : null,
+          lastMessage: preview ? formatChatPreview(preview, bundle.me.id) : null,
           lastAt: preview?.createdAt ?? null,
         };
-      }));
-      setFriendRequests(requests); setError('');
+      });
+
+      setProfile(bundle.me);
+      setCachedProfile(bundle.me);
+      setContacts(enrichedContacts);
+      setPeople(bundle.people);
+      setGroups(enrichedGroups);
+      setFriendRequests(bundle.friendRequests);
+      setError('');
+
+      setCachedSocialBundle({
+        me: bundle.me,
+        contacts: enrichedContacts,
+        groups: enrichedGroups,
+        people: bundle.people,
+        friendRequests: bundle.friendRequests,
+      });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not load ADDA.');
+      if (!initialCache && !contacts.length) {
+        setError(cause instanceof Error ? cause.message : 'Could not load ADDA.');
+      }
     } finally {
       refreshingRef.current = false;
       setLoading(false);
     }
   }, [username]);
+
   useFocusEffect(useCallback(() => {
-    const cached = getCachedProfile();
+    const cached = getCachedProfile() || getCachedSocialBundle()?.me;
     if (cached) setProfile(cached);
     void refresh();
   }, [refresh]));
 
   const refreshSocial = useCallback(async () => {
     try {
-      const [friends, requests, suggested] = await Promise.all([
-        socialApi<PublicProfile[]>('/contacts'),
-        socialApi<FriendRequest[]>('/friend-requests'),
-        socialApi<PublicProfile[]>('/people'),
-      ]);
+      let bundle: SocialBundle;
+      try {
+        bundle = await socialApi<SocialBundle>('/social/bundle');
+      } catch {
+        const [friends, requests, suggested] = await Promise.all([
+          socialApi<PublicProfile[]>('/contacts'),
+          socialApi<FriendRequest[]>('/friend-requests'),
+          socialApi<PublicProfile[]>('/people'),
+        ]);
+        bundle = { me: profile!, contacts: friends, groups: [], people: suggested, friendRequests: requests };
+      }
+
       setContacts(current => {
         const prevMap = new Map(current.map(c => [c.id, c]));
-        return friends.map(item => {
+        return bundle.contacts.map(item => {
           const existing = prevMap.get(item.id);
           return {
             ...item,
@@ -135,10 +187,10 @@ export default function HomeScreen() {
           };
         });
       });
-      setFriendRequests(requests);
-      setPeople(suggested);
+      setFriendRequests(bundle.friendRequests);
+      setPeople(bundle.people);
     } catch { /* Silent background sync */ }
-  }, []);
+  }, [profile]);
 
   useEffect(() => {
     if (!username) return;
@@ -447,7 +499,7 @@ export default function HomeScreen() {
 
       {tab === 'rooms' && <>
         <Text style={styles.pageTitle}>Choose your hangout</Text><Text style={styles.pageCopy}>Pick a place, then choose the character you’ll bring.</Text>
-        <Pressable style={styles.avatarCard} onPress={() => router.push('/avatar')}><View style={styles.avatarIcon}><Text style={styles.avatarLetter}>{username[0].toUpperCase()}</Text></View><View style={styles.fill}><Text style={styles.cardTitle}>Your character</Text><Text style={styles.cardSub}>{avatars.find((item) => item.body === avatarStyle.body)?.label || 'Choose an avatar'}</Text></View><Text style={styles.chevron}>›</Text></Pressable>
+        <Pressable style={styles.avatarCard} onPress={() => router.push('/avatar')}><View style={styles.avatarIcon}><Text style={styles.avatarLetter}>{username[0].toUpperCase()}</Text></View><View style={styles.fill}><Text style={styles.cardTitle}>Your character</Text><Text style={styles.cardSub}>{avatars.find((item) => item.body === avatarStyle.body) ? `${avatars.find((item) => item.body === avatarStyle.body)?.label} • ${avatars.find((item) => item.body === avatarStyle.body)?.tagline}` : 'Choose a character'}</Text></View><Text style={styles.chevron}>›</Text></Pressable>
         <Pressable style={styles.roomCard} onPress={() => { setRoom('loft'); openSheet('room'); }}><View style={styles.roomIcon}><DoorOpen size={25} color={colors.primaryDark} /></View><View style={styles.fill}><Text style={styles.cardTitle}>Loft 16</Text><Text style={styles.cardSub}>A cozy place to gather</Text></View><Text style={styles.chevron}>›</Text></Pressable>
         <Pressable style={styles.roomCard} onPress={() => { setRoom('tea'); openSheet('room'); }}><View style={[styles.roomIcon, styles.teaIcon]}><Text style={styles.teaEmoji}>☕</Text></View><View style={styles.fill}><Text style={styles.cardTitle}>Tea Party</Text><Text style={styles.cardSub}>Meet at the roadside adda</Text></View><Text style={styles.chevron}>›</Text></Pressable>
         <Pressable style={styles.roomCard} onPress={() => { setRoom('beach'); openSheet('room'); }}><View style={[styles.roomIcon, { backgroundColor: '#F38D68' }]}><Text style={styles.teaEmoji}>🏖️</Text></View><View style={styles.fill}><Text style={styles.cardTitle}>Goa Beach</Text><Text style={styles.cardSub}>Sunset shores, shacks & ocean waves</Text></View><Text style={styles.chevron}>›</Text></Pressable>
@@ -513,7 +565,7 @@ export default function HomeScreen() {
           </>}
           {sheet === 'room' && <>
             <Text style={styles.helper}>Enter {room === 'beach' ? 'Goa Beach' : room === 'loft' ? 'Loft 16' : 'Tea Party'} as:</Text>
-            <ScrollView style={styles.memberList}>{avatars.map((item) => <Pressable key={item.body} style={styles.memberRow} onPress={() => joinRoom(item.body)}><View style={styles.characterIcon}><Text style={styles.characterLetter}>{item.label[0]}</Text></View><Text style={styles.memberName}>{item.label}</Text><Text style={styles.chevron}>›</Text></Pressable>)}</ScrollView>
+            <ScrollView style={styles.memberList}>{avatars.map((item) => <Pressable key={item.body} style={styles.memberRow} onPress={() => joinRoom(item.body)}><View style={styles.characterIcon}><Text style={styles.characterLetter}>{item.label[0]}</Text></View><View style={{ flex: 1 }}><Text style={styles.memberName}>{item.label}</Text><Text style={styles.memberUsername}>{item.tagline}</Text></View><Text style={styles.chevron}>›</Text></Pressable>)}</ScrollView>
           </>}
         </View>
       </KeyboardAvoidingView>

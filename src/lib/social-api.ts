@@ -1,6 +1,14 @@
 import { API_BASE_URL, authStorage } from './auth-client';
 
-export type PublicProfile = { id: string; name: string; username: string; lastMessage?: string | null; lastAt?: string | null };
+export type PublicProfile = {
+  id: string;
+  name: string;
+  username: string;
+  avatarUrl?: string | null;
+  about?: string | null;
+  lastMessage?: string | null;
+  lastAt?: string | null;
+};
 export type OwnProfile = PublicProfile & { friendCode: string };
 export type ChatGroup = {
   id: string;
@@ -40,7 +48,26 @@ export type GroupMediaItem = {
   createdAt: string;
 };
 export type ChatMessage = { id: string; body: string; senderId: string; senderName: string; createdAt: string };
-export type FriendRequest = { id: string; senderId: string; recipientId: string; senderName: string; senderUsername: string; recipientName: string; recipientUsername: string; createdAt: string; status: 'pending' };
+export type FriendRequest = {
+  id: string;
+  senderId: string;
+  recipientId: string;
+  senderName: string;
+  senderUsername: string;
+  senderAvatarUrl?: string | null;
+  recipientName: string;
+  recipientUsername: string;
+  recipientAvatarUrl?: string | null;
+  createdAt: string;
+  status: 'pending';
+};
+export type SocialBundle = {
+  me: OwnProfile;
+  contacts: PublicProfile[];
+  groups: ChatGroup[];
+  people: PublicProfile[];
+  friendRequests: FriendRequest[];
+};
 
 export async function socialApi<T>(path: string, method: 'GET' | 'POST' | 'PATCH' | 'DELETE' = 'GET', body?: object): Promise<T> {
   const token = await authStorage.getAccessToken();

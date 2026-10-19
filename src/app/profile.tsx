@@ -9,16 +9,20 @@ import { FriendQr } from '@/components/ui/FriendQr';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
-import { currentChatDeviceId, initEncryptedChat, setCachedProfile } from '@/lib/encrypted-chat';
+import { currentChatDeviceId, initEncryptedChat, setCachedProfile, getCachedProfile } from '@/lib/encrypted-chat';
+import { getCachedSocialBundle, updateCachedProfile } from '@/lib/social-cache';
 
 type ChatDevice = { id: string; createdAt: string };
 
 export default function ProfileScreen() {
   const { username, login } = useSession();
-  const [profile, setProfile] = useState<OwnProfile | null>(null);
-  const [name, setName] = useState('');
-  const [handle, setHandle] = useState('');
-  const [about, setAbout] = useState('');
+  const cachedBundle = getCachedSocialBundle();
+  const initial = getCachedProfile() || cachedBundle?.me;
+
+  const [profile, setProfile] = useState<OwnProfile | null>(initial || null);
+  const [name, setName] = useState(initial?.name || username || '');
+  const [handle, setHandle] = useState(initial?.username || '');
+  const [about, setAbout] = useState(initial?.about || 'Hey there! I am using ADDA.');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
@@ -26,16 +30,23 @@ export default function ProfileScreen() {
 
   useFocusEffect(useCallback(() => {
     if (!username) { router.replace('/login'); return; }
-    void socialApi<OwnProfile>('/me').then(async (result) => {
-      await initEncryptedChat(result.id);
+
+    Promise.all([
+      socialApi<OwnProfile>('/me'),
+      socialApi<ChatDevice[]>('/chat/devices').catch(() => []),
+    ]).then(([result, devList]) => {
       setProfile(result);
+      setCachedProfile(result);
+      updateCachedProfile(result);
       setName(result.name);
       setHandle(result.username);
       setAbout(result.about || 'Hey there! I am using ADDA.');
+      setDevices(devList);
       setError('');
-      setDevices(await socialApi<ChatDevice[]>('/chat/devices'));
-    }).catch((cause) => setError(cause instanceof Error ? cause.message : 'Could not load profile.'));
-  }, [username]));
+    }).catch((cause) => {
+      if (!initial) setError(cause instanceof Error ? cause.message : 'Could not load profile.');
+    });
+  }, [username, initial]));
 
   const changeAvatar = () => {
     const options: any[] = [
@@ -56,6 +67,7 @@ export default function ProfileScreen() {
               const updated = await socialApi<OwnProfile>('/me', 'PATCH', { avatarUrl: dataUrl });
               setProfile(updated);
               setCachedProfile(updated);
+              updateCachedProfile(updated);
             } catch (e) {
               Alert.alert('Error', e instanceof Error ? e.message : 'Could not update photo.');
             } finally {
@@ -76,6 +88,7 @@ export default function ProfileScreen() {
             const updated = await socialApi<OwnProfile>('/me', 'PATCH', { avatarUrl: null });
             setProfile(updated);
             setCachedProfile(updated);
+            updateCachedProfile(updated);
           } catch (e) {
             Alert.alert('Error', e instanceof Error ? e.message : 'Could not remove photo.');
           } finally {
@@ -98,7 +111,11 @@ export default function ProfileScreen() {
         username: handle.trim().toLowerCase(),
         about: about.trim(),
       });
-      setProfile(result); setHandle(result.username); login(result.name); setSaved(true);
+      setProfile(result);
+      setHandle(result.username);
+      login(result.name);
+      updateCachedProfile(result);
+      setSaved(true);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save your profile.'); }
     finally { setBusy(false); }
   };
