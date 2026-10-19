@@ -1104,13 +1104,27 @@ socialRoutes.post('/room-invites/:id/respond', run(async (request, response) => 
   const userId = response.locals.userId as string;
   const decision = request.body?.decision === 'accept' ? 'accepted' : 'dismissed';
 
-  const res = await pool.query(
-    'UPDATE "room_invite" SET status = $1 WHERE id = $2 AND "inviteeId" = $3 RETURNING id',
-    [decision, inviteId, userId]
+  const check = await pool.query<{ id: string; groupId: string | null; inviteeId: string | null }>(
+    `SELECT i.id, i."groupId", i."inviteeId"
+     FROM "room_invite" i
+     WHERE i.id = $1
+       AND (
+         i."inviteeId" = $2
+         OR (i."groupId" IS NOT NULL AND EXISTS (SELECT 1 FROM "chat_group_member" gm WHERE gm."groupId" = i."groupId" AND gm."userId" = $2))
+       )`,
+    [inviteId, userId]
   );
-  if (!res.rows.length) {
+  if (!check.rows.length) {
     response.status(404).json({ error: 'Invite not found.' });
     return;
+  }
+
+  const row = check.rows[0];
+  if (row.inviteeId === userId) {
+    await pool.query(
+      'UPDATE "room_invite" SET status = $1, "updatedAt" = now() WHERE id = $2',
+      [decision, inviteId]
+    );
   }
 
   response.json({ ok: true, status: decision });

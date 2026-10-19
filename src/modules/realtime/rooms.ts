@@ -283,7 +283,7 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
            UNION
            SELECT 1 FROM "chat_group_member" m
            JOIN "room_invite" ri ON ri."groupId" = m."groupId"
-           WHERE ri."roomId" = $1 AND m."userId" = $2`,
+           WHERE ri."roomId" = $1 AND m."userId" = $2 AND ri.status != 'dismissed'`,
           [targetRoomId, userId]
         );
         if (!invCheck.rows.length) {
@@ -336,6 +336,8 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
           motionProtocol: socket.data.motionProtocol,
         },
       });
+
+      socket.to(channel(shardId)).emit('room:peer', peer);
       return;
     }
 
@@ -658,10 +660,10 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     for (const targetId of targetUserIds) {
       const inviteId = randomUUID();
       await pool.query(
-        `INSERT INTO "room_invite" (id, "roomId", "groupId", "inviterId", "inviteeId", "roomKind", status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+        `INSERT INTO "room_invite" (id, "roomId", "groupId", "inviterId", "inviteeId", "roomKind", "roomName", "isPrivate", status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, 'pending')
          ON CONFLICT ("roomId", "inviteeId") DO UPDATE SET status = 'pending', "updatedAt" = now()`,
-        [inviteId, rId, groupId, userId, targetId, roomKind]
+        [inviteId, rId, groupId, userId, targetId, roomKind, groupName]
       );
 
       io.to(`user:${targetId}`).emit('room:invitation', {

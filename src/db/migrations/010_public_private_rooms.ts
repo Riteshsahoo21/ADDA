@@ -23,6 +23,8 @@ END $$;
 
 ALTER TABLE "room_invite" ADD COLUMN IF NOT EXISTS "roomName" TEXT;
 ALTER TABLE "room_invite" ADD COLUMN IF NOT EXISTS "isPrivate" BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE "room_invite" ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMPTZ DEFAULT now();
 
+CREATE UNIQUE INDEX IF NOT EXISTS "idx_room_invite_room_invitee_uniq" ON "room_invite" ("roomId", "inviteeId");
 CREATE INDEX IF NOT EXISTS "idx_group_room_public_active" ON "group_room" ("isActive", "isPrivate");
 `;
