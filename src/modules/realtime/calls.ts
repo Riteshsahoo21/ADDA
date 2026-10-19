@@ -81,7 +81,13 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     if (newlyJoined) call.joined.push(selfId);
     if (call.joined.length > 1) clearTimeout(call.timer);
     ack?.({ ok: true, value: publicCall(call) });
-    if (newlyJoined) io.to(call.joined.filter(id => id !== selfId).map(userRoom)).emit('call:participant-joined', { callId, userId: selfId });
+    io.to(call.joined.filter(id => id !== selfId).map(userRoom)).emit('call:participant-joined', { callId, userId: selfId });
+  });
+  socket.on('call:ready', (callId: unknown) => {
+    const call = typeof callId === 'string' ? calls.get(callId) : undefined;
+    if (!call || call.target.kind !== 'direct' || !call.joined.includes(selfId)) return;
+    const otherId = call.joined.find(id => id !== selfId);
+    if (otherId) io.to(userRoom(otherId)).emit('call:ready', { callId, from: selfId });
   });
   socket.on('call:signal', (input: unknown) => {
     if (!input || typeof input !== 'object' || !('callId' in input) || !('to' in input) || !('signal' in input) ||

@@ -6,6 +6,7 @@ import { ensureProfile, validUsername } from './profile.js';
 import { publishFriendUpdate, publishGroupUpdate, publishGroupRoomUpdate } from '../realtime/server.js';
 import { groupRoomOwners } from '../realtime/rooms.js';
 import { getCachedGroupMembers, invalidateGroupMembersCache } from '../realtime/cache.js';
+import { closeMediaSession } from '../realtime/media.js';
 import { env } from '../../config/env.js';
 
 export const socialRoutes = Router();
@@ -102,7 +103,9 @@ socialRoutes.get('/social/bundle', run(async (_request, response) => {
 }));
 
 socialRoutes.get('/calls/ice', run(async (_request, response) => {
-  const iceServers: { urls: string; username?: string; credential?: string }[] = [{ urls: env.stunUrl }];
+  const iceServers: { urls: string | string[]; username?: string; credential?: string }[] = [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302', env.stunUrl] },
+  ];
   if (env.turnUrl && env.turnSharedSecret) {
     const username = `${Math.floor(Date.now() / 1000) + 3600}:${response.locals.userId}`;
     const credential = createHmac('sha1', env.turnSharedSecret).update(username).digest('base64');
@@ -804,6 +807,8 @@ socialRoutes.delete('/groups/:id/rooms/active', run(async (request, response) =>
   }
 
   await pool.query('UPDATE "group_room" SET "isActive" = false, "updatedAt" = now() WHERE id = $1', [room.id]);
+  void closeMediaSession(`group:${groupId}`).catch(() => {});
+  void closeMediaSession(`room:${room.id}`).catch(() => {});
   const membersRes = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1', [groupId]);
   publishGroupRoomUpdate(membersRes.rows.map(r => r.userId), { groupId, active: false });
 
