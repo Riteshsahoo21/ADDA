@@ -8,7 +8,7 @@ import { closeMediaSession } from './media.js';
 export type RoomKind = 'loft' | 'roof' | 'tea' | 'beach';
 export type AvatarBody = 'man' | 'uncle' | 'photo_boy' | 'self' | 'woman' | 'chinese_woman' | 'nepali_woman' | 'white_top_woman';
 export type RoomPose = 'idle' | 'walk' | 'run' | 'jump' | 'crouch_idle' | 'crouch_walk' | 'sit_enter' | 'sit_idle' | 'sit_exit' | 'lounger_idle';
-export type RoomPeer = { userId: string; name: string; avatar: AvatarBody; motionId?: number; x: number; y?: number; z: number; yaw: number; vx?: number; vz?: number; pose?: RoomPose };
+export type RoomPeer = { userId: string; name: string; avatar: AvatarBody; x: number; y?: number; z: number; yaw: number; vx?: number; vz?: number; pose?: RoomPose };
 export type RoomMessage = { id: string; room: string; userId: string; name: string; body: string; createdAt: number };
 export type Ack<T> = (reply: { ok: true; value: T } | { ok: false; error: string }) => void;
 
@@ -27,7 +27,7 @@ export type RoomJoinResponse = {
   shardIndex: number;
   totalInShard: number;
   ownerId?: string;
-  motionProtocol: number;
+  motionProtocol?: number;
 };
 
 export const BASE_ROOM_IDS = new Set<RoomKind>(['loft', 'roof', 'tea', 'beach']);
@@ -69,7 +69,6 @@ export async function deleteGroupRoomInstance(io: Server, shardId: string, group
         sock.data.roomId = undefined;
         sock.data.baseRoomId = undefined;
         sock.data.groupId = undefined;
-        sock.data.motionProtocol = undefined;
       }
     }
   }
@@ -220,7 +219,6 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     socket.data.roomId = undefined;
     socket.data.baseRoomId = undefined;
     socket.data.groupId = undefined;
-    socket.data.motionProtocol = undefined;
     peers.delete(socket.id);
 
     if (shardId) {
@@ -289,10 +287,9 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
       let ownerId: string | undefined = roomData.creatorId;
       groupRoomOwners.set(shardId, ownerId);
 
-      const peer: RoomPeer = { userId, name, avatar: input.avatar as AvatarBody, motionId: 0, x: 0, z: 0, yaw: 0, pose: 'idle' };
+      const peer: RoomPeer = { userId, name, avatar: input.avatar as AvatarBody, x: 0, z: 0, yaw: 0, pose: 'idle' };
       socket.data.roomId = shardId;
       socket.data.baseRoomId = parsed.baseRoom;
-      socket.data.motionProtocol = 2;
       socket.join(channel(shardId));
       peers.set(socket.id, peer);
 
@@ -322,7 +319,6 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
           shardIndex,
           totalInShard: existingPeers.length + 1,
           ownerId,
-          motionProtocol: socket.data.motionProtocol,
         },
       });
 
@@ -381,11 +377,10 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
       shardIndex = resolved.shardIndex;
     }
 
-    const peer: RoomPeer = { userId, name, avatar: input.avatar as AvatarBody, motionId: 0, x: 0, z: 0, yaw: 0, pose: 'idle' };
+    const peer: RoomPeer = { userId, name, avatar: input.avatar as AvatarBody, x: 0, z: 0, yaw: 0, pose: 'idle' };
 
     socket.data.roomId = shardId;
     socket.data.baseRoomId = parsed.baseRoom;
-    socket.data.motionProtocol = 2;
     socket.join(channel(shardId));
     peers.set(socket.id, peer);
 
@@ -416,7 +411,6 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
         shardIndex,
         totalInShard: existingPeers.length + 1,
         ownerId,
-        motionProtocol: 2,
       },
     });
 
@@ -439,7 +433,7 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     const clampedY = Number.isFinite(y) ? Math.max(0, Math.min(5, y)) : 0;
     const pose = input.pose && poses.has(input.pose) ? input.pose : (peer.pose ?? 'idle');
     const poseChanged = pose !== peer.pose;
-    const time = typeof input.time === 'number' && Number.isFinite(input.time) ? input.time : Date.now();
+    const serverTime = Date.now();
 
     peer.x = x;
     peer.y = clampedY;
@@ -454,7 +448,7 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
       z,
       r,
       pose,
-      time,
+      time: serverTime,
     };
 
     if (poseChanged) {
@@ -602,7 +596,6 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
           sock.data.roomId = undefined;
           sock.data.baseRoomId = undefined;
           sock.data.groupId = undefined;
-          sock.data.motionProtocol = undefined;
         }
       }
     }
