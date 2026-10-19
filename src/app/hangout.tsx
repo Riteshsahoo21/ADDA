@@ -47,6 +47,8 @@ export default function HangoutScreen() {
   const [chatError, setChatError] = useState('');
   const [messages, setMessages] = useState<RoomMessage[]>([]);
   const [peers, setPeers] = useState<RoomPeer[]>([]);
+  const [shardId, setShardId] = useState<string>('');
+  const [shardIndex, setShardIndex] = useState<number>(1);
   const mediaRef = useRef<GroupMedia | null>(null);
   const micMutedRef = useRef(false);
   const speakerMutedRef = useRef(false);
@@ -111,6 +113,13 @@ export default function HangoutScreen() {
         if (error || !result?.ok || !result.value) { setChatError(result?.error || 'Could not join room chat.'); return; }
         setPeers(result.value.peers);
         setMessages(result.value.messages);
+        if (result.value.shardId) setShardId(result.value.shardId);
+        if (result.value.shardIndex) {
+          setShardIndex(result.value.shardIndex);
+          const label = roomKind === 'beach' ? 'Goa Beach' : roomKind === 'tea' ? 'Tea Party' : roomKind === 'roof' ? 'Rooftop' : 'Loft 16';
+          const count = result.value.totalInShard ?? (result.value.peers.length + 1);
+          showRouteToast(`🌴 ${label} #${result.value.shardIndex} • ${count} online`);
+        }
         if (result.value.radio) {
           MusicService.setRadioEnabled(result.value.radio.enabled, true);
           MusicService.playRadioTrack(result.value.radio.trackIndex);
@@ -233,7 +242,7 @@ export default function HangoutScreen() {
     media.setPlaybackMuted(speakerMutedRef.current);
     for (const userId of mutedPeersRef.current) media.setUserMuted(userId, true);
     mediaRef.current = media;
-    void media.join({ kind: 'room', id: roomKind }, false, positionRef.current).then(() => {
+    void media.join({ kind: 'room', id: shardId || roomKind }, false, positionRef.current).then(() => {
       if (!active) return;
       media.setPosition(positionRef.current.x, positionRef.current.z);
       setVoiceStatus('Nearby voice on');

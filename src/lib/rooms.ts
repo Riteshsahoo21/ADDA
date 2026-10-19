@@ -6,7 +6,14 @@ export type RoomMotionSnapshot = { x: number; y: number; z: number; yaw: number;
 export type RoomPeer = { userId: string; name: string; avatar: AvatarBody; x: number; y?: number; z: number; yaw: number; pose?: RoomPose };
 export type RoomMessage = { id: string; room: string; userId: string; name: string; body: string; createdAt: number };
 export type RoomRadioSync = { enabled: boolean; trackIndex: number; seekSeconds?: number; lastUpdated?: number };
-export type RoomJoin = { peers: RoomPeer[]; messages: RoomMessage[]; radio?: RoomRadioSync };
+export type RoomJoin = {
+  peers: RoomPeer[];
+  messages: RoomMessage[];
+  radio?: RoomRadioSync;
+  shardId?: string;
+  shardIndex?: number;
+  totalInShard?: number;
+};
 
 export async function sendRoomMessage(body: string): Promise<void> {
   const socket = await getRealtimeSocket();
