@@ -12,7 +12,7 @@ import { getRealtimeSocket, type TypingEvent } from '@/lib/realtime';
 import { TypingDots } from '@/components/ui/TypingDots';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { type AvatarBody, AVATAR_NAMES, AVATAR_TAGLINES } from '@/three/player/avatarStyle';
-import { initEncryptedChat, localPreviews, onChatChanged, previewBody, formatChatPreview, setCachedProfile, getCachedProfile } from '@/lib/encrypted-chat';
+import { initEncryptedChat, localPreviews, onChatChanged, previewBody, formatChatPreview, setCachedProfile, getCachedProfile, sendEncryptedMessage, type RoomCardPayload } from '@/lib/encrypted-chat';
 import { getCachedSocialBundle, initSocialCache, setCachedSocialBundle, updateCachedContacts, updateCachedGroups, updateCachedFriendRequests } from '@/lib/social-cache';
 import { createRoomServer, fetchPublicRooms } from '@/lib/rooms';
 
@@ -511,6 +511,56 @@ export default function HomeScreen() {
         groupInvites: selectedGroupInvites.length > 0 ? selectedGroupInvites : undefined,
         userInvites: selectedContactInvites.length > 0 ? selectedContactInvites : undefined,
       });
+
+      // Post invitation cards to invited group chats
+      for (const gId of selectedGroupInvites) {
+        const groupObj = groups.find(g => g.id === gId);
+        const cardPayload: RoomCardPayload = {
+          type: 'room_card',
+          roomId: created.id,
+          groupId: gId,
+          groupName: groupObj?.name || 'Group',
+          roomKind: created.roomKind,
+          creatorId: created.creatorId,
+          creatorName: username || 'Host',
+          createdAt: new Date().toISOString(),
+          roomName: created.name,
+          isPrivate: created.isPrivate,
+        };
+        void sendEncryptedMessage(
+          { kind: 'group', id: gId },
+          `__adda_room_card__:${JSON.stringify(cardPayload)}`,
+          username || 'Host',
+          undefined,
+          undefined,
+          undefined,
+          `🌴 ${username || 'Host'} invited you: ${created.name}`
+        ).catch(err => console.warn('[ADDA] Error posting group room card:', err));
+      }
+
+      // Post invitation cards to invited contact DM chats
+      for (const cId of selectedContactInvites) {
+        const cardPayload: RoomCardPayload = {
+          type: 'room_card',
+          roomId: created.id,
+          roomKind: created.roomKind,
+          creatorId: created.creatorId,
+          creatorName: username || 'Host',
+          createdAt: new Date().toISOString(),
+          roomName: created.name,
+          isPrivate: created.isPrivate,
+        };
+        void sendEncryptedMessage(
+          { kind: 'direct', id: cId },
+          `__adda_room_card__:${JSON.stringify(cardPayload)}`,
+          username || 'Host',
+          undefined,
+          undefined,
+          undefined,
+          `🌴 ${username || 'Host'} invited you: ${created.name}`
+        ).catch(err => console.warn('[ADDA] Error posting DM room card:', err));
+      }
+
       setCreateModalOpen(false);
       router.push({
         pathname: '/lobby',

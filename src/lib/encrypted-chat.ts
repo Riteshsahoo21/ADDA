@@ -88,12 +88,14 @@ export function mediaFromBody(body: string): EncryptedMedia | null {
 export type RoomCardPayload = {
   type: 'room_card';
   roomId: string;
-  groupId: string;
-  groupName: string;
+  groupId?: string;
+  groupName?: string;
   roomKind: string;
   creatorId: string;
   creatorName: string;
   createdAt: string;
+  roomName?: string;
+  isPrivate?: boolean;
 };
 
 export function roomCardFromBody(body: string): RoomCardPayload | null {
@@ -116,7 +118,7 @@ export function previewBody(body: string, isMine?: boolean): string {
       : roomCard.roomKind === 'tea' ? 'Tea Party'
       : roomCard.roomKind === 'roof' ? 'School Rooftop'
       : 'Loft 16';
-    return `🌴 ${roomCard.creatorName} started a room: ${roomTitle}`;
+    return `🌴 ${roomCard.creatorName} invited you: ${roomCard.roomName || roomTitle}`;
   }
   const media = mediaFromBody(body);
   return media ? (media.mediaKind === 'image' ? '📷 Photo' : '🎥 Video') : body;

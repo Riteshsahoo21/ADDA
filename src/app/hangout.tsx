@@ -18,7 +18,7 @@ import { deleteCurrentRoom, inviteGroupToRoom, inviteToRoom, kickRoomPeer, sendR
 import { decodeMotionBatch, encodeMotion, isNewerSequence } from '@/lib/room-motion-codec';
 import { MusicHubModal } from '@/components/music/MusicHubModal';
 import { MusicService } from '@/audio/MusicService';
-import { getActiveUserId } from '@/lib/encrypted-chat';
+import { getActiveUserId, sendEncryptedMessage, type RoomCardPayload } from '@/lib/encrypted-chat';
 import { socialApi, type ChatGroup, type GroupDetails, type GroupMember, type PublicProfile, type SocialBundle } from '@/lib/social-api';
 
 const avatarBodies = new Set(['man', 'uncle', 'photo_boy', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman']);
@@ -155,6 +155,28 @@ export default function HangoutScreen() {
       await inviteToRoom([memberId]);
       setInvitedIds(prev => new Set([...prev, memberId]));
       showRouteToast(`Invited ${memberName}!`);
+
+      // Post encrypted room card into DM chat with member
+      const effectiveRoomId = params.roomId || (shardId.startsWith('room:') ? shardId.split(':')[1] : '');
+      const cardPayload: RoomCardPayload = {
+        type: 'room_card',
+        roomId: effectiveRoomId,
+        roomKind,
+        creatorId: roomOwnerId || currentUserId || '',
+        creatorName: username || 'Host',
+        createdAt: new Date().toISOString(),
+        roomName: params.roomName || 'Hangout',
+        isPrivate: params.isPrivate === 'true',
+      };
+      void sendEncryptedMessage(
+        { kind: 'direct', id: memberId },
+        `__adda_room_card__:${JSON.stringify(cardPayload)}`,
+        username || 'Host',
+        undefined,
+        undefined,
+        undefined,
+        `🌴 ${username || 'Host'} invited you: ${cardPayload.roomName}`
+      ).catch(err => console.warn('[ADDA] Post DM invite card error:', err));
     } catch (err: any) {
       Alert.alert('Invite Failed', err.message || 'Could not send invitation.');
     } finally {
@@ -169,6 +191,30 @@ export default function HangoutScreen() {
       const count = await inviteGroupToRoom(targetGroupId);
       setInvitedGroupIds(prev => new Set([...prev, targetGroupId]));
       showRouteToast(`Invited ${count} member${count === 1 ? '' : 's'} from ${groupName}!`);
+
+      // Post encrypted room card into group chat
+      const effectiveRoomId = params.roomId || (shardId.startsWith('room:') ? shardId.split(':')[1] : '');
+      const cardPayload: RoomCardPayload = {
+        type: 'room_card',
+        roomId: effectiveRoomId,
+        groupId: targetGroupId,
+        groupName,
+        roomKind,
+        creatorId: roomOwnerId || currentUserId || '',
+        creatorName: username || 'Host',
+        createdAt: new Date().toISOString(),
+        roomName: params.roomName || `${groupName} Hangout`,
+        isPrivate: params.isPrivate === 'true',
+      };
+      void sendEncryptedMessage(
+        { kind: 'group', id: targetGroupId },
+        `__adda_room_card__:${JSON.stringify(cardPayload)}`,
+        username || 'Host',
+        undefined,
+        undefined,
+        undefined,
+        `🌴 ${username || 'Host'} invited you: ${cardPayload.roomName}`
+      ).catch(err => console.warn('[ADDA] Post group invite card error:', err));
     } catch (err: any) {
       Alert.alert('Invite Failed', err.message || 'Could not send group invitation.');
     } finally {

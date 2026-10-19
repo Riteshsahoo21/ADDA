@@ -354,34 +354,80 @@ export default function ConversationScreen() {
     if (!target?.id || creatingRoom) return;
     setCreatingRoom(true);
     try {
-      const res = await socialApi<{ ok: boolean; room: any }>(`/groups/${target.id}/rooms`, 'POST', { roomKind: theme });
-      const cardPayload: RoomCardPayload = {
-        type: 'room_card',
-        roomId: res.room.roomId,
-        groupId: target.id,
-        groupName: activeTitle,
-        roomKind: theme,
-        creatorId: selfId,
-        creatorName: selfName || 'Member',
-        createdAt: new Date().toISOString(),
-      };
-      await sendEncryptedMessage(
-        target,
-        `__adda_room_card__:${JSON.stringify(cardPayload)}`,
-        selfName || 'Member',
-        Crypto.randomUUID()
-      );
-      setShowRoomModal(false);
-      router.push({
-        pathname: '/lobby',
-        params: {
-          room: theme,
-          groupId: target.id,
+      if (kind === 'group') {
+        const res = await socialApi<{ ok: boolean; room: any }>(`/groups/${target.id}/rooms`, 'POST', { roomKind: theme });
+        const cardPayload: RoomCardPayload = {
+          type: 'room_card',
           roomId: res.room.roomId,
-          roomOwnerId: selfId,
-          groupName: name,
-        },
-      } as unknown as Href);
+          groupId: target.id,
+          groupName: activeTitle,
+          roomKind: theme,
+          creatorId: selfId,
+          creatorName: selfName || 'Host',
+          createdAt: new Date().toISOString(),
+          roomName: `${activeTitle} Hangout`,
+          isPrivate: true,
+        };
+        await sendEncryptedMessage(
+          target,
+          `__adda_room_card__:${JSON.stringify(cardPayload)}`,
+          selfName || 'Host',
+          Crypto.randomUUID(),
+          undefined,
+          undefined,
+          `🌴 ${selfName || 'Host'} invited you: ${cardPayload.roomName}`
+        );
+        setShowRoomModal(false);
+        router.push({
+          pathname: '/lobby',
+          params: {
+            room: theme,
+            groupId: target.id,
+            roomId: res.room.roomId,
+            roomOwnerId: selfId,
+            roomName: `${activeTitle} Hangout`,
+            isPrivate: 'true',
+          },
+        } as unknown as Href);
+      } else {
+        const { createRoomServer } = await import('@/lib/rooms');
+        const res = await createRoomServer({
+          roomKind: theme,
+          isPrivate: true,
+          name: `Hangout with ${activeTitle}`,
+          userInvites: [target.id],
+        });
+        const cardPayload: RoomCardPayload = {
+          type: 'room_card',
+          roomId: res.id,
+          roomKind: theme,
+          creatorId: selfId,
+          creatorName: selfName || 'Host',
+          createdAt: new Date().toISOString(),
+          roomName: res.name,
+          isPrivate: true,
+        };
+        await sendEncryptedMessage(
+          target,
+          `__adda_room_card__:${JSON.stringify(cardPayload)}`,
+          selfName || 'Host',
+          Crypto.randomUUID(),
+          undefined,
+          undefined,
+          `🌴 ${selfName || 'Host'} invited you: ${res.name}`
+        );
+        setShowRoomModal(false);
+        router.push({
+          pathname: '/lobby',
+          params: {
+            room: theme,
+            roomId: res.id,
+            roomOwnerId: selfId,
+            roomName: res.name,
+            isPrivate: 'true',
+          },
+        } as unknown as Href);
+      }
     } catch (err: any) {
       Alert.alert('Hangout', err?.message || 'Could not create room.');
     } finally {
@@ -1084,15 +1130,13 @@ export default function ConversationScreen() {
           )}
 
           <View style={styles.headerRightActions}>
-            {kind === 'group' && (
-              <Pressable
-                accessibilityLabel="Group Hangout Room"
-                onPress={() => setShowRoomModal(true)}
-                style={[styles.callAction, activeGroupRoom && styles.callActionActiveRoom]}
-              >
-                <DoorOpen size={21} color={activeGroupRoom ? '#25D366' : colors.primary} />
-              </Pressable>
-            )}
+            <Pressable
+              accessibilityLabel="Hangout Room"
+              onPress={() => setShowRoomModal(true)}
+              style={[styles.callAction, (activeGroupRoom || directRoomInvite) && styles.callActionActiveRoom]}
+            >
+              <DoorOpen size={21} color={(activeGroupRoom || directRoomInvite) ? '#25D366' : colors.primary} />
+            </Pressable>
             <Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}>
               <Video size={22} color={colors.primary} />
             </Pressable>
@@ -1280,10 +1324,11 @@ export default function ConversationScreen() {
                           pathname: '/lobby',
                           params: {
                             room: roomCard.roomKind,
-                            groupId: roomCard.groupId,
+                            groupId: roomCard.groupId || '',
                             roomId: roomCard.roomId,
                             roomOwnerId: roomCard.creatorId,
-                            groupName: name,
+                            roomName: roomCard.roomName || name || 'Hangout',
+                            isPrivate: String(roomCard.isPrivate ?? false),
                           },
                         } as unknown as Href);
                       }}
@@ -1494,29 +1539,33 @@ export default function ConversationScreen() {
           <Pressable style={styles.scrim} onPress={() => setShowRoomModal(false)} />
           <View style={styles.hangoutModalSheet}>
             <View style={styles.hangoutModalTop}>
-              <Text style={styles.hangoutModalTitle}>Group Hangout</Text>
+              <Text style={styles.hangoutModalTitle}>{kind === 'group' ? 'Group Hangout' : '3D Hangout'}</Text>
               <Pressable onPress={() => setShowRoomModal(false)} accessibilityLabel="Close">
                 <X size={22} color={colors.text} />
               </Pressable>
             </View>
 
-            {activeGroupRoom ? (
+            {(activeGroupRoom || directRoomInvite) ? (
               <View style={styles.activeRoomBanner}>
                 <Text style={styles.activeRoomBannerTitle}>🟢 Live Hangout in Progress</Text>
                 <Text style={styles.activeRoomBannerText}>
-                  {activeGroupRoom.creatorName} started {activeGroupRoom.roomKind === 'beach' ? 'Goa Beach' : activeGroupRoom.roomKind === 'tea' ? 'Tea Party' : activeGroupRoom.roomKind === 'roof' ? 'School Rooftop' : 'Loft 16'} for this group.
+                  {activeGroupRoom
+                    ? `${activeGroupRoom.creatorName} started ${activeGroupRoom.name || 'a room'} for this group.`
+                    : `${directRoomInvite?.inviterName} invited you to ${directRoomInvite?.roomName || 'Hangout'}.`}
                 </Text>
                 <Pressable
                   onPress={() => {
+                    const item = activeGroupRoom || directRoomInvite!;
                     setShowRoomModal(false);
                     router.push({
                       pathname: '/lobby',
                       params: {
-                        room: activeGroupRoom.roomKind,
-                        groupId: target?.id,
-                        roomId: activeGroupRoom.id,
-                        roomOwnerId: activeGroupRoom.creatorId,
-                        groupName: name,
+                        room: item.roomKind,
+                        groupId: (item as any).groupId || '',
+                        roomId: (item as any).roomId || (item as any).id,
+                        roomOwnerId: (item as any).creatorId || (item as any).ownerId || (item as any).inviterId,
+                        roomName: (item as any).name || (item as any).roomName || 'Hangout',
+                        isPrivate: String((item as any).isPrivate ?? true),
                       },
                     } as unknown as Href);
                   }}
@@ -1529,7 +1578,7 @@ export default function ConversationScreen() {
             ) : null}
 
             <Text style={styles.hangoutModalSub}>
-              {activeGroupRoom ? 'Or choose a scene to start a new room:' : 'Choose a scene to hang out with this group:'}
+              {(activeGroupRoom || directRoomInvite) ? 'Or choose a scene to start a new room:' : `Choose a scene to launch a room with ${activeTitle}:`}
             </Text>
 
             <ScrollView style={{ maxHeight: 280 }}>
@@ -1875,10 +1924,10 @@ function RoomCardMessage({
         </View>
         <Text style={styles.roomCardEmoji}>{info.emoji}</Text>
       </View>
-      <Text style={[styles.roomCardTitle, isLight && styles.roomCardTitleLight]}>{info.name}</Text>
+      <Text style={[styles.roomCardTitle, isLight && styles.roomCardTitleLight]}>{card.roomName || info.name}</Text>
       <Text style={[styles.roomCardDesc, isLight && styles.roomCardDescLight]}>{info.desc}</Text>
       <Text style={[styles.roomCardAuthor, isLight && styles.roomCardAuthorLight]}>
-        {isMine ? 'Created by you • Group members only' : `Created by ${card.creatorName} • Group members only`}
+        {isMine ? `Hosted by you • ${card.isPrivate ? 'Private' : 'Public'} Server` : `Hosted by ${card.creatorName} • ${card.isPrivate ? 'Private' : 'Public'} Server`}
       </Text>
       <Pressable onPress={onJoin} style={styles.roomCardJoinButton}>
         <DoorOpen size={18} color="#FFFFFF" />
