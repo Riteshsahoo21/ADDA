@@ -120,6 +120,7 @@ export async function sendRoomInvitePush(
     roomId: string;
     ownerId: string;
     roomName?: string;
+    isPrivate?: boolean;
   }
 ) {
   if (!enabled || !userIds.length) return;
@@ -155,6 +156,7 @@ export async function sendRoomInvitePush(
         groupName: invite.groupName || '',
         inviterName: invite.inviterName,
         roomName: invite.roomName || '',
+        isPrivate: String(Boolean(invite.isPrivate)),
       },
       android: {
         priority: 'high' as const,
@@ -167,6 +169,7 @@ export async function sendRoomInvitePush(
     }));
 
     const sent = await getMessaging().sendEach(messages);
+    console.log(`[ADDA Push] Dispatched room invite push to ${sent.responses.filter(r => r.success).length}/${batch.length} devices for room ${invite.roomId}`);
     const stale: string[] = [];
     sent.responses.forEach((res, index) => {
       if (!res.success && ['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(res.error?.code ?? '')) {

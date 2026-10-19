@@ -587,6 +587,49 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
 
   // Helper for sending invitations to a list of user IDs
   async function sendInvitesToList(shardId: string, targetUserIds: string[]): Promise<number> {
+    if (shardId.startsWith('room:')) {
+      const roomId = shardId.split(':')[1];
+      const roomRecord = await pool.query<{ id: string; creatorId: string; roomKind: string; name: string; isPrivate: boolean }>(
+        'SELECT id, "creatorId", "roomKind", name, "isPrivate" FROM "group_room" WHERE id = $1 AND "isActive" = true',
+        [roomId]
+      );
+      if (!roomRecord.rows.length) return 0;
+      const r = roomRecord.rows[0];
+
+      for (const targetId of targetUserIds) {
+        const inviteId = randomUUID();
+        await pool.query(
+          `INSERT INTO "room_invite" (id, "roomId", "inviteeId", "inviterId", "roomKind", "roomName", "isPrivate", status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+           ON CONFLICT ("roomId", "inviteeId") DO UPDATE SET status = 'pending', "updatedAt" = now()`,
+          [inviteId, roomId, targetId, userId, r.roomKind, r.name, r.isPrivate]
+        );
+
+        io.to(`user:${targetId}`).emit('room:invitation', {
+          id: inviteId,
+          roomId,
+          roomName: r.name,
+          inviterId: userId,
+          inviterName: name,
+          roomKind: r.roomKind,
+          ownerId: r.creatorId,
+          isPrivate: r.isPrivate,
+          createdAt: new Date().toISOString(),
+        });
+      }
+
+      void sendRoomInvitePush(targetUserIds, {
+        inviterName: name,
+        roomKind: r.roomKind,
+        roomId,
+        ownerId: r.creatorId,
+        roomName: r.name,
+        isPrivate: r.isPrivate,
+      }).catch(err => console.warn('[ADDA] Push room invite error:', err));
+
+      return targetUserIds.length;
+    }
+
     const parts = shardId.split(':');
     const groupId = parts[1];
     const roomKind = (parts[2] || socket.data.baseRoomId || 'loft') as RoomKind;
@@ -612,7 +655,6 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
       ).catch(() => {});
     }
 
-    const offlineUserIds: string[] = [];
     for (const targetId of targetUserIds) {
       const inviteId = randomUUID();
       await pool.query(
@@ -622,34 +664,27 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
         [inviteId, rId, groupId, userId, targetId, roomKind]
       );
 
-      const userSockets = io.sockets.adapter.rooms.get(`user:${targetId}`);
-      if (userSockets && userSockets.size > 0) {
-        io.to(`user:${targetId}`).emit('room:invitation', {
-          id: inviteId,
-          roomId: rId,
-          groupId,
-          groupName,
-          inviterId: userId,
-          inviterName: name,
-          roomKind,
-          ownerId: roomOwnerId,
-          createdAt: new Date().toISOString(),
-        });
-      } else {
-        offlineUserIds.push(targetId);
-      }
+      io.to(`user:${targetId}`).emit('room:invitation', {
+        id: inviteId,
+        roomId: rId,
+        groupId,
+        groupName,
+        inviterId: userId,
+        inviterName: name,
+        roomKind,
+        ownerId: roomOwnerId,
+        createdAt: new Date().toISOString(),
+      });
     }
 
-    if (offlineUserIds.length > 0) {
-      void sendRoomInvitePush(offlineUserIds, {
-        inviterName: name,
-        groupName,
-        roomKind,
-        groupId,
-        roomId: rId,
-        ownerId: roomOwnerId,
-      }).catch(err => console.warn('[ADDA] Push room invite error:', err));
-    }
+    void sendRoomInvitePush(targetUserIds, {
+      inviterName: name,
+      groupName,
+      roomKind,
+      groupId,
+      roomId: rId,
+      ownerId: roomOwnerId,
+    }).catch(err => console.warn('[ADDA] Push room invite error:', err));
 
     return targetUserIds.length;
   }
@@ -657,8 +692,8 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
   // INVITE SYSTEM: Invite players (group members or friends) to current room
   socket.on('room:invite', async (data: { inviteeIds: string[] }, ack?: Ack<{ invitedCount: number }>) => {
     const shardId = socket.data.roomId as string | undefined;
-    if (!shardId || !shardId.startsWith('group:')) {
-      ack?.({ ok: false, error: 'Invites are only available in group rooms.' });
+    if (!shardId || (!shardId.startsWith('group:') && !shardId.startsWith('room:'))) {
+      ack?.({ ok: false, error: 'Invites are only available in active room instances.' });
       return;
     }
 
@@ -687,8 +722,8 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
   // INVITE SYSTEM: Invite an entire other group to the room
   socket.on('room:invite-group', async (data: { targetGroupId: string }, ack?: Ack<{ invitedCount: number }>) => {
     const shardId = socket.data.roomId as string | undefined;
-    if (!shardId || !shardId.startsWith('group:')) {
-      ack?.({ ok: false, error: 'Invites are only available in group rooms.' });
+    if (!shardId || (!shardId.startsWith('group:') && !shardId.startsWith('room:'))) {
+      ack?.({ ok: false, error: 'Invites are only available in active room instances.' });
       return;
     }
     const targetGroupId = data?.targetGroupId;
@@ -711,6 +746,53 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     const memberIds = otherMembers.rows.map(r => r.userId);
     if (!memberIds.length) {
       ack?.({ ok: false, error: 'No other members in that group to invite.' });
+      return;
+    }
+
+    if (shardId.startsWith('room:')) {
+      const roomId = shardId.split(':')[1];
+      const roomRecord = await pool.query<{ id: string; creatorId: string; roomKind: string; name: string; isPrivate: boolean }>(
+        'SELECT id, "creatorId", "roomKind", name, "isPrivate" FROM "group_room" WHERE id = $1 AND "isActive" = true',
+        [roomId]
+      );
+      if (!roomRecord.rows.length) {
+        ack?.({ ok: false, error: 'Active room not found.' });
+        return;
+      }
+      const r = roomRecord.rows[0];
+      const inviteId = randomUUID();
+      await pool.query(
+        `INSERT INTO "room_invite" (id, "roomId", "groupId", "inviterId", "roomKind", "roomName", "isPrivate", status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')`,
+        [inviteId, roomId, targetGroupId, userId, r.roomKind, r.name, r.isPrivate]
+      );
+
+      const groupRes = await pool.query<{ name: string }>('SELECT name FROM "chat_group" WHERE id = $1', [targetGroupId]);
+      const gName = groupRes.rows[0]?.name || 'Group';
+
+      publishGroupRoomUpdate(memberIds, {
+        roomId,
+        roomKind: r.roomKind,
+        name: r.name,
+        isPrivate: r.isPrivate,
+        creatorId: r.creatorId,
+        creatorName: name,
+        groupId: targetGroupId,
+        groupName: gName,
+      });
+
+      void sendRoomInvitePush(memberIds, {
+        inviterName: name,
+        groupName: gName,
+        roomKind: r.roomKind,
+        groupId: targetGroupId,
+        roomId,
+        ownerId: r.creatorId,
+        roomName: r.name,
+        isPrivate: r.isPrivate,
+      });
+
+      ack?.({ ok: true, value: { invitedCount: memberIds.length } });
       return;
     }
 

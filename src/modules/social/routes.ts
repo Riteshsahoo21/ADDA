@@ -857,54 +857,57 @@ socialRoutes.post('/rooms', run(async (request, response) => {
   const groupInvites = Array.isArray(request.body?.groupInvites) ? (request.body.groupInvites as string[]) : [];
   const userInvites = Array.isArray(request.body?.userInvites) ? (request.body.userInvites as string[]) : [];
 
-  if (isPrivate) {
-    for (const gId of groupInvites) {
-      if (typeof gId !== 'string') continue;
-      const memCheck = await pool.query('SELECT 1 FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2', [gId, userId]);
-      if (!memCheck.rows.length) continue;
+  for (const gId of groupInvites) {
+    if (typeof gId !== 'string') continue;
+    const memCheck = await pool.query('SELECT 1 FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2', [gId, userId]);
+    if (!memCheck.rows.length) continue;
 
-      const groupRes = await pool.query<{ name: string }>('SELECT name FROM "chat_group" WHERE id = $1', [gId]);
-      const gName = groupRes.rows[0]?.name || 'Group';
+    const groupRes = await pool.query<{ name: string }>('SELECT name FROM "chat_group" WHERE id = $1', [gId]);
+    const gName = groupRes.rows[0]?.name || 'Group';
 
-      await pool.query(
-        `INSERT INTO "room_invite" (id, "roomId", "groupId", "inviterId", "roomKind", "roomName", "isPrivate", status)
-         VALUES ($1, $2, $3, $4, $5, $6, true, 'pending')`,
-        [randomUUID(), roomId, gId, userId, roomKind, name]
-      );
+    await pool.query(
+      `INSERT INTO "room_invite" (id, "roomId", "groupId", "inviterId", "roomKind", "roomName", "isPrivate", status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')`,
+      [randomUUID(), roomId, gId, userId, roomKind, name, isPrivate]
+    );
 
-      const memsRes = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" != $2', [gId, userId]);
-      const memIds = memsRes.rows.map(r => r.userId);
-      if (memIds.length) {
-        publishGroupRoomUpdate(memIds, { roomId, roomKind, name, isPrivate: true, creatorId: userId, creatorName, groupId: gId, groupName: gName });
-        void sendRoomInvitePush(memIds, {
-          inviterName: creatorName,
-          groupName: gName,
-          roomKind,
-          groupId: gId,
-          roomId,
-          ownerId: userId,
-          roomName: name,
-        });
-      }
-    }
-
-    for (const targetUserId of userInvites) {
-      if (typeof targetUserId !== 'string' || targetUserId === userId) continue;
-      await pool.query(
-        `INSERT INTO "room_invite" (id, "roomId", "inviteeId", "inviterId", "roomKind", "roomName", "isPrivate", status)
-         VALUES ($1, $2, $3, $4, $5, $6, true, 'pending')`,
-        [randomUUID(), roomId, targetUserId, userId, roomKind, name]
-      );
-      publishGroupRoomUpdate([targetUserId], { roomId, roomKind, name, isPrivate: true, creatorId: userId, creatorName });
-      void sendRoomInvitePush([targetUserId], {
+    const memsRes = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" != $2', [gId, userId]);
+    const memIds = memsRes.rows.map(r => r.userId);
+    if (memIds.length) {
+      publishGroupRoomUpdate(memIds, { roomId, roomKind, name, isPrivate, creatorId: userId, creatorName, groupId: gId, groupName: gName });
+      void sendRoomInvitePush(memIds, {
         inviterName: creatorName,
+        groupName: gName,
         roomKind,
+        groupId: gId,
         roomId,
         ownerId: userId,
         roomName: name,
+        isPrivate,
       });
     }
-  } else {
+  }
+
+  for (const targetUserId of userInvites) {
+    if (typeof targetUserId !== 'string' || targetUserId === userId) continue;
+    await pool.query(
+      `INSERT INTO "room_invite" (id, "roomId", "inviteeId", "inviterId", "roomKind", "roomName", "isPrivate", status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+       ON CONFLICT ("roomId", "inviteeId") DO UPDATE SET status = 'pending', "updatedAt" = now()`,
+      [randomUUID(), roomId, targetUserId, userId, roomKind, name, isPrivate]
+    );
+    publishGroupRoomUpdate([targetUserId], { roomId, roomKind, name, isPrivate, creatorId: userId, creatorName });
+    void sendRoomInvitePush([targetUserId], {
+      inviterName: creatorName,
+      roomKind,
+      roomId,
+      ownerId: userId,
+      roomName: name,
+      isPrivate,
+    });
+  }
+
+  if (!isPrivate) {
     publishPublicRoomsUpdate();
   }
 
@@ -957,8 +960,8 @@ socialRoutes.post('/rooms/:id/invite', run(async (request, response) => {
 
     await pool.query(
       `INSERT INTO "room_invite" (id, "roomId", "groupId", "inviterId", "roomKind", "roomName", "isPrivate", status)
-       VALUES ($1, $2, $3, $4, $5, $6, true, 'pending')`,
-      [randomUUID(), roomId, gId, userId, room.roomKind, room.name]
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')`,
+      [randomUUID(), roomId, gId, userId, room.roomKind, room.name, room.isPrivate]
     );
 
     const memsRes = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" != $2', [gId, userId]);
@@ -973,6 +976,7 @@ socialRoutes.post('/rooms/:id/invite', run(async (request, response) => {
         roomId,
         ownerId: userId,
         roomName: room.name,
+        isPrivate: room.isPrivate,
       });
     }
   }
@@ -981,8 +985,9 @@ socialRoutes.post('/rooms/:id/invite', run(async (request, response) => {
     if (typeof targetUserId !== 'string' || targetUserId === userId) continue;
     await pool.query(
       `INSERT INTO "room_invite" (id, "roomId", "inviteeId", "inviterId", "roomKind", "roomName", "isPrivate", status)
-       VALUES ($1, $2, $3, $4, $5, $6, true, 'pending')`,
-      [randomUUID(), roomId, targetUserId, userId, room.roomKind, room.name]
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+       ON CONFLICT ("roomId", "inviteeId") DO UPDATE SET status = 'pending', "updatedAt" = now()`,
+      [randomUUID(), roomId, targetUserId, userId, room.roomKind, room.name, room.isPrivate]
     );
     publishGroupRoomUpdate([targetUserId], { roomId, roomKind: room.roomKind, name: room.name, isPrivate: room.isPrivate, creatorId: userId, creatorName });
     void sendRoomInvitePush([targetUserId], {
@@ -991,6 +996,7 @@ socialRoutes.post('/rooms/:id/invite', run(async (request, response) => {
       roomId,
       ownerId: userId,
       roomName: room.name,
+      isPrivate: room.isPrivate,
     });
   }
 

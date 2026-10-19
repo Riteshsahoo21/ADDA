@@ -46,6 +46,7 @@ const KNOWN_BASE_ROOMS = new Set(['loft', 'roof', 'tea', 'beach']);
 function isKnownRoom(id: string): boolean {
   if (KNOWN_BASE_ROOMS.has(id)) return true;
   if (id.startsWith('group:')) return true;
+  if (id.startsWith('room:')) return true;
   const base = id.split(':')[0];
   return KNOWN_BASE_ROOMS.has(base);
 }
@@ -319,10 +320,11 @@ export function attachMediaHandlers(io: Server, socket: Socket) {
       if (!validKey(value)) throw new Error('Invalid media room.');
       if (value.kind === 'call' && !canJoinCallMedia(value.id, selfId)) throw new Error('Call unavailable.');
 
-      // Auto-bind 3D rooms to the user's specific room shard (e.g. 'beach:1' instead of generic 'beach')
+      // Auto-bind 3D rooms to the user's specific room shard (e.g. 'room:uuid', 'group:groupId:kind', or 'beach:1')
       const rawId = value.id;
-      const effectiveId = (value.kind === 'room' && typeof socket.data.roomId === 'string' && socket.data.roomId.startsWith(rawId))
-        ? socket.data.roomId
+      const socketRoomId = socket.data.roomId as string | undefined;
+      const effectiveId = (value.kind === 'room' && typeof socketRoomId === 'string' && (socketRoomId === rawId || socketRoomId.startsWith(rawId) || rawId.startsWith('room:') || rawId.startsWith('group:')))
+        ? (rawId.startsWith('room:') || rawId.startsWith('group:') ? rawId : socketRoomId)
         : rawId;
 
       const key = sessionKey({ kind: value.kind, id: effectiveId });
