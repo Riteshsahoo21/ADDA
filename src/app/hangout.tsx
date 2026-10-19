@@ -33,6 +33,8 @@ export default function HangoutScreen() {
     roomId?: string;
     roomOwnerId?: string;
     groupName?: string;
+    roomName?: string;
+    isPrivate?: string;
   }>();
   const [roomKind, setRoomKind] = useState<RoomKind>(params.room === 'beach' ? 'beach' : params.room === 'tea' ? 'tea' : params.room === 'roof' ? 'roof' : 'loft');
   const avatar: AvatarBody = avatarBodies.has(params.avatar ?? '') ? params.avatar as AvatarBody : avatarStyle.body;

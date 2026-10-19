@@ -41,6 +41,7 @@ export class GroupMedia {
   private onTracks: (tracks: RemoteTrack[]) => void;
   private onFailure: (error: string) => void;
   private onPeers: (peers: RoomPeer[]) => void;
+  private onLocal: (stream: MediaStream) => void;
   private peers = new Map<string, RoomPeer>();
   private onPosition = (peer: RoomPeer) => { this.peers.set(peer.userId, peer); this.onPeers([...this.peers.values()]); };
   private onPeerLeft = ({ userId }: { userId: string }) => { this.peers.delete(userId); this.onPeers([...this.peers.values()]); };
@@ -50,10 +51,11 @@ export class GroupMedia {
   };
   private onRemoved = ({ producerId }: { producerId: string }) => { this.remove(producerId); };
 
-  constructor(onTracks: (tracks: RemoteTrack[]) => void, onFailure: (error: string) => void, onPeers: (peers: RoomPeer[]) => void = () => {}) {
+  constructor(onTracks: (tracks: RemoteTrack[]) => void, onFailure: (error: string) => void, onPeers: (peers: RoomPeer[]) => void = () => {}, onLocal: (stream: MediaStream) => void = () => {}) {
     this.onTracks = onTracks;
     this.onFailure = onFailure;
     this.onPeers = onPeers;
+    this.onLocal = onLocal;
   }
 
   get local() { return this.localStream; }
@@ -93,6 +95,7 @@ export class GroupMedia {
     const stream = await mediaDevices.getUserMedia({ audio: true, video });
     if (this.closed) { stream.getTracks().forEach(track => track.stop()); return; }
     this.localStream = stream;
+    this.onLocal(stream);
     stream.getAudioTracks().forEach(track => { track.enabled = !this.muted; });
     stream.getVideoTracks().forEach(track => { track.enabled = !this.cameraOff; });
     for (const track of stream.getTracks()) {
@@ -105,7 +108,8 @@ export class GroupMedia {
         try { p.pause(); } catch {}
       });
     }
-    await this.queueSync(this.latestProducers ?? joined.producers);
+    // Receiving another participant must not hold up publishing or the local preview.
+    void this.queueSync(this.latestProducers ?? joined.producers);
   }
 
   setMuted(muted: boolean) {
@@ -150,6 +154,7 @@ export class GroupMedia {
             this.localStream = new MediaStream();
           }
           this.localStream.addTrack(track);
+          this.onLocal(this.localStream);
           const producer = await this.sendTransport.produce({
             track: track as unknown as globalThis.MediaStreamTrack,
             stopTracks: false,

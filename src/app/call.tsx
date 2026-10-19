@@ -90,6 +90,12 @@ export default function CallScreen() {
   const groupMedia = useRef<GroupMedia | null>(null);
   const pendingPeer = useRef<string | null>(null);
 
+  const showRouteToast = (msg: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setRouteToast(msg);
+    toastTimer.current = setTimeout(() => setRouteToast(null), 2500);
+  };
+
   const applyCallAudioRoute = (forceSpeaker: boolean) => {
     speakerOnRef.current = forceSpeaker;
     setSpeakerOn(forceSpeaker);
@@ -263,6 +269,11 @@ export default function CallScreen() {
     let currentCall: CallInfo | null = null;
     let connectionTimer: ReturnType<typeof setTimeout> | null = null;
     const clearConnectionTimer = () => { if (connectionTimer) clearTimeout(connectionTimer); connectionTimer = null; };
+    const onLocalStream = (stream: MediaStream) => {
+      if (!active) return;
+      localRef.current = stream;
+      setLocal(stream);
+    };
 
     const startRelay = async () => {
       if (!currentCall || relayStarted.current || !active) return;
@@ -272,7 +283,7 @@ export default function CallScreen() {
       localRef.current?.getTracks().forEach(track => track.stop()); localRef.current = null;
       setLocal(null); setRemote(null); setStatus('Connecting through ADDA server…');
       try {
-        const media = new GroupMedia(tracks => { if (active) setGroupTracks(tracks); }, message => { if (active) setStatus(message); });
+        const media = new GroupMedia(tracks => { if (active) setGroupTracks(tracks); }, message => { if (active) setStatus(message); }, undefined, onLocalStream);
         groupMedia.current = media;
         media.setMuted(mutedRef.current);
         media.setCameraOff(cameraOffRef.current);
@@ -304,7 +315,7 @@ export default function CallScreen() {
     const sendSignal = (to: string, signal: Signal) => socket?.emit('call:signal', { callId, to, signal });
 
     const startOffer = async (peerId: string) => {
-      if (!pc.current || offered.current) return;
+      if (!pc.current || offered.current || pc.current.signalingState !== 'stable') return;
       offered.current = true;
       try {
         const offer = await pc.current.createOffer();
@@ -312,7 +323,11 @@ export default function CallScreen() {
         sendSignal(peerId, { type: 'offer', sdp: offer.sdp ?? '' });
         clearConnectionTimer();
         connectionTimer = setTimeout(requestRelay, 6000);
-      } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Could not start media.'); }
+      } catch (error) {
+        offered.current = false;
+        if (active) setStatus(error instanceof Error ? error.message : 'Could not start media.');
+        connectionTimer = setTimeout(requestRelay, 6000);
+      }
     };
 
     const onSignal = async (event: { callId: string; from: string; signal: Signal }) => {
@@ -325,6 +340,8 @@ export default function CallScreen() {
           else pendingCandidates.current.push(candidate);
           return;
         }
+        if (event.signal.type === 'answer' && pc.current.signalingState !== 'have-local-offer') return;
+        if (event.signal.type === 'offer' && pc.current.signalingState !== 'stable') return;
         await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal));
         for (const candidate of pendingCandidates.current.splice(0)) await pc.current.addIceCandidate(candidate);
         if (event.signal.type === 'offer') {
@@ -339,7 +356,6 @@ export default function CallScreen() {
       if (event.callId === callId && role === 'caller' && !relayStarted.current) {
         pendingPeer.current = event.userId;
         if (pc.current) {
-          offered.current = false;
           void startOffer(event.userId);
         }
       }
@@ -349,7 +365,6 @@ export default function CallScreen() {
       if (event.callId === callId && role === 'caller' && !relayStarted.current) {
         pendingPeer.current = event.from;
         if (pc.current) {
-          offered.current = false;
           void startOffer(event.from);
         }
       }
@@ -382,7 +397,7 @@ export default function CallScreen() {
 
         if (joined.usingRelay) { await startRelay(); return; }
         if (joined.target.kind === 'group') {
-          const media = new GroupMedia(tracks => { if (active) setGroupTracks(tracks); }, message => { if (active) setStatus(message); });
+          const media = new GroupMedia(tracks => { if (active) setGroupTracks(tracks); }, message => { if (active) setStatus(message); }, undefined, onLocalStream);
           groupMedia.current = media;
           media.setMuted(mutedRef.current);
           media.setCameraOff(cameraOffRef.current);
@@ -512,12 +527,6 @@ export default function CallScreen() {
     }
   };
 
-  const showRouteToast = (msg: string) => {
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    setRouteToast(msg);
-    toastTimer.current = setTimeout(() => setRouteToast(null), 2500);
-  };
-
   const toggleSpeaker = () => {
     const next = !speakerOnRef.current;
     applyCallAudioRoute(next);
@@ -547,7 +556,7 @@ export default function CallScreen() {
     videoTracks.length > 0 ||
     (!cameraOff && Boolean(local?.getVideoTracks().length));
   const isGroup = call?.target.kind === 'group' || groupTracks.length > 0;
-  const isDirect1on1Video = !isGroup && Boolean(remote) && isVideoCall;
+  const isDirect1on1Video = !isGroup && isVideoCall;
   const displayName = name || (isGroup ? 'Group Call' : 'ADDA Call');
   const participantIds = Array.from(new Set(groupTracks.map(t => t.userId)));
 
@@ -579,7 +588,7 @@ export default function CallScreen() {
           {isDirect1on1Video ? (
             // 1:1 Video Call
             remote && remote.getVideoTracks().length > 0 ? (
-              <RTCView streamURL={remote.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" />
+              <RTCView streamURL={remote.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" zOrder={0} />
             ) : (
               <View style={styles.audioCenterStage}>
                 <View style={styles.largeAvatarCircle}>
@@ -598,7 +607,7 @@ export default function CallScreen() {
                 return (
                   <View key={userId} style={[styles.gridTile, getGridTileStyle(idx, participantIds.length)]}>
                     {userVideo ? (
-                      <RTCView streamURL={userVideo.stream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" />
+                      <RTCView streamURL={userVideo.stream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" zOrder={0} />
                     ) : (
                       <View style={styles.audioCardAvatarTile}>
                         <View style={styles.audioCardAvatar}>
@@ -638,7 +647,7 @@ export default function CallScreen() {
           {local && (
             <Pressable onPress={flipCamera} style={[styles.pipContainer, { top: insets.top + 70 }]}>
               {!cameraOff && local.getVideoTracks().length > 0 ? (
-                <RTCView streamURL={local.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={true} />
+                <RTCView streamURL={local.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={true} zOrder={1} />
               ) : (
                 <View style={styles.pipCameraOffView}>
                   <User size={26} color="#8E9BA8" />

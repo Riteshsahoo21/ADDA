@@ -1,6 +1,7 @@
 import type { RoomPeer, RoomPeerMotion } from '@/lib/rooms';
 
-const MAX_PREDICTION_MS = 450;
+// Allow for the 350 ms send anchor, 100 ms relay tick, and mobile network jitter.
+const MAX_PREDICTION_MS = 900;
 
 export function predictRemoteMotion(latest: RoomPeerMotion, now: number): RoomPeer {
   const peer = latest.peer;

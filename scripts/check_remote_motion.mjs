@@ -10,7 +10,8 @@ const sample = (x, at, pose = 'walk', vx = 2) => ({
 
 test('predicts between sparse updates and stops prediction when a packet is stale', () => {
   assert.equal(predictRemoteMotion(sample(1, 1000), 1150).x, 1.3);
-  assert.equal(predictRemoteMotion(sample(1, 1000), 2000).x, 1.9);
+  assert.equal(predictRemoteMotion(sample(1, 1000), 1700).x, 2.4);
+  assert.equal(predictRemoteMotion(sample(1, 1000), 2000).x, 2.8);
 });
 
 test('idle, seated and crouching avatars stay at their reported position', () => {

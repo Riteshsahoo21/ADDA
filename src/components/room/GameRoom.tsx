@@ -691,7 +691,10 @@ export function GameRoom({
               const yawDelta = THREE.MathUtils.euclideanModulo(target.yaw - entry.mount.rotation.y + Math.PI, Math.PI * 2) - Math.PI;
               entry.mount.rotation.y += yawDelta * (1 - Math.exp(-13 * delta));
             }
-            const pose = target.pose ?? (now - entry.lastMovingAt < 260 ? 'walk' : 'idle');
+            const staleMotion = now - entry.latestMotion.receivedAt > 1300 &&
+              (target.pose === 'walk' || target.pose === 'run' || target.pose === 'crouch_walk');
+            const pose = staleMotion ? (target.pose === 'crouch_walk' ? 'crouch_idle' : 'idle')
+              : target.pose ?? (now - entry.lastMovingAt < 260 ? 'walk' : 'idle');
             const wanted = entry.actions[pose] ?? (pose === 'crouch_idle' ? entry.actions.idle
               : pose === 'crouch_walk' || pose === 'run' ? entry.actions.walk
               : pose === 'jump' ? entry.actions.walk
@@ -982,10 +985,10 @@ export function GameRoom({
           const predictedZ = lastSentPosition.z + lastSentPosition.vz * secondsSinceSent;
           const velocityChanged = Math.hypot(snapshot.vx - lastSentPosition.vx, snapshot.vz - lastSentPosition.vz) > 0.4;
           const poseChanged = snapshot.pose !== lastSentPosition.pose;
-          const directionChanged = Math.abs(THREE.MathUtils.euclideanModulo(snapshot.yaw - lastSentPosition.yaw + Math.PI, Math.PI * 2) - Math.PI) > 0.16;
+          const directionChanged = Math.abs(THREE.MathUtils.euclideanModulo(snapshot.yaw - lastSentPosition.yaw + Math.PI, Math.PI * 2) - Math.PI) > 0.07;
           const correctionNeeded = Math.hypot(snapshot.x - predictedX, snapshot.z - predictedZ) > 0.25 || Math.abs(snapshot.y - lastSentPosition.y) > 0.08;
           const moving = Math.hypot(snapshot.vx, snapshot.vz) > 0.12;
-          const anchorDue = now - lastPositionSent > (moving ? 500 : 2000);
+          const anchorDue = now - lastPositionSent > (moving ? 350 : 2000);
           const legacyChanged = Math.hypot(snapshot.x - lastSentPosition.x, snapshot.z - lastSentPosition.z) > 0.025 ||
             Math.abs(snapshot.y - lastSentPosition.y) > 0.025 ||
             Math.abs(THREE.MathUtils.euclideanModulo(snapshot.yaw - lastSentPosition.yaw + Math.PI, Math.PI * 2) - Math.PI) > 0.035 || poseChanged;
