@@ -8,6 +8,9 @@ export const auth = betterAuth({
   secret: env.authSecret,
   baseURL: env.authUrl,
   trustedOrigins: [...new Set([env.authUrl, ...env.corsOrigins, 'adda://', 'exp://'])],
+  advanced: {
+    disableCSRFCheck: true,
+  },
   emailAndPassword: { enabled: true, autoSignIn: true },
   socialProviders:
     env.googleClientId && env.googleClientSecret

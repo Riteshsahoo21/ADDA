@@ -119,17 +119,48 @@ socialRoutes.patch('/me', run(async (request, response) => {
   if (!current) { response.status(404).json({ error: 'User not found.' }); return; }
 
   const name = typeof request.body?.name === 'string' && request.body.name.trim() ? request.body.name.trim() : current.name;
-  const username = typeof request.body?.username === 'string' && request.body.username.trim() ? request.body.username.trim().toLowerCase() : current.username;
+  const usernameInput = typeof request.body?.username === 'string' && request.body.username.trim()
+    ? request.body.username.trim().toLowerCase()
+    : current.username;
   const about = typeof request.body?.about === 'string' ? request.body.about.trim().slice(0, 150) : undefined;
   const avatarUrl = request.body?.avatarUrl; // string or null
 
-  if (name.length < 2 || name.length > 60 || !validUsername(username)) {
-    response.status(400).json({ error: 'Use a name of 2–60 characters and a username of 3–24 letters, numbers, dots or underscores.' }); return;
+  if (name.length < 2 || name.length > 60) {
+    response.status(400).json({ error: 'Use a name of 2–60 characters.' });
+    return;
   }
 
-  const updates: string[] = ['name = $2', 'username = $3', '"updatedAt" = NOW()'];
-  const values: any[] = [response.locals.userId, name, username];
-  let paramIdx = 4;
+  const isChangingUsername = usernameInput !== current.username;
+
+  if (isChangingUsername) {
+    if (!validUsername(usernameInput)) {
+      response.status(400).json({ error: 'Username must be 3–24 characters: lowercase letters, numbers, dots, or underscores.' });
+      return;
+    }
+
+    if (current.usernameChangedAt) {
+      const lastChanged = new Date(current.usernameChangedAt).getTime();
+      const fourteenDaysMs = 14 * 24 * 60 * 60 * 1000;
+      const remainingMs = lastChanged + fourteenDaysMs - Date.now();
+      if (remainingMs > 0) {
+        const remainingDays = Math.ceil(remainingMs / (24 * 60 * 60 * 1000));
+        response.status(403).json({
+          error: `You can only change your username once every 14 days. You can change it again in ${remainingDays} day${remainingDays === 1 ? '' : 's'}.`,
+        });
+        return;
+      }
+    }
+  }
+
+  const updates: string[] = ['name = $2', '"updatedAt" = NOW()'];
+  const values: any[] = [response.locals.userId, name];
+  let paramIdx = 3;
+
+  if (isChangingUsername) {
+    updates.push(`username = $${paramIdx++}`);
+    values.push(usernameInput);
+    updates.push(`"usernameChangedAt" = NOW()`);
+  }
 
   if (avatarUrl !== undefined) {
     updates.push(`image = $${paramIdx++}`);
@@ -142,7 +173,7 @@ socialRoutes.patch('/me', run(async (request, response) => {
 
   try {
     const result = await pool.query(
-      `UPDATE "user" SET ${updates.join(', ')} WHERE id = $1 RETURNING id, name, username, "friendCode", image AS "avatarUrl", about`,
+      `UPDATE "user" SET ${updates.join(', ')} WHERE id = $1 RETURNING id, name, username, "friendCode", image AS "avatarUrl", about, "usernameChangedAt"`,
       values,
     );
     const contacts = await pool.query<{ id: string }>(

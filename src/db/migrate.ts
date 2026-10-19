@@ -9,6 +9,7 @@ import { createChatSpoolTableSql } from './migrations/007_chat_spool.js';
 import { createGroupEnhancementsSql } from './migrations/008_group_enhancements.js';
 import { createGroupRoomsSql } from './migrations/009_group_rooms.js';
 import { createPublicPrivateRoomsSql } from './migrations/010_public_private_rooms.js';
+import { createUsernameCooldownSql } from './migrations/011_username_cooldown.js';
 import { ensureProfile } from '../modules/social/profile.js';
 
 async function migrate() {
@@ -24,6 +25,7 @@ async function migrate() {
     await pool.query(createGroupEnhancementsSql);
     await pool.query(createGroupRoomsSql);
     await pool.query(createPublicPrivateRoomsSql);
+    await pool.query(createUsernameCooldownSql);
     const users = await pool.query<{ id: string }>('SELECT id FROM "user" WHERE username IS NULL OR "friendCode" IS NULL');
     for (const user of users.rows) await ensureProfile(user.id);
     console.log('[ADDA Migration] Auth and social tables are ready.');

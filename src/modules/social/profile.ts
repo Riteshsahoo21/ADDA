@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { pool } from '../../db/pool.js';
 
 export type PublicProfile = { id: string; username: string; name: string; avatarUrl?: string | null; about?: string | null };
-export type OwnProfile = PublicProfile & { friendCode: string };
+export type OwnProfile = PublicProfile & { friendCode: string; usernameChangedAt?: string | null };
 
 function candidateUsername(name: string, id: string) {
   const base = name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9._]/g, '').replace(/^[._]+|[._]+$/g, '').slice(0, 20);
@@ -11,7 +11,7 @@ function candidateUsername(name: string, id: string) {
 
 export async function ensureProfile(id: string): Promise<OwnProfile | null> {
   const existing = await pool.query<OwnProfile>(
-    'SELECT id, name, username, "friendCode", image AS "avatarUrl", about FROM "user" WHERE id = $1', [id],
+    'SELECT id, name, username, "friendCode", image AS "avatarUrl", about, "usernameChangedAt" FROM "user" WHERE id = $1', [id],
   );
   const user = existing.rows[0];
   if (!user) return null;
@@ -19,7 +19,7 @@ export async function ensureProfile(id: string): Promise<OwnProfile | null> {
   const username = user.username || candidateUsername(user.name, id);
   const friendCode = user.friendCode || randomBytes(24).toString('hex');
   const result = await pool.query<OwnProfile>(
-    'UPDATE "user" SET username = COALESCE(username, $2), "friendCode" = COALESCE("friendCode", $3) WHERE id = $1 RETURNING id, name, username, "friendCode", image AS "avatarUrl", about',
+    'UPDATE "user" SET username = COALESCE(username, $2), "friendCode" = COALESCE("friendCode", $3) WHERE id = $1 RETURNING id, name, username, "friendCode", image AS "avatarUrl", about, "usernameChangedAt"',
     [id, username, friendCode],
   );
   return result.rows[0];

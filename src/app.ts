@@ -20,6 +20,14 @@ app.use(
   }),
 );
 
+// Ensure mobile requests without Origin or with 'null' Origin inherit the trusted authUrl
+app.use('/api/auth', (req, _res, next) => {
+  if (!req.headers.origin || req.headers.origin === 'null') {
+    req.headers.origin = env.authUrl;
+  }
+  next();
+});
+
 // Better Auth reads the raw request body, so mount it before express.json().
 app.all('/api/auth/*', toNodeHandler(auth));
 app.use(express.json({ limit: '2mb' }));

@@ -1,9 +1,10 @@
 import { networkInterfaces, cpus } from 'node:os';
 import type { Server, Socket } from 'socket.io';
 import * as mediasoup from 'mediasoup';
-import type { Consumer, Producer, Router, WebRtcTransport, Worker } from 'mediasoup/types';
+import type { Consumer, DataConsumer, DataProducer, DirectTransport, Producer, Router, WebRtcTransport, Worker } from 'mediasoup/types';
 import { env } from '../../config/env.js';
 import { canJoinCallMedia } from './calls.js';
+import { updateRoomPeerMotion, type RoomPose } from './rooms.js';
 
 type MediaKey = { kind: 'call' | 'room'; id: string; position?: { x: number; z: number } };
 type Peer = {
@@ -12,7 +13,11 @@ type Peer = {
   transports: Map<string, WebRtcTransport>;
   producers: Map<string, Producer>;
   consumers: Map<string, Consumer>;
+  dataProducers: Map<string, DataProducer>;
+  dataConsumers: Map<string, DataConsumer>;
+  motionObserver?: DataConsumer;
   position: { x: number; z: number };
+  lastProximityUpdate?: { x: number; z: number; at: number };
   lastAudibleHash?: string;
 };
 type Session = {
@@ -20,6 +25,7 @@ type Session = {
   router: Router;
   workerIndex: number;
   peers: Map<string, Peer>;
+  directTransport?: DirectTransport;
   audibleTimer?: NodeJS.Timeout | null;
 };
 type Ack<T> = (result: { ok: true; value: T } | { ok: false; error: string }) => void;
@@ -175,7 +181,9 @@ async function getSession(key: string): Promise<Session> {
           { kind: 'video', mimeType: 'video/VP8', clockRate: 90000 },
         ],
       });
-      return { key, router, workerIndex, peers: new Map() };
+      const directTransport = key.startsWith('room:')
+        ? await router.createDirectTransport({ maxReceiveMessageSize: 256 }) : undefined;
+      return { key, router, workerIndex, peers: new Map(), directTransport };
     })();
     sessions.set(key, pending);
     pending.catch(() => sessions.delete(key));
@@ -252,8 +260,11 @@ async function leaveMedia(socket: Socket) {
   if (!peer) return;
 
   for (const transport of peer.transports.values()) transport.close();
+  peer.motionObserver?.close();
   peer.consumers.clear();
   peer.producers.clear();
+  peer.dataConsumers.clear();
+  peer.dataProducers.clear();
   peer.transports.clear();
   session.peers.delete(socket.id);
 
@@ -285,8 +296,11 @@ export async function closeMediaSession(rawKey: string): Promise<void> {
       for (const transport of peer.transports.values()) {
         try { transport.close(); } catch {}
       }
+      peer.motionObserver?.close();
       peer.consumers.clear();
       peer.producers.clear();
+      peer.dataConsumers.clear();
+      peer.dataProducers.clear();
       peer.transports.clear();
     }
     session.peers.clear();
@@ -315,7 +329,7 @@ export function attachMediaHandlers(io: Server, socket: Socket) {
     }
   };
 
-  socket.on('media:join', async (value: unknown, ack?: Ack<{ rtpCapabilities: Router['rtpCapabilities']; producers: ReturnType<typeof availableProducers>; peers: { userId: string; x: number; z: number }[] }>) => {
+  socket.on('media:join', async (value: unknown, ack?: Ack<{ rtpCapabilities: Router['rtpCapabilities']; producers: ReturnType<typeof availableProducers>; peers: { userId: string; x: number; z: number }[]; dataProducers: { dataProducerId: string; userId: string }[] }>) => {
     try {
       if (!validKey(value)) throw new Error('Invalid media room.');
       if (value.kind === 'call' && !canJoinCallMedia(value.id, selfId)) throw new Error('Call unavailable.');
@@ -327,6 +341,8 @@ export function attachMediaHandlers(io: Server, socket: Socket) {
         ? (rawId.startsWith('room:') || rawId.startsWith('group:') ? rawId : socketRoomId)
         : rawId;
 
+      if (value.kind === 'room' && socketRoomId !== effectiveId) throw new Error('Join the room before connecting movement and voice.');
+
       const key = sessionKey({ kind: value.kind, id: effectiveId });
       if (socket.data.mediaKey !== key) await leaveMedia(socket);
       const session = await getSession(key);
@@ -334,11 +350,10 @@ export function attachMediaHandlers(io: Server, socket: Socket) {
       if (!peer) {
         const position = value.kind === 'room' && Number.isFinite(value.position?.x) && Number.isFinite(value.position?.z) &&
           Math.abs(value.position!.x) <= 100 && Math.abs(value.position!.z) <= 100 ? value.position! : { x: 0, z: 0 };
-        peer = { socket, userId: selfId, transports: new Map(), producers: new Map(), consumers: new Map(), position };
+        peer = { socket, userId: selfId, transports: new Map(), producers: new Map(), consumers: new Map(), dataProducers: new Map(), dataConsumers: new Map(), position };
         session.peers.set(socket.id, peer);
         socket.data.mediaKey = key;
         socket.join(`media:${key}`);
-        if (value.kind === 'room') socket.to(`media:${key}`).emit('media:peer-position', { userId: selfId, ...position });
       }
       ack?.({
         ok: true,
@@ -346,6 +361,7 @@ export function attachMediaHandlers(io: Server, socket: Socket) {
           rtpCapabilities: session.router.rtpCapabilities,
           producers: availableProducers(session, peer),
           peers: [...session.peers.values()].filter(other => other !== peer).map(other => ({ userId: other.userId, ...other.position })),
+          dataProducers: [...session.peers.values()].filter(other => other !== peer).flatMap(other => [...other.dataProducers.values()].map(producer => ({ dataProducerId: producer.id, userId: other.userId }))),
         },
       });
       broadcastAudible(session);
@@ -354,21 +370,23 @@ export function attachMediaHandlers(io: Server, socket: Socket) {
     }
   });
 
-  socket.on('media:create-transport', (ack?: Ack<{ id: string; iceParameters: unknown; iceCandidates: unknown; dtlsParameters: unknown }>) => {
+  socket.on('media:create-transport', (ack?: Ack<{ id: string; iceParameters: unknown; iceCandidates: unknown; dtlsParameters: unknown; sctpParameters: unknown }>) => {
     void withPeer(async (session, peer) => {
       const announcedAddress = publicAddress();
       const transport = await session.router.createWebRtcTransport({
-        listenInfos: [
-          { protocol: 'udp', ip: '0.0.0.0', announcedAddress },
-          { protocol: 'tcp', ip: '0.0.0.0', announcedAddress },
-        ],
+        listenInfos: session.key.startsWith('room:')
+          ? [{ protocol: 'udp', ip: '0.0.0.0', announcedAddress }]
+          : [{ protocol: 'udp', ip: '0.0.0.0', announcedAddress }, { protocol: 'tcp', ip: '0.0.0.0', announcedAddress }],
         enableUdp: true,
-        enableTcp: true,
+        enableTcp: !session.key.startsWith('room:'),
         preferUdp: true,
+        enableSctp: session.key.startsWith('room:'),
+        maxReceiveMessageSize: 256,
+        maxSendMessageSize: 256,
         initialAvailableOutgoingBitrate: 1_000_000,
       });
       peer.transports.set(transport.id, transport);
-      return { id: transport.id, iceParameters: transport.iceParameters, iceCandidates: transport.iceCandidates, dtlsParameters: transport.dtlsParameters };
+      return { id: transport.id, iceParameters: transport.iceParameters, iceCandidates: transport.iceCandidates, dtlsParameters: transport.dtlsParameters, sctpParameters: transport.sctpParameters };
     }, ack);
   });
 
@@ -397,6 +415,80 @@ export function attachMediaHandlers(io: Server, socket: Socket) {
     }, ack);
   });
 
+  socket.on('media:produce-data', (input: { transportId?: string; sctpStreamParameters?: NonNullable<Parameters<WebRtcTransport['produceData']>[0]>['sctpStreamParameters']; label?: string; protocol?: string }, ack?: Ack<{ id: string }>) => {
+    void withPeer(async (session, peer) => {
+      const transport = peer.transports.get(input?.transportId ?? '');
+      const roomId = socket.data.roomId as string | undefined;
+      if (!session.key.startsWith('room:') || !roomId || session.key !== `room:${roomId}` || !transport ||
+          peer.dataProducers.size > 0 || input?.label !== 'motion' || input?.protocol !== 'json' ||
+          !input.sctpStreamParameters || input.sctpStreamParameters.ordered !== false ||
+          input.sctpStreamParameters.maxRetransmits !== 0) throw new Error('Room motion channel unavailable.');
+      const producer = await transport.produceData({
+        sctpStreamParameters: input.sctpStreamParameters,
+        label: 'motion', protocol: 'json', appData: { userId: peer.userId },
+      });
+      peer.dataProducers.set(producer.id, producer);
+      producer.on('transportclose', () => { peer.dataProducers.delete(producer.id); });
+
+      // One server-side direct consumer updates proximity voice and join metadata.
+      // Avatar packets themselves are forwarded by mediasoup over UDP.
+      let observer: DataConsumer;
+      try {
+        if (!session.directTransport) throw new Error('Motion observer unavailable.');
+        observer = await session.directTransport.consumeData({ dataProducerId: producer.id });
+      } catch (error) {
+        producer.close();
+        peer.dataProducers.delete(producer.id);
+        throw error;
+      }
+      peer.motionObserver = observer;
+      observer.on('message', buffer => {
+        if (buffer.length > 256 || socket.data.roomId !== roomId) return;
+        try {
+          const value: unknown = JSON.parse(buffer.toString('utf8'));
+          if (!value || typeof value !== 'object') return;
+          const motion = value as { x?: unknown; y?: unknown; z?: unknown; r?: unknown; pose?: unknown };
+          if (typeof motion.x !== 'number' || typeof motion.z !== 'number' || typeof motion.r !== 'number' ||
+              typeof motion.pose !== 'string' || !Number.isFinite(motion.x) || !Number.isFinite(motion.z) ||
+              Math.abs(motion.x) > 100 || Math.abs(motion.z) > 100) return;
+          updateRoomPeerMotion(socket.id, { x: motion.x, y: typeof motion.y === 'number' ? motion.y : 0,
+            z: motion.z, r: motion.r, pose: motion.pose as RoomPose });
+          peer.position = { x: motion.x, z: motion.z };
+          const last = peer.lastProximityUpdate;
+          const now = Date.now();
+          if (!last || Math.hypot(motion.x - last.x, motion.z - last.z) > 0.2 || now - last.at > 2000) {
+            peer.lastProximityUpdate = { x: motion.x, z: motion.z, at: now };
+            scheduleAudible(session);
+          }
+        } catch { /* Ignore malformed unreliable packets. */ }
+      });
+      observer.on('dataproducerclose', () => { peer.motionObserver = undefined; });
+      socket.to(`media:${session.key}`).emit('media:new-data-producer', { dataProducerId: producer.id, userId: peer.userId });
+      return { id: producer.id };
+    }, ack);
+  });
+
+  socket.on('media:consume-data', (input: { transportId?: string; dataProducerId?: string }, ack?: Ack<{ id: string; dataProducerId: string; sctpStreamParameters: DataConsumer['sctpStreamParameters']; label: string; protocol: string }>) => {
+    void withPeer(async (session, peer) => {
+      const transport = peer.transports.get(input?.transportId ?? '');
+      const source = [...session.peers.values()].find(other => other.dataProducers.has(input?.dataProducerId ?? ''));
+      if (!session.key.startsWith('room:') || session.key !== `room:${socket.data.roomId as string}` ||
+          !transport || !source || source === peer || !input?.dataProducerId) throw new Error('Motion channel unavailable.');
+      const existing = [...peer.dataConsumers.values()].find(consumer => consumer.dataProducerId === input.dataProducerId);
+      if (existing) return { id: existing.id, dataProducerId: existing.dataProducerId,
+        sctpStreamParameters: existing.sctpStreamParameters, label: existing.label, protocol: existing.protocol };
+      const consumer = await transport.consumeData({ dataProducerId: input.dataProducerId, ordered: false, maxRetransmits: 0 });
+      peer.dataConsumers.set(consumer.id, consumer);
+      consumer.on('transportclose', () => { peer.dataConsumers.delete(consumer.id); });
+      consumer.on('dataproducerclose', () => {
+        peer.dataConsumers.delete(consumer.id);
+        socket.emit('media:data-producer-removed', { dataProducerId: input.dataProducerId });
+      });
+      return { id: consumer.id, dataProducerId: consumer.dataProducerId,
+        sctpStreamParameters: consumer.sctpStreamParameters, label: consumer.label, protocol: consumer.protocol };
+    }, ack);
+  });
+
   socket.on('media:consume', (input: { transportId?: string; producerId?: string; rtpCapabilities?: Router['rtpCapabilities'] }, ack?: Ack<{ id: string; producerId: string; kind: string; rtpParameters: unknown }>) => {
     void withPeer(async (session, peer) => {
       const transport = peer.transports.get(input?.transportId ?? '');
@@ -420,18 +512,6 @@ export function attachMediaHandlers(io: Server, socket: Socket) {
       await consumer.resume();
       return null;
     }, ack);
-  });
-
-  socket.on('media:position', (input: { x?: number; z?: number }) => {
-    const key = socket.data.mediaKey as string | undefined;
-    if (!key?.startsWith('room:') || !Number.isFinite(input?.x) || !Number.isFinite(input?.z) || Math.abs(input.x!) > 100 || Math.abs(input.z!) > 100) return;
-    void sessions.get(key)?.then(session => {
-      const peer = session.peers.get(socket.id);
-      if (!peer) return;
-      peer.position = { x: input.x!, z: input.z! };
-      socket.to(`media:${key}`).volatile.emit('media:peer-position', { userId: peer.userId, x: peer.position.x, z: peer.position.z });
-      scheduleAudible(session);
-    });
   });
 
   socket.on('media:leave', () => { void leaveMedia(socket); });

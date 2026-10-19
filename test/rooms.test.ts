@@ -51,8 +51,8 @@ test('room snapshot reaches active peers with authoritative server timestamp and
   const room = roomHarness();
   const alice = room.peer('alice');
   const bob = room.peer('bob');
-  alice.send('room:join', { room: 'loft', avatar: 'woman' }, () => {});
-  bob.send('room:join', { room: 'loft', avatar: 'man' }, () => {});
+  await new Promise(resolve => alice.send('room:join', { room: 'loft', avatar: 'woman' }, resolve));
+  await new Promise(resolve => bob.send('room:join', { room: 'loft', avatar: 'man' }, resolve));
   bob.packets.length = 0;
 
   const beforeTime = Date.now();
@@ -74,7 +74,7 @@ test('room snapshot reaches active peers with authoritative server timestamp and
   // Late joiner sees alice's latest position and pose
   const charlie = room.peer('charlie');
   let joined: { value?: { peers: Packet['value'][] } } = {};
-  charlie.send('room:join', { room: 'loft', avatar: 'self' }, (reply: typeof joined) => { joined = reply; });
+  await new Promise(resolve => charlie.send('room:join', { room: 'loft', avatar: 'self' }, (reply: typeof joined) => { joined = reply; resolve(reply); }));
   const alicePeer = joined.value?.peers.find(item => item.userId === 'alice');
   assert.equal(alicePeer?.x, 1.5);
   assert.equal(alicePeer?.z, 2.5);

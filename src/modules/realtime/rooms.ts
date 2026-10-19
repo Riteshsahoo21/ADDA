@@ -27,7 +27,6 @@ export type RoomJoinResponse = {
   shardIndex: number;
   totalInShard: number;
   ownerId?: string;
-  motionProtocol?: number;
 };
 
 export const BASE_ROOM_IDS = new Set<RoomKind>(['loft', 'roof', 'tea', 'beach']);
@@ -151,6 +150,19 @@ const peers = new Map<string, RoomPeer>();
 const messages = new Map<string, RoomMessage[]>();
 const roomRadios = new Map<string, RoomRadioState>();
 
+// Called from the server's UDP DataChannel observer. Presence metadata remains
+// current for peers joining later, without relaying motion through Socket.IO.
+export function updateRoomPeerMotion(socketId: string, input: { x: number; y: number; z: number; r: number; pose: RoomPose }): void {
+  const peer = peers.get(socketId);
+  if (!peer || !Number.isFinite(input.x) || !Number.isFinite(input.z) || !Number.isFinite(input.r) ||
+      Math.abs(input.x) > 100 || Math.abs(input.z) > 100 || !poses.has(input.pose)) return;
+  peer.x = input.x;
+  peer.y = Number.isFinite(input.y) ? Math.max(0, Math.min(5, input.y)) : 0;
+  peer.z = input.z;
+  peer.yaw = input.r;
+  peer.pose = input.pose;
+}
+
 // Default base radios
 const defaultRadios: Record<RoomKind, RoomRadioState> = {
   tea: { enabled: false, trackIndex: 0, seekSeconds: 0, lastUpdated: Date.now() },
@@ -245,7 +257,7 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     }
   };
 
-  socket.on('room:join', async (input: { room?: string; avatar?: string; shard?: number | string; groupId?: string; roomId?: string; motionProtocol?: number }, ack?: Ack<RoomJoinResponse>) => {
+  socket.on('room:join', async (input: { room?: string; avatar?: string; shard?: number | string; groupId?: string; roomId?: string }, ack?: Ack<RoomJoinResponse>) => {
     const parsed = parseRoomInput(input?.room ?? '');
     if (!parsed || !avatars.has(input?.avatar as AvatarBody)) {
       ack?.({ ok: false, error: 'Invalid room or avatar.' });
@@ -456,31 +468,6 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     } else {
       socket.to(channel(shardId)).volatile.emit('room:snapshot', snapshot);
     }
-  });
-
-  socket.on('room:position', (input: { x?: number; y?: number; z?: number; yaw?: number; pose?: RoomPose }) => {
-    const shardId = socket.data.roomId as string | undefined;
-    const peer = peers.get(socket.id);
-    if (!shardId || !peer || !Number.isFinite(input?.x) || !Number.isFinite(input?.z)) return;
-    const x = input.x!;
-    const y = Number.isFinite(input.y) ? input.y! : 0;
-    const z = input.z!;
-    const r = Number.isFinite(input.yaw) ? input.yaw! : 0;
-    const pose = input.pose && poses.has(input.pose) ? input.pose : (peer.pose ?? 'idle');
-    peer.x = x;
-    peer.y = y;
-    peer.z = z;
-    peer.yaw = r;
-    peer.pose = pose;
-    socket.to(channel(shardId)).volatile.emit('room:snapshot', {
-      id: peer.userId,
-      x,
-      y,
-      z,
-      r,
-      pose,
-      time: Date.now(),
-    });
   });
 
   socket.on('room:message', (body: unknown, ack?: Ack<RoomMessage>) => {
