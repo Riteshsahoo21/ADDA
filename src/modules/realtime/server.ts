@@ -432,7 +432,7 @@ export function attachRealtime(httpServer: HttpServer): Server {
     // ========================================================
     // WHATSAPP EMOJI REACTIONS
     // ========================================================
-    socket.on('chat:reaction', async (data: { messageId: string; target: ChatTarget; emoji: string }) => {
+    socket.on('chat:reaction', async (data: { messageId: string; target: ChatTarget; emoji: string; action?: 'set' | 'remove' }) => {
       if (!data?.messageId || !validTarget(data?.target) || typeof data.emoji !== 'string') return;
       try {
         const targetIds = await listeners(data.target, selfId);
@@ -442,6 +442,7 @@ export function attachRealtime(httpServer: HttpServer): Server {
           userId: selfId,
           userName: socket.data.name || 'User',
           emoji: data.emoji,
+          action: data.action,
         });
       } catch (e) {
         console.warn('[ADDA] Reaction broadcast warning:', e);
