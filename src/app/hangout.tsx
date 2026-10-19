@@ -5,7 +5,7 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import { NavigationBar } from 'expo-navigation-bar';
 import { router, useIsFocused, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { Check, Crown, Headphones, House, MessageCircle, Mic, MicOff, Music, Send, UserPlus, Users, UserX, Volume1, Volume2, VolumeX, X } from 'lucide-react-native';
+import { Check, Crown, Headphones, House, MessageCircle, Mic, MicOff, Music, Send, Trash2, UserPlus, Users, UserX, Volume1, Volume2, VolumeX, X } from 'lucide-react-native';
 import { GameRoom } from '@/components/room/GameRoom';
 import InCallManager from 'react-native-incall-manager';
 import { RoomKind } from '@/three/environment/createGameScene';
@@ -14,11 +14,12 @@ import { useSession } from '@/context/session';
 import { AvatarBody } from '@/three/player/avatarStyle';
 import { GroupMedia } from '@/lib/group-media';
 import { getRealtimeSocket } from '@/lib/realtime';
-import { inviteToRoom, kickRoomPeer, sendRoomMessage, type RoomJoin, type RoomMessage, type RoomMotionSnapshot, type RoomPeer, type RoomPeerMotion } from '@/lib/rooms';
+import { deleteCurrentRoom, inviteGroupToRoom, inviteToRoom, kickRoomPeer, sendRoomMessage, type RoomJoin, type RoomMessage, type RoomMotionSnapshot, type RoomPeer, type RoomPeerMotion } from '@/lib/rooms';
+import { decodeMotionBatch, encodeMotion, isNewerSequence } from '@/lib/room-motion-codec';
 import { MusicHubModal } from '@/components/music/MusicHubModal';
 import { MusicService } from '@/audio/MusicService';
 import { getActiveUserId } from '@/lib/encrypted-chat';
-import { socialApi, type GroupDetails, type GroupMember } from '@/lib/social-api';
+import { socialApi, type ChatGroup, type GroupDetails, type GroupMember, type PublicProfile, type SocialBundle } from '@/lib/social-api';
 
 const avatarBodies = new Set(['man', 'uncle', 'photo_boy', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman']);
 
@@ -56,7 +57,13 @@ export default function HangoutScreen() {
   const [chatError, setChatError] = useState('');
   const [messages, setMessages] = useState<RoomMessage[]>([]);
   const [peers, setPeers] = useState<RoomPeer[]>([]);
+  const [motionV2, setMotionV2] = useState(false);
   const peerMotions = useRef(new Map<string, RoomPeerMotion>());
+  const motionUsers = useRef(new Map<number, string>());
+  const motionSequences = useRef(new Map<number, number>());
+  const outboundSequence = useRef(0);
+  const motionProtocol = useRef(false);
+  const lastOutboundPose = useRef<RoomMotionSnapshot['pose']>('idle');
   const [shardId, setShardId] = useState<string>('');
   const [shardIndex, setShardIndex] = useState<number>(1);
 
@@ -66,10 +73,15 @@ export default function HangoutScreen() {
   const isOwner = Boolean(currentUserId && roomOwnerId && currentUserId === roomOwnerId);
 
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
+  const [inviteTab, setInviteTab] = useState<'members' | 'friends' | 'groups'>(params.groupId ? 'members' : 'friends');
   const [groupMembers, setGroupMembers] = useState<GroupMember[]>([]);
+  const [contacts, setContacts] = useState<PublicProfile[]>([]);
+  const [myGroups, setMyGroups] = useState<ChatGroup[]>([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [invitedIds, setInvitedIds] = useState<Set<string>>(() => new Set());
   const [invitingId, setInvitingId] = useState<string | null>(null);
+  const [invitedGroupIds, setInvitedGroupIds] = useState<Set<string>>(() => new Set());
+  const [invitingGroupId, setInvitingGroupId] = useState<string | null>(null);
 
   const activeRoomId = shardId || (params.groupId ? `group:${params.groupId}:${roomKind}` : roomKind);
 
@@ -81,11 +93,17 @@ export default function HangoutScreen() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mutedPeersRef = useRef<Set<string>>(new Set());
   const presenceRef = useRef<Awaited<ReturnType<typeof getRealtimeSocket>> | null>(null);
-  const positionRef = useRef<RoomMotionSnapshot>({ x: 0, y: 0, z: 0, yaw: 0, pose: 'idle' });
+  const positionRef = useRef<RoomMotionSnapshot>({ x: 0, y: 0, z: 0, yaw: 0, vx: 0, vz: 0, pose: 'idle' });
   const lastVoicePosition = useRef({ x: Number.POSITIVE_INFINITY, z: Number.POSITIVE_INFINITY, at: 0 });
   const onPosition = useCallback((snapshot: RoomMotionSnapshot) => {
     positionRef.current = snapshot;
-    presenceRef.current?.volatile.emit('room:position', snapshot);
+    const socket = presenceRef.current;
+    if (socket && motionProtocol.current) {
+      const packet = encodeMotion({ ...snapshot, motionId: 0, seq: ++outboundSequence.current });
+      if (snapshot.pose !== lastOutboundPose.current) socket.emit('room:motion', packet);
+      else socket.volatile.emit('room:motion', packet);
+    } else socket?.volatile.emit('room:position', snapshot);
+    lastOutboundPose.current = snapshot.pose;
     if (Math.hypot(snapshot.x - lastVoicePosition.current.x, snapshot.z - lastVoicePosition.current.z) > 0.2 || Date.now() - lastVoicePosition.current.at > 2000) {
       lastVoicePosition.current = { x: snapshot.x, z: snapshot.z, at: Date.now() };
       mediaRef.current?.setPosition(snapshot.x, snapshot.z);
@@ -99,14 +117,32 @@ export default function HangoutScreen() {
   }, []);
 
   const openInviteModal = async () => {
-    if (!params.groupId) return;
     setInviteModalOpen(true);
+    setInviteTab(params.groupId ? 'members' : 'friends');
     setLoadingMembers(true);
     try {
-      const details = await socialApi<GroupDetails>(`/groups/${params.groupId}`);
-      setGroupMembers(details.members || []);
+      const bundlePromise = socialApi<SocialBundle>('/social/bundle').catch(err => {
+        console.warn('[ADDA] Failed to fetch social bundle for invite:', err);
+        return null;
+      });
+      const groupPromise = params.groupId
+        ? socialApi<GroupDetails>(`/groups/${params.groupId}`).catch(err => {
+            console.warn('[ADDA] Failed to fetch group members for invite:', err);
+            return null;
+          })
+        : Promise.resolve(null);
+
+      const [bundle, details] = await Promise.all([bundlePromise, groupPromise]);
+
+      if (details?.members) {
+        setGroupMembers(details.members);
+      }
+      if (bundle) {
+        setContacts(bundle.contacts || []);
+        setMyGroups(bundle.groups || []);
+      }
     } catch (err) {
-      console.warn('[ADDA] Failed to fetch group members for invite:', err);
+      console.warn('[ADDA] Failed to load invite data:', err);
     } finally {
       setLoadingMembers(false);
     }
@@ -124,6 +160,43 @@ export default function HangoutScreen() {
     } finally {
       setInvitingId(null);
     }
+  };
+
+  const handleInviteGroup = async (targetGroupId: string, groupName: string) => {
+    if (invitingGroupId || invitedGroupIds.has(targetGroupId)) return;
+    setInvitingGroupId(targetGroupId);
+    try {
+      const count = await inviteGroupToRoom(targetGroupId);
+      setInvitedGroupIds(prev => new Set([...prev, targetGroupId]));
+      showRouteToast(`Invited ${count} member${count === 1 ? '' : 's'} from ${groupName}!`);
+    } catch (err: any) {
+      Alert.alert('Invite Failed', err.message || 'Could not send group invitation.');
+    } finally {
+      setInvitingGroupId(null);
+    }
+  };
+
+  const handleDeleteRoom = () => {
+    Alert.alert(
+      'Delete Room',
+      'Are you sure you want to delete and end this room? All players will be disconnected and resources freed.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete Room',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteCurrentRoom();
+              showRouteToast('Room ended and deleted.');
+              router.replace('/home');
+            } catch (err: any) {
+              Alert.alert('Action Failed', err.message || 'Could not delete room.');
+            }
+          },
+        },
+      ]
+    );
   };
 
   const handleKickPeer = (peer: RoomPeer) => {
@@ -175,7 +248,14 @@ export default function HangoutScreen() {
     let active = true;
     let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
     const motions = peerMotions.current;
+    const usersByMotionId = motionUsers.current;
+    const sequencesByMotionId = motionSequences.current;
     const onPeer = (peer: RoomPeer) => {
+      for (const [id, name] of usersByMotionId) if (name === peer.userId && id !== peer.motionId) {
+        usersByMotionId.delete(id);
+        sequencesByMotionId.delete(id);
+      }
+      if (peer.motionId !== undefined) usersByMotionId.set(peer.motionId, peer.userId);
       const previous = motions.get(peer.userId)?.peer;
       motions.set(peer.userId, { peer, receivedAt: Date.now() });
       if (!previous || previous.avatar !== peer.avatar || previous.name !== peer.name) {
@@ -184,7 +264,26 @@ export default function HangoutScreen() {
     };
     const onLeft = ({ userId }: { userId: string }) => {
       motions.delete(userId);
+      for (const [id, name] of usersByMotionId) if (name === userId) {
+        usersByMotionId.delete(id);
+        sequencesByMotionId.delete(id);
+      }
       setPeers(current => current.filter(peer => peer.userId !== userId));
+    };
+    const onMotionBatch = (packet: unknown) => {
+      const states = decodeMotionBatch(packet);
+      if (!states) return;
+      const receivedAt = Date.now();
+      for (const state of states) {
+        const userId = usersByMotionId.get(state.motionId);
+        if (!userId) continue;
+        const last = sequencesByMotionId.get(state.motionId);
+        if (last !== undefined && !isNewerSequence(state.seq, last)) continue;
+        const previous = motions.get(userId);
+        if (!previous) continue;
+        sequencesByMotionId.set(state.motionId, state.seq);
+        motions.set(userId, { peer: { ...previous.peer, ...state }, receivedAt });
+      }
     };
     const onMessage = (message: RoomMessage) => setMessages(current => [...current, message].slice(-50));
     const onRadioSync = (radio: { enabled?: boolean; trackIndex?: number }) => {
@@ -202,6 +301,13 @@ export default function HangoutScreen() {
         [{ text: 'Exit', onPress: () => router.replace('/home') }]
       );
     };
+    const onRoomDeleted = (data: { roomId?: string; reason?: string }) => {
+      Alert.alert(
+        'Room Ended',
+        data?.reason || 'The host has ended and deleted this room.',
+        [{ text: 'OK', onPress: () => router.replace('/home') }]
+      );
+    };
     const onReconnect = () => { joinPresence(); setVoiceEpoch(current => current + 1); };
     const joinPresence = () => {
       if (!live || !active) return;
@@ -210,6 +316,7 @@ export default function HangoutScreen() {
         avatar,
         groupId: params.groupId,
         roomId: params.roomId,
+        motionProtocol: 2,
       }, (error: Error | null, result?: { ok: boolean; value?: RoomJoin; error?: string }) => {
         if (!active) return;
         if (error || !result?.ok || !result.value) {
@@ -223,7 +330,14 @@ export default function HangoutScreen() {
           return;
         }
         motions.clear();
-        for (const peer of result.value.peers) motions.set(peer.userId, { peer, receivedAt: Date.now() });
+        usersByMotionId.clear();
+        sequencesByMotionId.clear();
+        motionProtocol.current = result.value.motionProtocol === 2;
+        setMotionV2(motionProtocol.current);
+        for (const peer of result.value.peers) {
+          motions.set(peer.userId, { peer, receivedAt: Date.now() });
+          if (peer.motionId !== undefined) usersByMotionId.set(peer.motionId, peer.userId);
+        }
         setPeers(result.value.peers);
         setMessages(result.value.messages);
         if (result.value.shardId) setShardId(result.value.shardId);
@@ -240,7 +354,7 @@ export default function HangoutScreen() {
           MusicService.playRadioTrack(result.value.radio.trackIndex);
         }
         setChatError('');
-        live?.volatile.emit('room:position', positionRef.current);
+        onPosition(positionRef.current);
       });
     };
     void getRealtimeSocket().then(socket => {
@@ -248,10 +362,12 @@ export default function HangoutScreen() {
       live = socket;
       presenceRef.current = socket;
       socket.on('room:peer', onPeer);
+      socket.on('room:motion-batch', onMotionBatch);
       socket.on('room:peer-left', onLeft);
       socket.on('room:message', onMessage);
       socket.on('room:radio-sync', onRadioSync);
       socket.on('room:kicked', onKicked);
+      socket.on('room:deleted', onRoomDeleted);
       socket.on('connect', onReconnect);
       joinPresence();
     }).catch(error => { if (active) setChatError(error instanceof Error ? error.message : 'Room chat offline.'); });
@@ -259,17 +375,23 @@ export default function HangoutScreen() {
       active = false;
       MusicService.stopAll();
       live?.off('room:peer', onPeer);
+      live?.off('room:motion-batch', onMotionBatch);
       live?.off('room:peer-left', onLeft);
       live?.off('room:message', onMessage);
       live?.off('room:radio-sync', onRadioSync);
       live?.off('room:kicked', onKicked);
+      live?.off('room:deleted', onRoomDeleted);
       live?.off('connect', onReconnect);
       live?.emit('room:leave');
       motions.clear();
+      usersByMotionId.clear();
+      sequencesByMotionId.clear();
+      motionProtocol.current = false;
+      setMotionV2(false);
       setPeers([]);
       if (presenceRef.current === live) presenceRef.current = null;
     };
-  }, [roomKind, username, avatar, focused, showRouteToast, params.groupId, params.roomId, params.groupName]);
+  }, [roomKind, username, avatar, focused, showRouteToast, onPosition, params.groupId, params.roomId, params.groupName]);
 
   // Pause background music when the app is minimized to prevent audio stream conflicts
   useEffect(() => {
@@ -415,7 +537,7 @@ export default function HangoutScreen() {
   return <View style={styles.screen}>
     <StatusBar hidden />
     <NavigationBar hidden />
-    {landscapeReady && (width >= height || orientationFailed) && <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} peerMotionsRef={peerMotions} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} onOpenRadio={() => { setMusicModalTab('radio'); setMusicModalOpen(true); }} />}
+    {landscapeReady && (width >= height || orientationFailed) && <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} peerMotionsRef={peerMotions} motionV2={motionV2} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} onOpenRadio={() => { setMusicModalTab('radio'); setMusicModalOpen(true); }} />}
     <View style={[styles.topBar, { left: Math.max(16, insets.left + 8), right: Math.max(16, insets.right + 8), top: Math.max(8, insets.top + 4) }]}>
       <View style={styles.toolbar}>
         <Pressable accessibilityRole="button" accessibilityLabel="Room menu" accessibilityState={{ expanded: roomMenuOpen }} onPress={() => { setRoomMenuOpen(current => !current); setPlayersOpen(false); setChatOpen(false); }} style={[styles.toolButton, roomMenuOpen && styles.toolButtonActive]}><House size={22} color="#F7FAF8" /></Pressable>
@@ -455,22 +577,35 @@ export default function HangoutScreen() {
           : (roomKind === 'beach' ? 'Goa Beach' : roomKind === 'tea' ? 'Tea Party' : roomKind === 'roof' ? 'School Rooftop' : 'Loft 16')}
       </Text>
       <Text style={styles.roomMenuStatus}>{voiceStatus}</Text>
-      <Pressable accessibilityRole="button" accessibilityLabel={roomKind === 'roof' ? 'Back to Loft' : 'Exit room'} onPress={() => roomKind === 'roof' ? setRoomKind('loft') : router.replace('/home')} style={styles.roomMenuExit}><Text style={styles.roomMenuExitText}>{roomKind === 'roof' ? 'Back to Loft' : 'Exit room'}</Text></Pressable>
+      <View style={styles.roomMenuButtonsRow}>
+        <Pressable accessibilityRole="button" accessibilityLabel={roomKind === 'roof' ? 'Back to Loft' : 'Exit room'} onPress={() => roomKind === 'roof' ? setRoomKind('loft') : router.replace('/home')} style={styles.roomMenuExit}>
+          <Text style={styles.roomMenuExitText}>{roomKind === 'roof' ? 'Back to Loft' : 'Exit room'}</Text>
+        </Pressable>
+        {isOwner && (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Delete and end room"
+            onPress={handleDeleteRoom}
+            style={styles.roomMenuDelete}
+          >
+            <Trash2 size={13} color="#FF6B6B" />
+            <Text style={styles.roomMenuDeleteText}>Delete Room</Text>
+          </Pressable>
+        )}
+      </View>
     </View>}
     {playersOpen && <View style={[styles.playersPanel, { left: Math.max(16, insets.left + 8), top: Math.max(66, insets.top + 62) }]}>
       <View style={styles.playersPanelHeader}>
         <Text style={styles.panelTitle}>Players ({peers.length + 1})</Text>
-        {Boolean(params.groupId) && (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Invite group members"
-            onPress={() => { setPlayersOpen(false); void openInviteModal(); }}
-            style={styles.inviteButtonSmall}
-          >
-            <UserPlus size={13} color="#00E5FF" />
-            <Text style={styles.inviteButtonSmallText}>Invite</Text>
-          </Pressable>
-        )}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Invite members or friends"
+          onPress={() => { setPlayersOpen(false); void openInviteModal(); }}
+          style={styles.inviteButtonSmall}
+        >
+          <UserPlus size={13} color="#00E5FF" />
+          <Text style={styles.inviteButtonSmallText}>Invite</Text>
+        </Pressable>
       </View>
       <ScrollView style={styles.playersList}>
         <View style={styles.playerRow}>
@@ -523,6 +658,17 @@ export default function HangoutScreen() {
         })}
         {!peers.length && <Text style={styles.emptyPlayers}>No one else is here yet.</Text>}
       </ScrollView>
+      {isOwner && (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="End and delete room"
+          onPress={handleDeleteRoom}
+          style={styles.playersDeleteRoomBtn}
+        >
+          <Trash2 size={12} color="#FF6B6B" />
+          <Text style={styles.playersDeleteRoomBtnText}>End & Delete Room</Text>
+        </Pressable>
+      )}
     </View>}
     {chatOpen && <KeyboardAvoidingView style={[styles.chatPanel, { right: Math.max(16, insets.right + 8), bottom: Math.max(14, insets.bottom + 8) }]} behavior="padding">
       <Text style={styles.chatTitle}>Room chat</Text>
@@ -546,9 +692,9 @@ export default function HangoutScreen() {
         <View style={styles.inviteModalCard}>
           <View style={styles.inviteModalHeader}>
             <View>
-              <Text style={styles.inviteModalTitle}>Invite Group Members</Text>
+              <Text style={styles.inviteModalTitle}>Invite to Hangout</Text>
               <Text style={styles.inviteModalSubtitle}>
-                {params.groupName ? `Invite to ${params.groupName} Hangout` : 'Invite to this room'}
+                {params.groupName ? `Room: ${params.groupName}` : 'Invite friends or groups'}
               </Text>
             </View>
             <Pressable
@@ -561,14 +707,43 @@ export default function HangoutScreen() {
             </Pressable>
           </View>
 
+          <View style={styles.inviteTabsRow}>
+            {Boolean(params.groupId) && (
+              <Pressable
+                onPress={() => setInviteTab('members')}
+                style={[styles.inviteTabBtn, inviteTab === 'members' && styles.inviteTabBtnActive]}
+              >
+                <Text style={[styles.inviteTabBtnText, inviteTab === 'members' && styles.inviteTabBtnTextActive]}>
+                  Group Members
+                </Text>
+              </Pressable>
+            )}
+            <Pressable
+              onPress={() => setInviteTab('friends')}
+              style={[styles.inviteTabBtn, inviteTab === 'friends' && styles.inviteTabBtnActive]}
+            >
+              <Text style={[styles.inviteTabBtnText, inviteTab === 'friends' && styles.inviteTabBtnTextActive]}>
+                Friends ({contacts.length})
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setInviteTab('groups')}
+              style={[styles.inviteTabBtn, inviteTab === 'groups' && styles.inviteTabBtnActive]}
+            >
+              <Text style={[styles.inviteTabBtnText, inviteTab === 'groups' && styles.inviteTabBtnTextActive]}>
+                Other Groups
+              </Text>
+            </Pressable>
+          </View>
+
           {loadingMembers ? (
             <View style={styles.inviteLoadingState}>
               <ActivityIndicator size="small" color="#00E5FF" />
-              <Text style={styles.inviteLoadingText}>Loading group members…</Text>
+              <Text style={styles.inviteLoadingText}>Loading…</Text>
             </View>
           ) : (
             <ScrollView style={styles.inviteMemberList}>
-              {(() => {
+              {inviteTab === 'members' && (() => {
                 const inRoomIds = new Set([currentUserId, ...peers.map(p => p.userId)]);
                 const eligible = groupMembers.filter(m => !inRoomIds.has(m.id));
 
@@ -629,6 +804,129 @@ export default function HangoutScreen() {
                   );
                 });
               })()}
+
+              {inviteTab === 'friends' && (() => {
+                const inRoomIds = new Set([currentUserId, ...peers.map(p => p.userId)]);
+                const eligible = contacts.filter(c => !inRoomIds.has(c.id));
+
+                if (!eligible.length) {
+                  return (
+                    <Text style={styles.inviteEmptyText}>
+                      {contacts.length === 0 ? 'No friends on your friend list yet.' : 'All your friends are already in this room!'}
+                    </Text>
+                  );
+                }
+
+                return eligible.map(friend => {
+                  const isInvited = invitedIds.has(friend.id);
+                  const isPending = invitingId === friend.id;
+
+                  return (
+                    <View key={friend.id} style={styles.inviteMemberRow}>
+                      <View style={styles.inviteMemberAvatarWrap}>
+                        {friend.avatarUrl ? (
+                          <Image source={{ uri: friend.avatarUrl }} style={styles.inviteMemberAvatar} />
+                        ) : (
+                          <View style={styles.inviteMemberAvatarFallback}>
+                            <Text style={styles.inviteMemberAvatarFallbackText}>
+                              {friend.name.slice(0, 1).toUpperCase()}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                      <View style={styles.inviteMemberInfo}>
+                        <Text style={styles.inviteMemberName} numberOfLines={1}>{friend.name}</Text>
+                        <Text style={styles.inviteMemberUsername} numberOfLines={1}>@{friend.username}</Text>
+                      </View>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={isInvited ? `Invited ${friend.name}` : `Invite ${friend.name}`}
+                        disabled={isInvited || isPending}
+                        onPress={() => void handleInviteMember(friend.id, friend.name)}
+                        style={[
+                          styles.inviteActionButton,
+                          isInvited && styles.inviteActionButtonSent,
+                        ]}
+                      >
+                        {isPending ? (
+                          <ActivityIndicator size="small" color="#00E5FF" />
+                        ) : isInvited ? (
+                          <>
+                            <Check size={13} color="#34D399" />
+                            <Text style={styles.inviteActionButtonSentText}>Invited</Text>
+                          </>
+                        ) : (
+                          <>
+                            <UserPlus size={13} color="#F7FAF8" />
+                            <Text style={styles.inviteActionButtonText}>Invite</Text>
+                          </>
+                        )}
+                      </Pressable>
+                    </View>
+                  );
+                });
+              })()}
+
+              {inviteTab === 'groups' && (() => {
+                const eligible = myGroups.filter(g => g.id !== params.groupId);
+
+                if (!eligible.length) {
+                  return (
+                    <Text style={styles.inviteEmptyText}>
+                      No other groups available to invite.
+                    </Text>
+                  );
+                }
+
+                return eligible.map(group => {
+                  const isInvited = invitedGroupIds.has(group.id);
+                  const isPending = invitingGroupId === group.id;
+
+                  return (
+                    <View key={group.id} style={styles.inviteMemberRow}>
+                      <View style={styles.inviteMemberAvatarWrap}>
+                        {group.avatarUrl ? (
+                          <Image source={{ uri: group.avatarUrl }} style={styles.inviteMemberAvatar} />
+                        ) : (
+                          <View style={[styles.inviteMemberAvatarFallback, { backgroundColor: '#18384C' }]}>
+                            <Users size={15} color="#00E5FF" />
+                          </View>
+                        )}
+                      </View>
+                      <View style={styles.inviteMemberInfo}>
+                        <Text style={styles.inviteMemberName} numberOfLines={1}>{group.name}</Text>
+                        <Text style={styles.inviteMemberUsername} numberOfLines={1}>
+                          {group.memberCount} member{group.memberCount === 1 ? '' : 's'}
+                        </Text>
+                      </View>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={isInvited ? `Invited ${group.name}` : `Invite ${group.name}`}
+                        disabled={isInvited || isPending}
+                        onPress={() => void handleInviteGroup(group.id, group.name)}
+                        style={[
+                          styles.inviteActionButton,
+                          isInvited && styles.inviteActionButtonSent,
+                        ]}
+                      >
+                        {isPending ? (
+                          <ActivityIndicator size="small" color="#00E5FF" />
+                        ) : isInvited ? (
+                          <>
+                            <Check size={13} color="#34D399" />
+                            <Text style={styles.inviteActionButtonSentText}>Invited</Text>
+                          </>
+                        ) : (
+                          <>
+                            <Users size={13} color="#F7FAF8" />
+                            <Text style={styles.inviteActionButtonText}>Invite Group</Text>
+                          </>
+                        )}
+                      </Pressable>
+                    </View>
+                  );
+                });
+              })()}
             </ScrollView>
           )}
         </View>
@@ -661,8 +959,13 @@ const styles = StyleSheet.create({
   playersList: { maxHeight: 185 },
   panelTitle: { color: '#F7FAF8', fontSize: 13, fontWeight: '800' },
   roomMenuStatus: { color: '#A7B6AC', fontSize: 11, marginBottom: 8 },
+  roomMenuButtonsRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   roomMenuExit: { alignSelf: 'flex-start', backgroundColor: '#FFFFFF1A', borderRadius: 9, paddingHorizontal: 12, paddingVertical: 8 },
   roomMenuExitText: { color: '#F7FAF8', fontSize: 12, fontWeight: '700' },
+  roomMenuDelete: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#FF6B6B22', borderWidth: 1, borderColor: '#FF6B6B44', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 8 },
+  roomMenuDeleteText: { color: '#FF6B6B', fontSize: 11, fontWeight: '800' },
+  playersDeleteRoomBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: '#FF6B6B22', borderWidth: 1, borderColor: '#FF6B6B44', borderRadius: 9, paddingVertical: 7, marginTop: 8 },
+  playersDeleteRoomBtnText: { color: '#FF6B6B', fontSize: 11, fontWeight: '800' },
   playerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 34, gap: 8 },
   playerNameCol: { flexDirection: 'row', alignItems: 'center', gap: 5, flex: 1 },
   ownerBadge: { flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: '#F59E0B22', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 6 },
@@ -679,11 +982,16 @@ const styles = StyleSheet.create({
   chatError: { color: '#FFAAA8', fontSize: 11 }, chatInputRow: { flexDirection: 'row', alignItems: 'center', gap: 8, borderTopWidth: 1, borderColor: '#FFFFFF33' },
   chatInput: { flex: 1, height: 38, color: '#F7FAF8', fontSize: 12 },
   inviteModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center', padding: 16 },
-  inviteModalCard: { width: '85%', maxWidth: 440, maxHeight: 270, backgroundColor: '#10221DF8', borderRadius: 20, borderWidth: 1, borderColor: '#FFFFFF22', padding: 16 },
-  inviteModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, borderBottomWidth: 1, borderColor: '#FFFFFF1A', paddingBottom: 10 },
+  inviteModalCard: { width: '85%', maxWidth: 440, maxHeight: 290, backgroundColor: '#10221DF8', borderRadius: 20, borderWidth: 1, borderColor: '#FFFFFF22', padding: 16 },
+  inviteModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10, borderBottomWidth: 1, borderColor: '#FFFFFF1A', paddingBottom: 8 },
   inviteModalTitle: { color: '#F7FAF8', fontSize: 15, fontWeight: '800' },
   inviteModalSubtitle: { color: '#A7B6AC', fontSize: 11, marginTop: 2 },
   modalCloseButton: { width: 30, height: 30, borderRadius: 15, backgroundColor: '#FFFFFF1A', alignItems: 'center', justifyContent: 'center' },
+  inviteTabsRow: { flexDirection: 'row', gap: 6, marginBottom: 10 },
+  inviteTabBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, backgroundColor: '#FFFFFF14' },
+  inviteTabBtnActive: { backgroundColor: '#00E5FF26', borderWidth: 1, borderColor: '#00E5FF66' },
+  inviteTabBtnText: { color: '#A7B6AC', fontSize: 11, fontWeight: '700' },
+  inviteTabBtnTextActive: { color: '#00E5FF', fontSize: 11, fontWeight: '800' },
   inviteLoadingState: { paddingVertical: 28, alignItems: 'center', justifyContent: 'center', gap: 8 },
   inviteLoadingText: { color: '#A7B6AC', fontSize: 12 },
   inviteMemberList: { maxHeight: 180 },

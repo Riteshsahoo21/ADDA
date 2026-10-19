@@ -311,7 +311,7 @@ export default function CallScreen() {
         await pc.current.setLocalDescription(offer);
         sendSignal(peerId, { type: 'offer', sdp: offer.sdp ?? '' });
         clearConnectionTimer();
-        connectionTimer = setTimeout(requestRelay, 15_000);
+        connectionTimer = setTimeout(requestRelay, 6000);
       } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Could not start media.'); }
     };
 
@@ -338,7 +338,20 @@ export default function CallScreen() {
     const onJoined = (event: { callId: string; userId: string }) => {
       if (event.callId === callId && role === 'caller' && !relayStarted.current) {
         pendingPeer.current = event.userId;
-        if (pc.current) void startOffer(event.userId);
+        if (pc.current) {
+          offered.current = false;
+          void startOffer(event.userId);
+        }
+      }
+    };
+
+    const onReady = (event: { callId: string; from: string }) => {
+      if (event.callId === callId && role === 'caller' && !relayStarted.current) {
+        pendingPeer.current = event.from;
+        if (pc.current) {
+          offered.current = false;
+          void startOffer(event.from);
+        }
       }
     };
 
@@ -351,13 +364,17 @@ export default function CallScreen() {
         socket = await getRealtimeSocket();
         socket.on('call:signal', onSignal);
         socket.on('call:participant-joined', onJoined);
+        socket.on('call:ready', onReady);
         socket.on('call:ended', onEnded);
         socket.on('call:relay', onRelay);
         const joined = await callRequest<CallInfo>('call:join', callId);
         if (!active) return;
         currentCall = joined;
         setCall(joined);
-        if (!paramMedia) {
+        if (joined.media === 'video') {
+          setCameraOff(false);
+          cameraOffRef.current = false;
+        } else if (!paramMedia) {
           const off = joined.media === 'audio';
           setCameraOff(off);
           cameraOffRef.current = off;
@@ -406,8 +423,16 @@ export default function CallScreen() {
         });
 
         for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
-        if (role === 'caller' && (pendingPeer.current || joined.joined.length > 1)) void startOffer(pendingPeer.current || joined.joined.find(id => id !== joined.callerId)!);
-        else setStatus(role === 'caller' ? 'Calling…' : 'Connecting…');
+        if (role === 'caller' && (pendingPeer.current || joined.joined.length > 1)) {
+          void startOffer(pendingPeer.current || joined.joined.find(id => id !== joined.callerId)!);
+        } else {
+          setStatus(role === 'caller' ? 'Calling…' : 'Connecting…');
+          if (role !== 'caller') {
+            socket.emit('call:ready', callId);
+            clearConnectionTimer();
+            connectionTimer = setTimeout(requestRelay, 6000);
+          }
+        }
       } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Call failed.'); }
     })();
 
@@ -415,6 +440,7 @@ export default function CallScreen() {
       active = false;
       socket?.off('call:signal', onSignal);
       socket?.off('call:participant-joined', onJoined);
+      socket?.off('call:ready', onReady);
       socket?.off('call:ended', onEnded);
       socket?.off('call:relay', onRelay);
       clearConnectionTimer();

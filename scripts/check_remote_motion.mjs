@@ -1,33 +1,31 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { sampleRemoteMotion, REMOTE_RENDER_DELAY_MS } from '../src/three/player/remoteMotion.ts';
+import { predictRemoteMotion } from '../src/three/player/remoteMotion.ts';
+import { decodeMotionBatch, encodeMotion, encodeMotionBatch, isNewerSequence } from '../src/lib/room-motion-codec.ts';
 
-const sample = (x, at, pose = 'walk', yaw = 0) => ({
-  peer: { userId: 'peer', name: 'Peer', avatar: 'man', x, y: 0, z: 0, yaw, pose },
+const sample = (x, at, pose = 'walk', vx = 2) => ({
+  peer: { userId: 'peer', name: 'Peer', avatar: 'man', x, y: 0, z: 0, yaw: 0, vx, vz: 0, pose },
   receivedAt: at,
 });
 
-test('interpolates movement between packets on the render timeline', () => {
-  const earlier = sample(0, 1000);
-  const later = sample(1, 1100);
-  const midway = sampleRemoteMotion(earlier, later, 1050 + REMOTE_RENDER_DELAY_MS);
-  assert.equal(midway.x, 0.5);
-  assert.equal(midway.pose, 'walk');
+test('predicts between sparse updates and stops prediction when a packet is stale', () => {
+  assert.equal(predictRemoteMotion(sample(1, 1000), 1150).x, 1.3);
+  assert.equal(predictRemoteMotion(sample(1, 1000), 2000).x, 1.9);
 });
 
-test('bridges a late packet briefly and caps prediction until the next packet', () => {
-  const earlier = sample(0, 1000);
-  const later = sample(1, 1100);
-  assert.equal(sampleRemoteMotion(earlier, later, 1100 + REMOTE_RENDER_DELAY_MS + 50).x, 1.5);
-  assert.equal(sampleRemoteMotion(earlier, later, 2000).x, 1.8);
+test('idle, seated and crouching avatars stay at their reported position', () => {
+  for (const pose of ['idle', 'sit_idle', 'crouch_idle']) assert.equal(predictRemoteMotion(sample(1, 1000, pose), 1400).x, 1);
 });
 
-test('idle avatars do not drift and large position changes snap', () => {
-  assert.equal(sampleRemoteMotion(sample(0, 1000), sample(1, 1100, 'idle'), 1400).x, 1);
-  assert.equal(sampleRemoteMotion(sample(0, 1000), sample(8, 1100), 1100).x, 8);
+test('compact packets retain pose and velocity, reject malformed batches', () => {
+  const state = { motionId: 123, seq: 42, x: 1.23, y: 0.25, z: -2.5, yaw: 0.75, vx: 2, vz: -1, pose: 'sit_idle' };
+  const packet = encodeMotion(state);
+  assert.equal(packet.byteLength, 19);
+  assert.deepEqual(decodeMotionBatch(encodeMotionBatch([state]))?.[0], state);
+  assert.equal(decodeMotionBatch(packet), null);
 });
 
-test('turns through the shortest angle across the wrap boundary', () => {
-  const heading = sampleRemoteMotion(sample(0, 1000, 'walk', Math.PI - 0.1), sample(0, 1100, 'walk', -Math.PI + 0.1), 1050 + REMOTE_RENDER_DELAY_MS).yaw;
-  assert.ok(Math.abs(Math.abs(heading) - Math.PI) < 0.0001);
+test('sequence ordering survives wraparound', () => {
+  assert.equal(isNewerSequence(0, 65535), true);
+  assert.equal(isNewerSequence(65535, 0), false);
 });

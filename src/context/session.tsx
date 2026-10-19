@@ -25,6 +25,7 @@ type Session = {
 const SessionContext = createContext<Session | null>(null);
 
 const SAVED_USER_KEY = 'adda_current_username';
+export let notificationNavigationOccurred = false;
 
 export function SessionProvider({ children }: PropsWithChildren) {
   const [username, setUsername] = useState<string | null>(null);
@@ -107,13 +108,18 @@ export function SessionProvider({ children }: PropsWithChildren) {
     let active = true;
     let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
     const onInvite = (call: CallInfo) => {
+      if (openedNotificationCall.current === call.id) return;
       setIncomingCall(call);
       void showSocketCallNotification(call).catch(error => console.warn('Call alert unavailable:', error));
     };
     const onEnded = ({ callId }: { callId: string }) => setIncomingCall(current => current?.id === callId ? null : current);
     const checkPending = () => {
       live?.timeout(5000).emit('call:pending', (error: Error | null, result?: { ok: boolean; value?: CallInfo[] }) => {
-        if (!error && result?.ok && result.value?.length) setIncomingCall(result.value[result.value.length - 1]);
+        if (!error && result?.ok && result.value?.length) {
+          const latest = result.value[result.value.length - 1];
+          if (openedNotificationCall.current === latest.id) return;
+          setIncomingCall(latest);
+        }
       });
     };
     void getRealtimeSocket().then(value => {
@@ -175,10 +181,18 @@ export function SessionProvider({ children }: PropsWithChildren) {
       }
       if (openedNotificationCall.current === data.callId) return;
       openedNotificationCall.current = data.callId;
-      setIncomingCall(current => current?.id === data.callId ? null : current);
+      notificationNavigationOccurred = true;
+      setIncomingCall(null);
       void Notifications.clearLastNotificationResponseAsync();
-      router.replace('/home');
-      router.push({ pathname: '/call', params: { callId: data.callId, role: 'callee', name: typeof data.callerName === 'string' ? data.callerName : 'ADDA call', media: (data as any)?.media || 'audio' } } as unknown as Href);
+      router.replace({
+        pathname: '/call',
+        params: {
+          callId: data.callId,
+          role: 'callee',
+          name: typeof data.callerName === 'string' ? data.callerName : 'ADDA call',
+          media: (data as any)?.media || 'video',
+        },
+      } as unknown as Href);
     };
     void Notifications.getLastNotificationResponseAsync().then(response => { if (response) openCall(response); });
     const subscription = Notifications.addNotificationResponseReceivedListener(openCall);
@@ -206,6 +220,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
   const answerCall = () => {
     const call = incomingCall;
     if (!call) return;
+    openedNotificationCall.current = call.id;
     setIncomingCall(null);
     router.push({ pathname: '/call', params: { callId: call.id, role: 'callee', name: call.callerName, media: call.media } } as unknown as Href);
   };

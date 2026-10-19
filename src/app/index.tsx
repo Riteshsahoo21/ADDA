@@ -6,15 +6,22 @@ import { router } from 'expo-router';
 import * as Notifications from 'expo-notifications';
 import { AddaLogo } from '@/components/ui/AddaLogo';
 import { colors } from '@/constants/theme';
-import { useSession } from '@/context/session';
+import { useSession, notificationNavigationOccurred } from '@/context/session';
 
 export default function WelcomeScreen() {
   const { username, isRestoring } = useSession();
   const [progress] = useState(() => new Animated.Value(0));
   const [percent, setPercent] = useState(0);
+  const [handledNotification, setHandledNotification] = useState(false);
 
   useEffect(() => {
     void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+    void Notifications.getLastNotificationResponseAsync().then(last => {
+      const data = last?.notification?.request?.content?.data;
+      if (data?.kind === 'chat' || data?.kind === 'call' || data?.kind === 'room_invite') {
+        setHandledNotification(true);
+      }
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -25,7 +32,7 @@ export default function WelcomeScreen() {
   }, [progress]);
 
   useEffect(() => {
-    if (isRestoring) return;
+    if (isRestoring || handledNotification || notificationNavigationOccurred) return;
 
     let navigationTimer: ReturnType<typeof setTimeout> | undefined;
     const animation = Animated.timing(progress, {
@@ -39,9 +46,10 @@ export default function WelcomeScreen() {
       if (finished) {
         setPercent(100);
         navigationTimer = setTimeout(async () => {
+          if (notificationNavigationOccurred) return;
           const last = await Notifications.getLastNotificationResponseAsync().catch(() => null);
           const data = last?.notification?.request?.content?.data;
-          if (data?.kind === 'chat' || data?.kind === 'call') {
+          if (data?.kind === 'chat' || data?.kind === 'call' || data?.kind === 'room_invite') {
             return;
           }
           router.replace(username ? '/home' : '/login');
@@ -53,7 +61,7 @@ export default function WelcomeScreen() {
       animation.stop();
       if (navigationTimer) clearTimeout(navigationTimer);
     };
-  }, [isRestoring, progress, username]);
+  }, [isRestoring, progress, username, handledNotification]);
 
   return (
     <SafeAreaView style={styles.screen}>
