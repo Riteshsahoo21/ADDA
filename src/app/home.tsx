@@ -7,7 +7,7 @@ import { Check, CirclePlus, DoorOpen, EllipsisVertical, MessageCircle, Phone, Pl
 import { BottomNav, type HubTab } from '@/components/ui/BottomNav';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
-import { socialApi, type ChatGroup, type FriendRequest, type OwnProfile, type PublicProfile, type SocialBundle } from '@/lib/social-api';
+import { socialApi, type ActiveGroupRoom, type ChatGroup, type FriendRequest, type HangoutUpdatesResponse, type OwnProfile, type PublicProfile, type RoomInvitation, type SocialBundle } from '@/lib/social-api';
 import { getRealtimeSocket, type TypingEvent } from '@/lib/realtime';
 import { TypingDots } from '@/components/ui/TypingDots';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
@@ -40,6 +40,8 @@ export default function HomeScreen() {
   const [people, setPeople] = useState<PublicProfile[]>(initialCache?.people || []);
   const [groups, setGroups] = useState<ChatGroup[]>(initialCache?.groups || []);
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>(initialCache?.friendRequests || []);
+  const [activeHangouts, setActiveHangouts] = useState<ActiveGroupRoom[]>([]);
+  const [roomInvites, setRoomInvites] = useState<RoomInvitation[]>([]);
   const [search, setSearch] = useState('');
   const [sheet, setSheet] = useState<Sheet>(null);
   const [room, setRoom] = useState<Room>('loft');
@@ -156,11 +158,39 @@ export default function HomeScreen() {
     }
   }, [username]);
 
+  const refreshHangouts = useCallback(async () => {
+    try {
+      const res = await socialApi<HangoutUpdatesResponse>('/updates/hangouts');
+      setActiveHangouts(res.activeRooms || []);
+      setRoomInvites(res.invites || []);
+    } catch {}
+  }, []);
+
+  const respondToInvite = async (inviteId: string, decision: 'accept' | 'dismiss') => {
+    const invite = roomInvites.find(i => i.id === inviteId);
+    setRoomInvites(curr => curr.filter(i => i.id !== inviteId));
+    try {
+      await socialApi(`/room-invites/${encodeURIComponent(inviteId)}/respond`, 'POST', { decision });
+    } catch {}
+    if (decision === 'accept' && invite) {
+      router.push({
+        pathname: '/hangout',
+        params: {
+          room: invite.roomKind,
+          groupId: invite.groupId,
+          roomId: invite.roomId,
+          roomOwnerId: '',
+        },
+      } as unknown as Href);
+    }
+  };
+
   useFocusEffect(useCallback(() => {
     const cached = getCachedProfile() || getCachedSocialBundle()?.me;
     if (cached) setProfile(cached);
     void refresh();
-  }, [refresh]));
+    void refreshHangouts();
+  }, [refresh, refreshHangouts]));
 
   const refreshSocial = useCallback(async () => {
     try {
@@ -279,12 +309,18 @@ export default function HomeScreen() {
       typingExpiry.current.clear();
       setTyping({});
     };
+    const onRoomUpdated = () => { void refreshHangouts(); };
+    const onRoomInvite = (inv: RoomInvitation) => {
+      setRoomInvites(curr => [inv, ...curr.filter(i => i.id !== inv.id)]);
+    };
     void getRealtimeSocket().then(value => {
       if (!active) return;
       live = value;
       value.on('chat:encrypted:update', onUpdate);
       value.on('chat:message_deleted', onUpdate);
       value.on('friends:updated', onFriendUpdate);
+      value.on('group:room_updated', onRoomUpdated);
+      value.on('room:invitation', onRoomInvite);
       value.on('connect', onUpdate);
       value.on('disconnect', clearTyping);
       value.on('chat:typing', onTyping);
@@ -295,11 +331,13 @@ export default function HomeScreen() {
       live?.off('chat:encrypted:update', onUpdate);
       live?.off('chat:message_deleted', onUpdate);
       live?.off('friends:updated', onFriendUpdate);
+      live?.off('group:room_updated', onRoomUpdated);
+      live?.off('room:invitation', onRoomInvite);
       live?.off('connect', onUpdate);
       live?.off('disconnect', clearTyping);
       live?.off('chat:typing', onTyping);
     };
-  }, [username, refresh, profile?.id, refreshSocial]);
+  }, [username, refresh, profile?.id, refreshSocial, refreshHangouts]);
 
   const visibleContacts = useMemo(() => {
     return contacts
@@ -435,7 +473,7 @@ export default function HomeScreen() {
     setBusy(true); setError('');
     try {
       const call = await callRequest<CallInfo>('call:start', { target: { kind, id }, media });
-      router.push({ pathname: '/call', params: { callId: call.id, role: call.callerId === profile?.id ? 'caller' : 'callee', name } } as unknown as Href);
+      router.push({ pathname: '/call', params: { callId: call.id, role: call.callerId === profile?.id ? 'caller' : 'callee', name, media: call.media } } as unknown as Href);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not start call.'); }
     finally { setBusy(false); }
   };
@@ -507,24 +545,133 @@ export default function HomeScreen() {
 
       {tab === 'updates' && <>
         <Text style={styles.pageTitle}>Updates</Text>
-        <Text style={styles.pageCopy}>Friend requests appear here.</Text>
+        <Text style={styles.pageCopy}>Live group rooms, invitations and friend requests.</Text>
         {!!error && <Text style={styles.errorText}>{error}</Text>}
-        {friendRequests.filter(item => item.recipientId === profile?.id).map(item => <View key={item.id} style={styles.requestCard}>
-          <View style={styles.requestHeaderRow}>
-            {item.senderAvatarUrl ? (
-              <Image source={{ uri: item.senderAvatarUrl }} style={styles.requestAvatarImg} />
-            ) : (
-              <View style={styles.requestAvatarPlaceholder}><Text style={styles.requestAvatarInitial}>{item.senderName[0]?.toUpperCase()}</Text></View>
-            )}
-            <View style={{ flex: 1 }}>
-              <Text style={styles.personName}>{item.senderName}</Text>
-              <Text style={styles.personDetail}>@{item.senderUsername} sent you a friend request</Text>
-            </View>
+
+        {/* 1. ACTIVE GROUP ROOMS */}
+        {activeHangouts.length > 0 && (
+          <View style={{ marginBottom: 16 }}>
+            <Text style={styles.section}>Live Group Rooms</Text>
+            {activeHangouts.map(item => {
+              const roomTitle = item.roomKind === 'beach' ? 'Goa Beach'
+                : item.roomKind === 'tea' ? 'Tea Party'
+                : item.roomKind === 'roof' ? 'School Rooftop'
+                : 'Loft 16';
+              const emoji = item.roomKind === 'beach' ? '🏖️'
+                : item.roomKind === 'tea' ? '☕'
+                : item.roomKind === 'roof' ? '🏫'
+                : '🏢';
+              return (
+                <View key={item.id} style={styles.requestCard}>
+                  <View style={styles.requestHeaderRow}>
+                    <View style={[styles.roomIcon, { width: 44, height: 44, borderRadius: 12, backgroundColor: '#277A55' }]}>
+                      <Text style={{ fontSize: 22 }}>{emoji}</Text>
+                    </View>
+                    <View style={{ flex: 1, marginLeft: 10 }}>
+                      <Text style={styles.personName}>{item.groupName}</Text>
+                      <Text style={styles.personDetail}>
+                        {item.creatorName} started a room • {roomTitle}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={styles.requestActions}>
+                    <Pressable
+                      onPress={() => {
+                        router.push({
+                          pathname: '/hangout',
+                          params: {
+                            room: item.roomKind,
+                            groupId: item.groupId,
+                            roomId: item.id,
+                            roomOwnerId: item.creatorId,
+                          },
+                        } as unknown as Href);
+                      }}
+                      style={[styles.acceptButton, { backgroundColor: '#25D366', flexDirection: 'row', gap: 6, alignItems: 'center' }]}
+                    >
+                      <DoorOpen size={16} color="#FFFFFF" />
+                      <Text style={styles.acceptText}>Join Room</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              );
+            })}
           </View>
-          <View style={styles.requestActions}><Pressable onPress={() => void respondToFriend(item.id, 'accept')} style={styles.acceptButton}><Text style={styles.acceptText}>Accept</Text></Pressable><Pressable onPress={() => void respondToFriend(item.id, 'decline')} style={styles.declineButton}><Text style={styles.declineText}>Decline</Text></Pressable></View>
-        </View>)}
+        )}
+
+        {/* 2. ROOM INVITATIONS */}
+        {roomInvites.length > 0 && (
+          <View style={{ marginBottom: 16 }}>
+            <Text style={styles.section}>Room Invitations</Text>
+            {roomInvites.map(item => {
+              const roomTitle = item.roomKind === 'beach' ? 'Goa Beach'
+                : item.roomKind === 'tea' ? 'Tea Party'
+                : item.roomKind === 'roof' ? 'School Rooftop'
+                : 'Loft 16';
+              return (
+                <View key={item.id} style={styles.requestCard}>
+                  <View style={styles.requestHeaderRow}>
+                    {item.inviterAvatarUrl ? (
+                      <Image source={{ uri: item.inviterAvatarUrl }} style={styles.requestAvatarImg} />
+                    ) : (
+                      <View style={styles.requestAvatarPlaceholder}>
+                        <Text style={styles.requestAvatarInitial}>{item.inviterName[0]?.toUpperCase()}</Text>
+                      </View>
+                    )}
+                    <View style={{ flex: 1, marginLeft: item.inviterAvatarUrl ? 10 : 0 }}>
+                      <Text style={styles.personName}>{item.inviterName}</Text>
+                      <Text style={styles.personDetail}>
+                        Invited you to join {roomTitle} in {item.groupName}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={styles.requestActions}>
+                    <Pressable onPress={() => void respondToInvite(item.id, 'accept')} style={styles.acceptButton}>
+                      <Text style={styles.acceptText}>Join</Text>
+                    </Pressable>
+                    <Pressable onPress={() => void respondToInvite(item.id, 'dismiss')} style={styles.declineButton}>
+                      <Text style={styles.declineText}>Dismiss</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        )}
+
+        {/* 3. FRIEND REQUESTS */}
+        {friendRequests.filter(item => item.recipientId === profile?.id).length > 0 && (
+          <View style={{ marginBottom: 16 }}>
+            <Text style={styles.section}>Friend Requests</Text>
+            {friendRequests.filter(item => item.recipientId === profile?.id).map(item => (
+              <View key={item.id} style={styles.requestCard}>
+                <View style={styles.requestHeaderRow}>
+                  {item.senderAvatarUrl ? (
+                    <Image source={{ uri: item.senderAvatarUrl }} style={styles.requestAvatarImg} />
+                  ) : (
+                    <View style={styles.requestAvatarPlaceholder}><Text style={styles.requestAvatarInitial}>{item.senderName[0]?.toUpperCase()}</Text></View>
+                  )}
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.personName}>{item.senderName}</Text>
+                    <Text style={styles.personDetail}>@{item.senderUsername} sent you a friend request</Text>
+                  </View>
+                </View>
+                <View style={styles.requestActions}>
+                  <Pressable onPress={() => void respondToFriend(item.id, 'accept')} style={styles.acceptButton}><Text style={styles.acceptText}>Accept</Text></Pressable>
+                  <Pressable onPress={() => void respondToFriend(item.id, 'decline')} style={styles.declineButton}><Text style={styles.declineText}>Decline</Text></Pressable>
+                </View>
+              </View>
+            ))}
+          </View>
+        )}
+
         {friendRequests.filter(item => item.senderId === profile?.id).map(item => <View key={item.id} style={styles.requestCard}><Text style={styles.personName}>{item.recipientName}</Text><Text style={styles.personDetail}>Request sent to @{item.recipientUsername}</Text></View>)}
-        {friendRequests.length === 0 && <View style={styles.empty}><Text style={styles.emptyTitle}>No friend requests</Text><Text style={styles.emptyCopy}>Requests you send or receive will appear here.</Text></View>}
+        {friendRequests.length === 0 && activeHangouts.length === 0 && roomInvites.length === 0 && (
+          <View style={styles.empty}>
+            <Text style={styles.emptyTitle}>No updates right now</Text>
+            <Text style={styles.emptyCopy}>Live group hangouts, room invites, and friend requests will appear here.</Text>
+          </View>
+        )}
       </>}
       {tab === 'calls' && <>
         <Text style={styles.pageTitle}>Calls</Text><Text style={styles.pageCopy}>Start a voice or video call with your contacts or groups.</Text>
@@ -536,7 +683,7 @@ export default function HomeScreen() {
     </ScrollView>
 
     {tab === 'chats' && <Pressable accessibilityLabel="Add contact or group" onPress={() => openSheet('add')} style={styles.fab}><Plus size={30} strokeWidth={2.4} color="#FFFFFF" /></Pressable>}
-    <BottomNav active={tab} onSelect={selectTab} updateCount={friendRequests.filter(item => item.recipientId === profile?.id).length} />
+    <BottomNav active={tab} onSelect={selectTab} updateCount={friendRequests.filter(item => item.recipientId === profile?.id).length + roomInvites.length + activeHangouts.length} />
 
     <Modal visible={sheet !== null} transparent animationType="fade" onRequestClose={() => setSheet(null)}>
       <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>

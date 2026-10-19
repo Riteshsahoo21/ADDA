@@ -85,9 +85,38 @@ export function mediaFromBody(body: string): EncryptedMedia | null {
   } catch { return null; }
 }
 
+export type RoomCardPayload = {
+  type: 'room_card';
+  roomId: string;
+  groupId: string;
+  groupName: string;
+  roomKind: string;
+  creatorId: string;
+  creatorName: string;
+  createdAt: string;
+};
+
+export function roomCardFromBody(body: string): RoomCardPayload | null {
+  if (!body || !body.startsWith('__adda_room_card__:')) return null;
+  try {
+    const data = JSON.parse(body.slice('__adda_room_card__:'.length));
+    return data.type === 'room_card' ? data : null;
+  } catch {
+    return null;
+  }
+}
+
 export function previewBody(body: string, isMine?: boolean): string {
   if (body === '__adda_deleted__') {
     return isMine ? '🚫 You deleted this message' : '🚫 This message was deleted';
+  }
+  const roomCard = roomCardFromBody(body);
+  if (roomCard) {
+    const roomTitle = roomCard.roomKind === 'beach' ? 'Goa Beach'
+      : roomCard.roomKind === 'tea' ? 'Tea Party'
+      : roomCard.roomKind === 'roof' ? 'School Rooftop'
+      : 'Loft 16';
+    return `🌴 ${roomCard.creatorName} started a room: ${roomTitle}`;
   }
   const media = mediaFromBody(body);
   return media ? (media.mediaKind === 'image' ? '📷 Photo' : '🎥 Video') : body;

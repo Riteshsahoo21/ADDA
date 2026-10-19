@@ -131,7 +131,7 @@ export default function GroupInfoScreen() {
       });
       router.push({
         pathname: '/call',
-        params: { callId: call.id, role: 'caller', name: group.name },
+        params: { callId: call.id, role: 'caller', name: group.name, media: call.media },
       } as unknown as Href);
     } catch (err) {
       Alert.alert('Call error', err instanceof Error ? err.message : 'Could not start call.');

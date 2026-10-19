@@ -58,8 +58,9 @@ export default function CallScreen() {
 
   const insets = useSafeAreaInsets();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
-  const { callId, role, name } = useLocalSearchParams<{ callId?: string; role?: string; name?: string }>();
+  const { callId, role, name, media: paramMedia } = useLocalSearchParams<{ callId?: string; role?: string; name?: string; media?: string }>();
 
+  const initialCameraOff = paramMedia === 'audio';
   const [call, setCall] = useState<CallInfo | null>(null);
   const [status, setStatus] = useState(callId ? 'Connecting…' : 'Call unavailable.');
   const [callDuration, setCallDuration] = useState(0);
@@ -67,7 +68,7 @@ export default function CallScreen() {
   const [remote, setRemote] = useState<MediaStream | null>(null);
   const [groupTracks, setGroupTracks] = useState<RemoteTrack[]>([]);
   const [muted, setMuted] = useState(false);
-  const [cameraOff, setCameraOff] = useState(false);
+  const [cameraOff, setCameraOff] = useState(initialCameraOff);
   const [speakerOn, setSpeakerOn] = useState(true);
   const [isHeadsetConnected, setIsHeadsetConnected] = useState(false);
   const [routeToast, setRouteToast] = useState<string | null>(null);
@@ -75,7 +76,7 @@ export default function CallScreen() {
 
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mutedRef = useRef(false);
-  const cameraOffRef = useRef(false);
+  const cameraOffRef = useRef(initialCameraOff);
   const speakerOnRef = useRef(true);
   const isBluetoothRef = useRef(false);
   const isHeadsetConnectedRef = useRef(false);
@@ -275,8 +276,12 @@ export default function CallScreen() {
         groupMedia.current = media;
         media.setMuted(mutedRef.current);
         media.setCameraOff(cameraOffRef.current);
-        await media.join({ kind: 'call', id: callId }, currentCall.media === 'video');
-        if (active) { setLocal(media.local); setStatus('Connected through ADDA server'); }
+        await media.join({ kind: 'call', id: callId }, !cameraOffRef.current);
+        if (active) {
+          localRef.current = media.local;
+          setLocal(media.local);
+          setStatus('Connected through ADDA server');
+        }
       } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Call relay unavailable.'); }
     };
 
@@ -351,6 +356,12 @@ export default function CallScreen() {
         const joined = await callRequest<CallInfo>('call:join', callId);
         if (!active) return;
         currentCall = joined;
+        setCall(joined);
+        if (!paramMedia) {
+          const off = joined.media === 'audio';
+          setCameraOff(off);
+          cameraOffRef.current = off;
+        }
 
         if (joined.usingRelay) { await startRelay(); return; }
         if (joined.target.kind === 'group') {
@@ -358,8 +369,9 @@ export default function CallScreen() {
           groupMedia.current = media;
           media.setMuted(mutedRef.current);
           media.setCameraOff(cameraOffRef.current);
-          await media.join({ kind: 'call', id: joined.id }, joined.media === 'video');
+          await media.join({ kind: 'call', id: joined.id }, !cameraOffRef.current);
           if (!active) return;
+          localRef.current = media.local;
           setLocal(media.local);
           setStatus('Connected');
           return;
@@ -431,15 +443,43 @@ export default function CallScreen() {
     }
   };
 
-  const toggleCamera = () => {
+  const toggleCamera = async () => {
     const next = !cameraOffRef.current;
     cameraOffRef.current = next;
-    localRef.current?.getVideoTracks().forEach(track => { track.enabled = !next; });
-    groupMedia.current?.setCameraOff(next);
     setCameraOff(next);
+
+    if (groupMedia.current) {
+      const updatedStream = await groupMedia.current.setCameraOff(next);
+      if (updatedStream) {
+        localRef.current = updatedStream;
+        setLocal(updatedStream);
+      }
+    } else if (localRef.current) {
+      const videoTracks = localRef.current.getVideoTracks();
+      if (videoTracks.length === 0 && !next) {
+        try {
+          const videoStream = await mediaDevices.getUserMedia({ audio: false, video: true });
+          const track = videoStream.getVideoTracks()[0];
+          if (track) {
+            track.enabled = true;
+            localRef.current.addTrack(track);
+            pc.current?.addTrack(track, localRef.current);
+            setLocal(localRef.current);
+          }
+        } catch (err) {
+          console.warn('Failed to enable camera in 1:1 call:', err);
+        }
+      } else {
+        videoTracks.forEach(track => { track.enabled = !next; });
+      }
+    }
   };
 
   const flipCamera = () => {
+    if (groupMedia.current) {
+      groupMedia.current.flipCamera();
+      return;
+    }
     const videoTrack = localRef.current?.getVideoTracks()[0];
     if (videoTrack && typeof (videoTrack as any)._switchCamera === 'function') {
       (videoTrack as any)._switchCamera();
@@ -473,12 +513,17 @@ export default function CallScreen() {
     router.back();
   };
 
-  const isVideoCall = call?.media === 'video';
-  const isGroup = call?.target.kind === 'group' || groupTracks.length > 0;
   const videoTracks = groupTracks.filter(track => track.kind === 'video');
   const audioTracks = groupTracks.filter(track => track.kind === 'audio');
+  const isVideoCall =
+    call?.media === 'video' ||
+    paramMedia === 'video' ||
+    videoTracks.length > 0 ||
+    (!cameraOff && Boolean(local?.getVideoTracks().length));
+  const isGroup = call?.target.kind === 'group' || groupTracks.length > 0;
   const isDirect1on1Video = !isGroup && Boolean(remote) && isVideoCall;
   const displayName = name || (isGroup ? 'Group Call' : 'ADDA Call');
+  const participantIds = Array.from(new Set(groupTracks.map(t => t.userId)));
 
   // Compute WhatsApp-style smart responsive grid tile dimensions
   const getGridTileStyle = (index: number, total: number) => {
@@ -489,7 +534,6 @@ export default function CallScreen() {
       return styles.tileHalfVertical;
     }
     if (total === 3) {
-      // 1 on top (100% width, 50% height), 2 on bottom side-by-side (50% width, 50% height)
       if (index === 0) return styles.tileHalfVertical;
       return styles.tileQuarter;
     }
@@ -507,35 +551,74 @@ export default function CallScreen() {
       {isVideoCall ? (
         <View style={styles.videoStage}>
           {isDirect1on1Video ? (
-            // 1:1 Video Call: Remote fills 100% full screen
-            <RTCView streamURL={remote!.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" />
-          ) : videoTracks.length > 0 ? (
+            // 1:1 Video Call
+            remote && remote.getVideoTracks().length > 0 ? (
+              <RTCView streamURL={remote.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" />
+            ) : (
+              <View style={styles.audioCenterStage}>
+                <View style={styles.largeAvatarCircle}>
+                  <Text style={styles.largeAvatarText}>{displayName[0]?.toUpperCase() || 'A'}</Text>
+                </View>
+                <Text style={styles.audioCallerName}>{displayName}</Text>
+                <Text style={styles.audioCallTimer}>{status === 'Connected' ? (remote ? 'Camera off' : 'Connecting video…') : status}</Text>
+              </View>
+            )
+          ) : participantIds.length > 0 ? (
             // Group Video Call: Dynamic full-screen grid
             <View style={styles.fullGridContainer}>
-              {videoTracks.map((track, idx) => (
-                <View key={track.producerId} style={[styles.gridTile, getGridTileStyle(idx, videoTracks.length)]}>
-                  <RTCView streamURL={track.stream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" />
-                  <View style={styles.tileBadge}>
-                    <Text style={styles.tileBadgeText} numberOfLines={1}>
-                      {userNames[track.userId] || `User ${track.userId.slice(0, 4)}`}
-                    </Text>
+              {participantIds.map((userId, idx) => {
+                const userVideo = videoTracks.find(t => t.userId === userId);
+                const participantName = userNames[userId] || `User ${userId.slice(0, 4)}`;
+                return (
+                  <View key={userId} style={[styles.gridTile, getGridTileStyle(idx, participantIds.length)]}>
+                    {userVideo ? (
+                      <RTCView streamURL={userVideo.stream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" />
+                    ) : (
+                      <View style={styles.audioCardAvatarTile}>
+                        <View style={styles.audioCardAvatar}>
+                          <Text style={styles.audioCardAvatarText}>
+                            {(participantName[0] || 'U').toUpperCase()}
+                          </Text>
+                        </View>
+                        <View style={styles.cameraOffPill}>
+                          <VideoOff size={12} color="#FFFFFF" style={{ marginRight: 4 }} />
+                          <Text style={styles.cameraOffPillText}>Camera off</Text>
+                        </View>
+                      </View>
+                    )}
+                    <View style={styles.tileBadge}>
+                      <Text style={styles.tileBadgeText} numberOfLines={1}>
+                        {participantName}
+                      </Text>
+                    </View>
                   </View>
-                </View>
-              ))}
+                );
+              })}
             </View>
           ) : (
-            // Waiting for video / Camera off state
+            // Waiting for others to join in group call
             <View style={styles.audioCenterStage}>
               <View style={styles.largeAvatarCircle}>
                 <Text style={styles.largeAvatarText}>{displayName[0]?.toUpperCase() || 'A'}</Text>
               </View>
+              <Text style={styles.audioCallerName}>{displayName}</Text>
+              <Text style={styles.audioCallTimer}>
+                {status === 'Connected' ? 'Waiting for others to join…' : status}
+              </Text>
             </View>
           )}
 
           {/* 1:1 or Group Floating PiP Preview (Top-Right) */}
-          {local && !cameraOff && (
+          {local && (
             <Pressable onPress={flipCamera} style={[styles.pipContainer, { top: insets.top + 70 }]}>
-              <RTCView streamURL={local.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={true} />
+              {!cameraOff && local.getVideoTracks().length > 0 ? (
+                <RTCView streamURL={local.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={true} />
+              ) : (
+                <View style={styles.pipCameraOffView}>
+                  <User size={26} color="#8E9BA8" />
+                  <Text style={styles.pipCameraOffText}>Camera off</Text>
+                </View>
+              )}
               <View style={styles.pipBadge}>
                 <Text style={styles.pipBadgeText}>You</Text>
               </View>
@@ -547,21 +630,24 @@ export default function CallScreen() {
            AUDIO CALL SMART GRID / CENTERING
            ======================================================== */
         <View style={styles.audioStage}>
-          {audioTracks.length > 1 ? (
+          {participantIds.length > 1 ? (
             // Group Audio Grid (WhatsApp style full tiles)
             <View style={styles.fullGridContainer}>
-              {audioTracks.map((track, idx) => (
-                <View key={track.producerId} style={[styles.audioGridTile, getGridTileStyle(idx, audioTracks.length)]}>
-                  <View style={styles.audioCardAvatar}>
-                    <Text style={styles.audioCardAvatarText}>
-                      {(userNames[track.userId]?.[0] || 'U').toUpperCase()}
+              {participantIds.map((userId, idx) => {
+                const participantName = userNames[userId] || `User ${userId.slice(0, 4)}`;
+                return (
+                  <View key={userId} style={[styles.audioGridTile, getGridTileStyle(idx, participantIds.length)]}>
+                    <View style={styles.audioCardAvatar}>
+                      <Text style={styles.audioCardAvatarText}>
+                        {(participantName[0] || 'U').toUpperCase()}
+                      </Text>
+                    </View>
+                    <Text style={styles.audioCardName} numberOfLines={1}>
+                      {participantName}
                     </Text>
                   </View>
-                  <Text style={styles.audioCardName} numberOfLines={1}>
-                    {userNames[track.userId] || `User ${track.userId.slice(0, 4)}`}
-                  </Text>
-                </View>
-              ))}
+                );
+              })}
             </View>
           ) : (
             // 1:1 Audio Call Central Display
@@ -615,19 +701,17 @@ export default function CallScreen() {
             {muted ? <MicOff size={22} color="#FFFFFF" /> : <Mic size={22} color="#FFFFFF" />}
           </Pressable>
 
-          {/* Video Toggle Button (for video calls) */}
-          {isVideoCall && (
-            <Pressable
-              accessibilityLabel={cameraOff ? 'Turn camera on' : 'Turn camera off'}
-              onPress={toggleCamera}
-              style={[styles.controlBtn, cameraOff && styles.controlBtnActiveRed]}
-            >
-              {cameraOff ? <VideoOff size={22} color="#FFFFFF" /> : <Video size={22} color="#FFFFFF" />}
-            </Pressable>
-          )}
+          {/* Video Toggle Button (Turn camera on/off - unhide/hide) */}
+          <Pressable
+            accessibilityLabel={cameraOff ? 'Turn camera on' : 'Turn camera off'}
+            onPress={toggleCamera}
+            style={[styles.controlBtn, cameraOff && styles.controlBtnActiveRed]}
+          >
+            {cameraOff ? <VideoOff size={22} color="#FFFFFF" /> : <Video size={22} color="#FFFFFF" />}
+          </Pressable>
 
-          {/* Flip Camera Button (if video is on) */}
-          {isVideoCall && !cameraOff && (
+          {/* Flip Camera Button (when camera is on) */}
+          {!cameraOff && (
             <Pressable
               accessibilityLabel="Flip camera"
               onPress={flipCamera}
@@ -752,6 +836,38 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 10,
     fontWeight: '700',
+  },
+  pipCameraOffView: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#0F261C',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  pipCameraOffText: {
+    color: '#8E9BA8',
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  audioCardAvatarTile: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#12251D',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cameraOffPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    marginTop: 6,
+  },
+  cameraOffPillText: {
+    color: '#D1D5DB',
+    fontSize: 11,
+    fontWeight: '600',
   },
   audioCenterStage: {
     flex: 1,

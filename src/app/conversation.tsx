@@ -29,6 +29,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  DoorOpen,
   Download,
   MoreVertical,
   Paperclip,
@@ -45,7 +46,7 @@ import {
   X,
 } from 'lucide-react-native';
 import { colors } from '@/constants/theme';
-import { socialApi, type ChatGroup, type GroupDetails, type GroupMember, type OwnProfile, type PublicProfile } from '@/lib/social-api';
+import { socialApi, type ActiveGroupRoom, type ChatGroup, type GroupDetails, type GroupMember, type OwnProfile, type PublicProfile } from '@/lib/social-api';
 import { getRealtimeSocket, type ChatTarget, type TypingEvent } from '@/lib/realtime';
 import {
   deleteLocalMessage,
@@ -61,6 +62,7 @@ import {
   localMessages,
   markChatRead,
   mediaFromBody,
+  roomCardFromBody,
   onChatChanged,
   openEncryptedMedia,
   prefetchChatKeys,
@@ -74,6 +76,7 @@ import {
   type Envelope,
   type LocalMessage,
   type QuotedReply,
+  type RoomCardPayload,
 } from '@/lib/encrypted-chat';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { TypingDots } from '@/components/ui/TypingDots';
@@ -214,7 +217,14 @@ export default function ConversationScreen() {
   const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
+  // Group Hangout Rooms
+  const [showRoomModal, setShowRoomModal] = useState(false);
+  const [activeGroupRoom, setActiveGroupRoom] = useState<ActiveGroupRoom | null>(null);
+  const [selectedRoomTheme, setSelectedRoomTheme] = useState<'beach' | 'tea' | 'loft' | 'roof'>('beach');
+  const [creatingRoom, setCreatingRoom] = useState(false);
+
   const flatListRef = useRef<FlatList<LocalMessage>>(null);
+
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const typingExpiry = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const lastTyping = useRef(0);
@@ -267,6 +277,76 @@ export default function ConversationScreen() {
   useEffect(() => {
     if (avatar) setChatAvatarUrl(avatar);
   }, [avatar]);
+
+  const checkActiveRoom = useCallback(async () => {
+    if (kind !== 'group' || !target?.id) return;
+    try {
+      const res = await socialApi<{ active: boolean; room: ActiveGroupRoom | null }>(`/groups/${target.id}/rooms/active`);
+      if (res.active && res.room) {
+        setActiveGroupRoom(res.room);
+      } else {
+        setActiveGroupRoom(null);
+      }
+    } catch {}
+  }, [kind, target?.id]);
+
+  useEffect(() => {
+    void checkActiveRoom();
+  }, [checkActiveRoom]);
+
+  useEffect(() => {
+    let live: any = null;
+    const onRoomUpdated = (data: any) => {
+      if (data?.groupId === target?.id) {
+        setActiveGroupRoom(data);
+      }
+    };
+    void getRealtimeSocket().then(sock => {
+      live = sock;
+      sock.on('group:room_updated', onRoomUpdated);
+    });
+    return () => {
+      live?.off('group:room_updated', onRoomUpdated);
+    };
+  }, [target?.id]);
+
+  const handleCreateGroupRoom = async (theme: 'beach' | 'tea' | 'loft' | 'roof') => {
+    if (!target?.id || creatingRoom) return;
+    setCreatingRoom(true);
+    try {
+      const res = await socialApi<{ ok: boolean; room: any }>(`/groups/${target.id}/rooms`, 'POST', { roomKind: theme });
+      const cardPayload: RoomCardPayload = {
+        type: 'room_card',
+        roomId: res.room.roomId,
+        groupId: target.id,
+        groupName: activeTitle,
+        roomKind: theme,
+        creatorId: selfId,
+        creatorName: selfName || 'Member',
+        createdAt: new Date().toISOString(),
+      };
+      await sendEncryptedMessage(
+        target,
+        `__adda_room_card__:${JSON.stringify(cardPayload)}`,
+        selfName || 'Member',
+        Crypto.randomUUID()
+      );
+      setShowRoomModal(false);
+      router.push({
+        pathname: '/hangout',
+        params: {
+          room: theme,
+          groupId: target.id,
+          roomId: res.room.roomId,
+          roomOwnerId: selfId,
+        },
+      } as unknown as Href);
+    } catch (err: any) {
+      Alert.alert('Hangout', err?.message || 'Could not create room.');
+    } finally {
+      setCreatingRoom(false);
+    }
+  };
 
   const load = useCallback(async () => {
     if (!target) return;
@@ -742,7 +822,7 @@ export default function ConversationScreen() {
     setError('');
     try {
       const call = await callRequest<CallInfo>('call:start', { target, media });
-      router.push({ pathname: '/call', params: { callId: call.id, role: call.callerId === selfId ? 'caller' : 'callee', name: activeTitle } } as unknown as Href);
+      router.push({ pathname: '/call', params: { callId: call.id, role: call.callerId === selfId ? 'caller' : 'callee', name: activeTitle, media: call.media } } as unknown as Href);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not start call.'); }
   };
 
@@ -978,6 +1058,15 @@ export default function ConversationScreen() {
           <Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}>
             <Video size={22} color={colors.primary} />
           </Pressable>
+          {kind === 'group' && (
+            <Pressable
+              accessibilityLabel="Group Hangout Room"
+              onPress={() => setShowRoomModal(true)}
+              style={[styles.callAction, activeGroupRoom && styles.callActionActiveRoom]}
+            >
+              <DoorOpen size={20} color={activeGroupRoom ? '#25D366' : colors.primary} />
+            </Pressable>
+          )}
         </View>
       )}
 
@@ -1029,6 +1118,7 @@ export default function ConversationScreen() {
             }
 
             const media = mediaFromBody(item.body);
+            const roomCard = roomCardFromBody(item.body);
             const isTagged = !mine && (item.mentions?.includes(selfId) || item.mentions?.includes('everyone'));
             const isSelected = selectedMessage?.id === item.id;
             const hasReactions = Boolean(item.reactions && Object.keys(item.reactions).length > 0);
@@ -1106,7 +1196,24 @@ export default function ConversationScreen() {
                     </Pressable>
                   )}
 
-                  {media ? (
+                  {roomCard ? (
+                    <RoomCardMessage
+                      card={roomCard}
+                      isMine={mine}
+                      isLight={isLight}
+                      onJoin={() => {
+                        router.push({
+                          pathname: '/hangout',
+                          params: {
+                            room: roomCard.roomKind,
+                            groupId: roomCard.groupId,
+                            roomId: roomCard.roomId,
+                            roomOwnerId: roomCard.creatorId,
+                          },
+                        } as unknown as Href);
+                      }}
+                    />
+                  ) : media ? (
                     <MediaMessage
                       media={media}
                       onPress={(mediaUri) => {
@@ -1301,6 +1408,88 @@ export default function ConversationScreen() {
         )}
       </KeyboardAvoidingView>
 
+      {/* Group Hangout Room Creation / Active Modal */}
+      <Modal
+        visible={showRoomModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowRoomModal(false)}
+      >
+        <KeyboardAvoidingView style={styles.hangoutModalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <Pressable style={styles.scrim} onPress={() => setShowRoomModal(false)} />
+          <View style={styles.hangoutModalSheet}>
+            <View style={styles.hangoutModalTop}>
+              <Text style={styles.hangoutModalTitle}>Group Hangout</Text>
+              <Pressable onPress={() => setShowRoomModal(false)} accessibilityLabel="Close">
+                <X size={22} color={colors.text} />
+              </Pressable>
+            </View>
+
+            {activeGroupRoom ? (
+              <View style={styles.activeRoomBanner}>
+                <Text style={styles.activeRoomBannerTitle}>🟢 Live Hangout in Progress</Text>
+                <Text style={styles.activeRoomBannerText}>
+                  {activeGroupRoom.creatorName} started {activeGroupRoom.roomKind === 'beach' ? 'Goa Beach' : activeGroupRoom.roomKind === 'tea' ? 'Tea Party' : activeGroupRoom.roomKind === 'roof' ? 'School Rooftop' : 'Loft 16'} for this group.
+                </Text>
+                <Pressable
+                  onPress={() => {
+                    setShowRoomModal(false);
+                    router.push({
+                      pathname: '/hangout',
+                      params: {
+                        room: activeGroupRoom.roomKind,
+                        groupId: target?.id,
+                        roomId: activeGroupRoom.id,
+                        roomOwnerId: activeGroupRoom.creatorId,
+                      },
+                    } as unknown as Href);
+                  }}
+                  style={styles.activeRoomJoinBtn}
+                >
+                  <DoorOpen size={19} color="#FFFFFF" />
+                  <Text style={styles.activeRoomJoinBtnText}>Join Active Room</Text>
+                </Pressable>
+              </View>
+            ) : null}
+
+            <Text style={styles.hangoutModalSub}>
+              {activeGroupRoom ? 'Or choose a scene to start a new room:' : 'Choose a scene to hang out with this group:'}
+            </Text>
+
+            <ScrollView style={{ maxHeight: 280 }}>
+              {roomThemes.map(t => {
+                const selected = selectedRoomTheme === t.id;
+                return (
+                  <Pressable
+                    key={t.id}
+                    onPress={() => setSelectedRoomTheme(t.id)}
+                    style={[styles.hangoutThemeRow, selected && styles.hangoutThemeRowActive]}
+                  >
+                    <Text style={styles.hangoutThemeEmoji}>{t.emoji}</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.hangoutThemeName}>{t.name}</Text>
+                      <Text style={styles.hangoutThemeDesc}>{t.desc}</Text>
+                    </View>
+                    {selected && <Check size={20} color="#25D366" />}
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+
+            <Pressable
+              disabled={creatingRoom}
+              onPress={() => void handleCreateGroupRoom(selectedRoomTheme)}
+              style={[styles.hangoutStartBtn, creatingRoom && { opacity: 0.6 }]}
+            >
+              <DoorOpen size={20} color="#FFFFFF" />
+              <Text style={styles.hangoutStartBtnText}>
+                {creatingRoom ? 'Starting Room…' : 'Start & Enter Room'}
+              </Text>
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
       {viewerMedia && (
         <Modal visible={!!viewerMedia} transparent={false} animationType="fade" onRequestClose={() => { setViewerMedia(null); setShowMenu(false); }}>
           <SafeAreaView style={styles.viewerContainer}>
@@ -1491,6 +1680,46 @@ function VideoPlayerView({ uri }: { uri: string }) {
       contentFit="contain"
       nativeControls={true}
     />
+  );
+}
+
+const roomThemes = [
+  { id: 'beach', name: 'Goa Beach', emoji: '🏖️', desc: 'Sunset shores, shacks & ocean waves' },
+  { id: 'tea', name: 'Tea Party', emoji: '☕', desc: 'Meet at the roadside adda' },
+  { id: 'loft', name: 'Loft 16', emoji: '🏢', desc: 'A cozy place to gather' },
+  { id: 'roof', name: 'School Rooftop', emoji: '🏫', desc: 'Evening sky & school rooftop' },
+] as const;
+
+function RoomCardMessage({
+  card,
+  isMine,
+  isLight,
+  onJoin,
+}: {
+  card: RoomCardPayload;
+  isMine: boolean;
+  isLight: boolean;
+  onJoin: () => void;
+}) {
+  const info = roomThemes.find(t => t.id === card.roomKind) || roomThemes[0];
+  return (
+    <View style={styles.roomCardBox}>
+      <View style={styles.roomCardHeader}>
+        <View style={styles.roomCardBadge}>
+          <Text style={styles.roomCardBadgeText}>3D HANGOUT</Text>
+        </View>
+        <Text style={styles.roomCardEmoji}>{info.emoji}</Text>
+      </View>
+      <Text style={[styles.roomCardTitle, isLight && styles.roomCardTitleLight]}>{info.name}</Text>
+      <Text style={[styles.roomCardDesc, isLight && styles.roomCardDescLight]}>{info.desc}</Text>
+      <Text style={[styles.roomCardAuthor, isLight && styles.roomCardAuthorLight]}>
+        {isMine ? 'Created by you • Group members only' : `Created by ${card.creatorName} • Group members only`}
+      </Text>
+      <Pressable onPress={onJoin} style={styles.roomCardJoinButton}>
+        <DoorOpen size={18} color="#FFFFFF" />
+        <Text style={styles.roomCardJoinButtonText}>Join Room</Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -1983,5 +2212,189 @@ const styles = StyleSheet.create({
   },
   reactionBadgeTextLight: {
     color: '#111B21',
+  },
+  roomCardBox: {
+    padding: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.22)',
+    borderRadius: 14,
+    minWidth: 240,
+    maxWidth: 290,
+    marginVertical: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  roomCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  roomCardBadge: {
+    backgroundColor: '#277A55',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  roomCardBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  roomCardEmoji: {
+    fontSize: 22,
+  },
+  roomCardTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '800',
+    marginBottom: 2,
+  },
+  roomCardTitleLight: {
+    color: '#111B21',
+  },
+  roomCardDesc: {
+    color: 'rgba(255, 255, 255, 0.75)',
+    fontSize: 12,
+    marginBottom: 6,
+  },
+  roomCardDescLight: {
+    color: 'rgba(17, 27, 33, 0.75)',
+  },
+  roomCardAuthor: {
+    color: '#25D366',
+    fontSize: 10,
+    fontWeight: '600',
+    marginBottom: 10,
+  },
+  roomCardAuthorLight: {
+    color: '#128C7E',
+  },
+  roomCardJoinButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#25D366',
+    paddingVertical: 9,
+    borderRadius: 10,
+  },
+  roomCardJoinButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  callActionActiveRoom: {
+    borderWidth: 1.5,
+    borderColor: '#25D366',
+    borderRadius: 18,
+  },
+  scrim: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+  },
+  hangoutModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'flex-end',
+  },
+  hangoutModalSheet: {
+    backgroundColor: '#10221D',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 24,
+    maxHeight: '80%',
+  },
+  hangoutModalTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  hangoutModalTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  hangoutModalSub: {
+    color: '#A7B6AC',
+    fontSize: 13,
+    marginBottom: 16,
+  },
+  hangoutThemeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 10,
+    gap: 12,
+  },
+  hangoutThemeRowActive: {
+    borderWidth: 1.5,
+    borderColor: '#25D366',
+    backgroundColor: 'rgba(37, 211, 102, 0.12)',
+  },
+  hangoutThemeEmoji: {
+    fontSize: 26,
+  },
+  hangoutThemeName: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  hangoutThemeDesc: {
+    color: '#A7B6AC',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  hangoutStartBtn: {
+    backgroundColor: '#25D366',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 14,
+    marginTop: 10,
+    gap: 8,
+  },
+  hangoutStartBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  activeRoomBanner: {
+    backgroundColor: 'rgba(37, 211, 102, 0.15)',
+    borderWidth: 1,
+    borderColor: '#25D366',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 16,
+  },
+  activeRoomBannerTitle: {
+    color: '#25D366',
+    fontSize: 14,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  activeRoomBannerText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    marginBottom: 12,
+  },
+  activeRoomJoinBtn: {
+    backgroundColor: '#25D366',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    borderRadius: 10,
+    gap: 8,
+  },
+  activeRoomJoinBtnText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
   },
 });

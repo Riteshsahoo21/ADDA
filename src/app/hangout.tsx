@@ -14,7 +14,7 @@ import { useSession } from '@/context/session';
 import { AvatarBody } from '@/three/player/avatarStyle';
 import { GroupMedia } from '@/lib/group-media';
 import { getRealtimeSocket } from '@/lib/realtime';
-import { sendRoomMessage, type RoomJoin, type RoomMessage, type RoomMotionSnapshot, type RoomPeer } from '@/lib/rooms';
+import { sendRoomMessage, type RoomJoin, type RoomMessage, type RoomMotionSnapshot, type RoomPeer, type RoomPeerMotion } from '@/lib/rooms';
 import { MusicHubModal } from '@/components/music/MusicHubModal';
 import { MusicService } from '@/audio/MusicService';
 
@@ -47,6 +47,7 @@ export default function HangoutScreen() {
   const [chatError, setChatError] = useState('');
   const [messages, setMessages] = useState<RoomMessage[]>([]);
   const [peers, setPeers] = useState<RoomPeer[]>([]);
+  const peerMotions = useRef(new Map<string, RoomPeerMotion>());
   const [shardId, setShardId] = useState<string>('');
   const [shardIndex, setShardIndex] = useState<number>(1);
   const mediaRef = useRef<GroupMedia | null>(null);
@@ -66,6 +67,12 @@ export default function HangoutScreen() {
       lastVoicePosition.current = { x: snapshot.x, z: snapshot.z, at: Date.now() };
       mediaRef.current?.setPosition(snapshot.x, snapshot.z);
     }
+  }, []);
+
+  const showRouteToast = useCallback((msg: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setRouteToast(msg);
+    toastTimer.current = setTimeout(() => setRouteToast(null), 2500);
   }, []);
 
   useEffect(() => {
@@ -94,8 +101,18 @@ export default function HangoutScreen() {
     MusicService.init();
     let active = true;
     let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
-    const onPeer = (peer: RoomPeer) => setPeers(current => [...current.filter(item => item.userId !== peer.userId), peer]);
-    const onLeft = ({ userId }: { userId: string }) => setPeers(current => current.filter(peer => peer.userId !== userId));
+    const motions = peerMotions.current;
+    const onPeer = (peer: RoomPeer) => {
+      const previous = motions.get(peer.userId)?.peer;
+      motions.set(peer.userId, { peer, receivedAt: Date.now() });
+      if (!previous || previous.avatar !== peer.avatar || previous.name !== peer.name) {
+        setPeers(current => [...current.filter(item => item.userId !== peer.userId), peer]);
+      }
+    };
+    const onLeft = ({ userId }: { userId: string }) => {
+      motions.delete(userId);
+      setPeers(current => current.filter(peer => peer.userId !== userId));
+    };
     const onMessage = (message: RoomMessage) => setMessages(current => [...current, message].slice(-50));
     const onRadioSync = (radio: { enabled?: boolean; trackIndex?: number }) => {
       if (typeof radio?.enabled === 'boolean' && radio.enabled !== MusicService.state.radioEnabled) {
@@ -111,6 +128,8 @@ export default function HangoutScreen() {
       live.timeout(8000).emit('room:join', { room: roomKind, avatar }, (error: Error | null, result?: { ok: boolean; value?: RoomJoin; error?: string }) => {
         if (!active) return;
         if (error || !result?.ok || !result.value) { setChatError(result?.error || 'Could not join room chat.'); return; }
+        motions.clear();
+        for (const peer of result.value.peers) motions.set(peer.userId, { peer, receivedAt: Date.now() });
         setPeers(result.value.peers);
         setMessages(result.value.messages);
         if (result.value.shardId) setShardId(result.value.shardId);
@@ -146,9 +165,11 @@ export default function HangoutScreen() {
       live?.off('room:radio-sync', onRadioSync);
       live?.off('connect', onReconnect);
       live?.emit('room:leave');
+      motions.clear();
+      setPeers([]);
       if (presenceRef.current === live) presenceRef.current = null;
     };
-  }, [roomKind, username, avatar, focused]);
+  }, [roomKind, username, avatar, focused, showRouteToast]);
 
   // Pause background music when the app is minimized to prevent audio stream conflicts
   useEffect(() => {
@@ -159,12 +180,6 @@ export default function HangoutScreen() {
     });
     return () => sub.remove();
   }, []);
-
-  const showRouteToast = (msg: string) => {
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    setRouteToast(msg);
-    toastTimer.current = setTimeout(() => setRouteToast(null), 2500);
-  };
 
   const applyAudioRoute = useCallback(() => {
     if (isBluetoothRef.current) {
@@ -300,7 +315,7 @@ export default function HangoutScreen() {
   return <View style={styles.screen}>
     <StatusBar hidden />
     <NavigationBar hidden />
-    {landscapeReady && (width >= height || orientationFailed) && <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} onOpenRadio={() => { setMusicModalTab('radio'); setMusicModalOpen(true); }} />}
+    {landscapeReady && (width >= height || orientationFailed) && <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} peerMotionsRef={peerMotions} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} onOpenRadio={() => { setMusicModalTab('radio'); setMusicModalOpen(true); }} />}
     <View style={[styles.topBar, { left: Math.max(16, insets.left + 8), right: Math.max(16, insets.right + 8), top: Math.max(8, insets.top + 4) }]}>
       <View style={styles.toolbar}>
         <Pressable accessibilityRole="button" accessibilityLabel="Room menu" accessibilityState={{ expanded: roomMenuOpen }} onPress={() => { setRoomMenuOpen(current => !current); setPlayersOpen(false); setChatOpen(false); }} style={[styles.toolButton, roomMenuOpen && styles.toolButtonActive]}><House size={22} color="#F7FAF8" /></Pressable>

@@ -100,6 +100,11 @@ export class GroupMedia {
         ...(track.kind === 'audio' ? { codecOptions: { opusDtx: true, opusFec: true } } : {}) });
       this.producing.push(producer);
     }
+    if (this.cameraOff) {
+      this.producing.filter(p => p.kind === 'video').forEach(p => {
+        try { p.pause(); } catch {}
+      });
+    }
     await this.queueSync(this.latestProducers ?? joined.producers);
   }
 
@@ -116,9 +121,52 @@ export class GroupMedia {
     else this.mutedUsers.delete(userId);
     this.updatePlaybackVolumes();
   }
-  setCameraOff(off: boolean) {
+  async setCameraOff(off: boolean): Promise<MediaStream | null> {
     this.cameraOff = off;
-    this.localStream?.getVideoTracks().forEach(track => { track.enabled = !off; });
+    if (off) {
+      this.localStream?.getVideoTracks().forEach(track => { track.enabled = false; });
+      this.producing.filter(p => p.kind === 'video').forEach(p => {
+        try { p.pause(); } catch {}
+      });
+      return this.localStream;
+    }
+
+    const existingVideo = this.localStream?.getVideoTracks() || [];
+    if (existingVideo.length > 0) {
+      existingVideo.forEach(track => { track.enabled = true; });
+      this.producing.filter(p => p.kind === 'video').forEach(p => {
+        try { p.resume(); } catch {}
+      });
+      return this.localStream;
+    }
+
+    if (this.sendTransport && !this.closed) {
+      try {
+        const videoStream = await mediaDevices.getUserMedia({ audio: false, video: true });
+        const track = videoStream.getVideoTracks()[0];
+        if (track) {
+          track.enabled = true;
+          if (!this.localStream) {
+            this.localStream = new MediaStream();
+          }
+          this.localStream.addTrack(track);
+          const producer = await this.sendTransport.produce({
+            track: track as unknown as globalThis.MediaStreamTrack,
+            stopTracks: false,
+          });
+          this.producing.push(producer);
+        }
+      } catch (err) {
+        console.warn('Failed to acquire camera video track:', err);
+      }
+    }
+    return this.localStream;
+  }
+  flipCamera() {
+    const videoTrack = this.localStream?.getVideoTracks()[0];
+    if (videoTrack && typeof (videoTrack as any)._switchCamera === 'function') {
+      (videoTrack as any)._switchCamera();
+    }
   }
   setPosition(x: number, z: number) {
     this.socket?.volatile.emit('media:position', { x, z });

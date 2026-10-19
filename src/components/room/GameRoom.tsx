@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { GLView, ExpoWebGLRenderingContext } from 'expo-gl';
 import { ActivityIndicator, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
@@ -18,8 +18,9 @@ import { loadBundledGlb } from '@/three/loaders/loadBundledGlb';
 import { createNativeRenderer } from '@/three/renderer/createNativeRenderer';
 import { avatarScale, loadAvatar } from '@/three/player/avatarAssets';
 import { createLoungerSemiSleepClip } from '@/three/player/loungeAnimation';
+import { sampleRemoteMotion } from '@/three/player/remoteMotion';
 import { AvatarStyle, type AvatarBody } from '@/three/player/avatarStyle';
-import type { RoomMotionSnapshot, RoomPeer, RoomPose } from '@/lib/rooms';
+import type { RoomMotionSnapshot, RoomPeer, RoomPeerMotion, RoomPose } from '@/lib/rooms';
 import { createVintageRadio } from '@/three/environment/vintageRadio';
 import { MusicService } from '@/audio/MusicService';
 
@@ -105,6 +106,7 @@ export function GameRoom({
   avatar,
   onPortal,
   peers = [],
+  peerMotionsRef,
   onPosition,
   onOpenRadio,
 }: {
@@ -112,6 +114,7 @@ export function GameRoom({
   avatar: AvatarStyle;
   onPortal: () => void;
   peers?: RoomPeer[];
+  peerMotionsRef: RefObject<Map<string, RoomPeerMotion>>;
   onPosition?: (snapshot: RoomMotionSnapshot) => void;
   onOpenRadio?: () => void;
 }) {
@@ -287,7 +290,7 @@ export function GameRoom({
       }
       const fallback = fallbackAvatar();
       room.avatarMount.add(fallback);
-      type RemoteAvatar = { mount: THREE.Group; body: AvatarBody; mixer?: THREE.AnimationMixer; actions: Partial<Record<RoomPose, THREE.AnimationAction>>; playing?: THREE.AnimationAction; lastMovingAt: number; initialized: boolean };
+      type RemoteAvatar = { mount: THREE.Group; body: AvatarBody; mixer?: THREE.AnimationMixer; actions: Partial<Record<RoomPose, THREE.AnimationAction>>; playing?: THREE.AnimationAction; lastMovingAt: number; initialized: boolean; previousMotion?: RoomPeerMotion; latestMotion?: RoomPeerMotion };
       const remoteAvatars = new Map<string, RemoteAvatar>();
       const remoteModelCache = new Map<AvatarBody, ReturnType<typeof loadAvatar>>();
       const loadRemoteAvatar = (userId: string, entry: RemoteAvatar) => {
@@ -663,22 +666,26 @@ export function GameRoom({
               remoteAvatars.set(peer.userId, entry);
               loadRemoteAvatar(peer.userId, entry);
             }
-            const distance = Math.hypot(entry.mount.position.x - peer.x, entry.mount.position.z - peer.z);
+            const incoming = peerMotionsRef.current.get(peer.userId);
+            if (incoming && incoming !== entry.latestMotion) {
+              entry.previousMotion = entry.latestMotion;
+              entry.latestMotion = incoming;
+            } else if (!entry.latestMotion) {
+              entry.latestMotion = { peer, receivedAt: now };
+            }
+            const target = sampleRemoteMotion(entry.previousMotion, entry.latestMotion, now);
+            const distance = Math.hypot(entry.mount.position.x - target.x, entry.mount.position.z - target.z);
             if (!entry.initialized || distance > 5) {
-              entry.mount.position.set(peer.x, peer.y ?? 0, peer.z);
-              entry.mount.rotation.y = peer.yaw;
+              entry.mount.position.set(target.x, target.y ?? 0, target.z);
+              entry.mount.rotation.y = target.yaw;
               entry.initialized = true;
             } else {
               if (distance > 0.055) entry.lastMovingAt = now;
-              // Smooth network snapshots while keeping local input independent of packet timing.
-              const blend = 1 - Math.exp(-12 * delta);
-              entry.mount.position.x += (peer.x - entry.mount.position.x) * blend;
-              entry.mount.position.y += ((peer.y ?? 0) - entry.mount.position.y) * blend;
-              entry.mount.position.z += (peer.z - entry.mount.position.z) * blend;
-              const angle = THREE.MathUtils.euclideanModulo(peer.yaw - entry.mount.rotation.y + Math.PI, Math.PI * 2) - Math.PI;
-              entry.mount.rotation.y += angle * blend;
+              // Render on the snapshot timeline, independently of packet arrival and React renders.
+              entry.mount.position.set(target.x, target.y ?? 0, target.z);
+              entry.mount.rotation.y = target.yaw;
             }
-            const pose = peer.pose ?? (now - entry.lastMovingAt < 260 ? 'walk' : 'idle');
+            const pose = target.pose ?? (now - entry.lastMovingAt < 260 ? 'walk' : 'idle');
             const wanted = entry.actions[pose] ?? (pose === 'crouch_idle' ? entry.actions.idle
               : pose === 'crouch_walk' || pose === 'run' ? entry.actions.walk
               : pose === 'jump' ? entry.actions.walk
@@ -964,7 +971,7 @@ export function GameRoom({
           const changed = Math.hypot(snapshot.x - lastSentPosition.x, snapshot.z - lastSentPosition.z) > 0.025 ||
             Math.abs(snapshot.y - lastSentPosition.y) > 0.025 ||
             Math.abs(snapshot.yaw - lastSentPosition.yaw) > 0.035 || snapshot.pose !== lastSentPosition.pose;
-          if (now - lastPositionSent > 150 && (changed || now - lastPositionSent > 2000)) {
+          if (now - lastPositionSent > 100 && (changed || now - lastPositionSent > 2000)) {
             lastPositionSent = now;
             lastSentPosition = snapshot;
             positionRef.current?.(snapshot);
@@ -1065,7 +1072,7 @@ export function GameRoom({
       console.error('[ADDA GL] Initialization failed', cause);
       if (mounted.current) { setError(message); setStatus('error'); }
     }
-  }, [roomKind, avatar, onPortal, updateStick]);
+  }, [roomKind, avatar, onPortal, updateStick, peerMotionsRef]);
 
   const toggleView = () => { modeRef.current = modeRef.current === 'FPP' ? 'TPP' : 'FPP'; setViewMode(modeRef.current); };
 

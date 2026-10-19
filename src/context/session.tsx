@@ -153,11 +153,24 @@ export function SessionProvider({ children }: PropsWithChildren) {
         } as unknown as Href);
         return;
       }
+      if (data?.kind === 'room_invite' && typeof data.groupId === 'string') {
+        void Notifications.clearLastNotificationResponseAsync();
+        router.push({
+          pathname: '/hangout',
+          params: {
+            room: data.roomKind || 'loft',
+            groupId: data.groupId,
+            roomId: data.roomId,
+            roomOwnerId: data.ownerId,
+          },
+        } as unknown as Href);
+        return;
+      }
       if (data?.kind !== 'call' || typeof data.callId !== 'string') return;
       if (data?.isOngoing) {
         void Notifications.clearLastNotificationResponseAsync();
         void Notifications.dismissNotificationAsync('adda_active_call_notification').catch(() => {});
-        router.push({ pathname: '/call', params: { callId: data.callId, role: data.role || 'callee', name: data.name || 'ADDA call' } } as unknown as Href);
+        router.push({ pathname: '/call', params: { callId: data.callId, role: data.role || 'callee', name: data.name || 'ADDA call', media: (data as any)?.media || 'audio' } } as unknown as Href);
         return;
       }
       if (openedNotificationCall.current === data.callId) return;
@@ -165,7 +178,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
       setIncomingCall(current => current?.id === data.callId ? null : current);
       void Notifications.clearLastNotificationResponseAsync();
       router.replace('/home');
-      router.push({ pathname: '/call', params: { callId: data.callId, role: 'callee', name: typeof data.callerName === 'string' ? data.callerName : 'ADDA call' } } as unknown as Href);
+      router.push({ pathname: '/call', params: { callId: data.callId, role: 'callee', name: typeof data.callerName === 'string' ? data.callerName : 'ADDA call', media: (data as any)?.media || 'audio' } } as unknown as Href);
     };
     void Notifications.getLastNotificationResponseAsync().then(response => { if (response) openCall(response); });
     const subscription = Notifications.addNotificationResponseReceivedListener(openCall);
@@ -194,7 +207,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
     const call = incomingCall;
     if (!call) return;
     setIncomingCall(null);
-    router.push({ pathname: '/call', params: { callId: call.id, role: 'callee', name: call.callerName } } as unknown as Href);
+    router.push({ pathname: '/call', params: { callId: call.id, role: 'callee', name: call.callerName, media: call.media } } as unknown as Href);
   };
   const declineCall = () => {
     if (incomingCall) void getRealtimeSocket().then(live => live.emit('call:decline', incomingCall.id));

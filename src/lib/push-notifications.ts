@@ -7,8 +7,11 @@ let currentToken: string | null = null;
 Notifications.setNotificationHandler({
   handleNotification: async notification => {
     const data = notification.request.content.data;
-    const show = (data?.kind === 'call' || data?.kind === 'chat') && (data.source !== 'socket' || AppState.currentState !== 'active') &&
-      (data.kind !== 'chat' || AppState.currentState !== 'active');
+    const isBackground = AppState.currentState !== 'active';
+    const show = (data?.kind === 'call' || data?.kind === 'chat' || data?.kind === 'room_invite') &&
+      (data.source !== 'socket' || isBackground) &&
+      (data.kind !== 'chat' || isBackground) &&
+      (data.kind !== 'room_invite' || isBackground);
     return { shouldShowBanner: show, shouldShowList: show, shouldPlaySound: show, shouldSetBadge: false };
   },
 });
@@ -21,7 +24,7 @@ export async function showSocketCallNotification(call: { id: string; callerName:
     content: {
       title: `${call.callerName} is calling`,
       body: `Incoming ${call.target.kind === 'group' ? 'group ' : ''}${call.media} call`,
-      data: { kind: 'call', callId: call.id, callerName: call.callerName, source: 'socket' },
+      data: { kind: 'call', callId: call.id, callerName: call.callerName, media: call.media, source: 'socket' },
     },
     trigger: null,
   });

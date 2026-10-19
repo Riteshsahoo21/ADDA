@@ -69,6 +69,34 @@ export type SocialBundle = {
   friendRequests: FriendRequest[];
 };
 
+export type ActiveGroupRoom = {
+  id: string;
+  groupId: string;
+  groupName: string;
+  groupAvatarUrl?: string | null;
+  roomKind: 'loft' | 'roof' | 'tea' | 'beach';
+  creatorId: string;
+  creatorName: string;
+  createdAt: string;
+};
+
+export type RoomInvitation = {
+  id: string;
+  roomId: string;
+  groupId: string;
+  groupName: string;
+  roomKind: 'loft' | 'roof' | 'tea' | 'beach';
+  inviterId: string;
+  inviterName: string;
+  inviterAvatarUrl?: string | null;
+  createdAt: string;
+};
+
+export type HangoutUpdatesResponse = {
+  activeRooms: ActiveGroupRoom[];
+  invites: RoomInvitation[];
+};
+
 export async function socialApi<T>(path: string, method: 'GET' | 'POST' | 'PATCH' | 'DELETE' = 'GET', body?: object): Promise<T> {
   const token = await authStorage.getAccessToken();
   if (!token) throw new Error('Please sign in again.');
