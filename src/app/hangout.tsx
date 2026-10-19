@@ -14,8 +14,7 @@ import { useSession } from '@/context/session';
 import { AvatarBody } from '@/three/player/avatarStyle';
 import { GroupMedia } from '@/lib/group-media';
 import { getRealtimeSocket } from '@/lib/realtime';
-import { deleteCurrentRoom, inviteGroupToRoom, inviteToRoom, kickRoomPeer, sendRoomMessage, type RoomJoin, type RoomMessage, type RoomMotionSnapshot, type RoomPeer, type RoomPeerMotion } from '@/lib/rooms';
-import { decodeMotionBatch, encodeMotion, isNewerSequence } from '@/lib/room-motion-codec';
+import { deleteCurrentRoom, inviteGroupToRoom, inviteToRoom, kickRoomPeer, sendRoomMessage, type PlayerSnapshot, type RoomJoin, type RoomMessage, type RoomMotionSnapshot, type RoomPeer } from '@/lib/rooms';
 import { MusicHubModal } from '@/components/music/MusicHubModal';
 import { MusicService } from '@/audio/MusicService';
 import { getActiveUserId, sendEncryptedMessage, type RoomCardPayload } from '@/lib/encrypted-chat';
@@ -59,13 +58,7 @@ export default function HangoutScreen() {
   const [chatError, setChatError] = useState('');
   const [messages, setMessages] = useState<RoomMessage[]>([]);
   const [peers, setPeers] = useState<RoomPeer[]>([]);
-  const [motionV2, setMotionV2] = useState(false);
-  const peerMotions = useRef(new Map<string, RoomPeerMotion>());
-  const motionUsers = useRef(new Map<number, string>());
-  const motionSequences = useRef(new Map<number, number>());
-  const outboundSequence = useRef(0);
-  const motionProtocol = useRef(false);
-  const lastOutboundPose = useRef<RoomMotionSnapshot['pose']>('idle');
+  const peerSnapshots = useRef(new Map<string, PlayerSnapshot[]>());
   const [shardId, setShardId] = useState<string>('');
   const [shardIndex, setShardIndex] = useState<number>(1);
 
@@ -96,20 +89,19 @@ export default function HangoutScreen() {
   const mutedPeersRef = useRef<Set<string>>(new Set());
   const presenceRef = useRef<Awaited<ReturnType<typeof getRealtimeSocket>> | null>(null);
   const positionRef = useRef<RoomMotionSnapshot>({ x: 0, y: 0, z: 0, yaw: 0, vx: 0, vz: 0, pose: 'idle' });
-  const lastVoicePosition = useRef({ x: Number.POSITIVE_INFINITY, z: Number.POSITIVE_INFINITY, at: 0 });
+  const onSnapshot = useCallback((snapshot: PlayerSnapshot) => {
+    const queues = peerSnapshots.current;
+    let queue = queues.get(snapshot.id);
+    if (!queue) { queue = []; queues.set(snapshot.id, queue); }
+    queue.push(snapshot);
+    if (queue.length > 25) queue.shift();
+  }, []);
   const onPosition = useCallback((snapshot: RoomMotionSnapshot) => {
     positionRef.current = snapshot;
-    const socket = presenceRef.current;
-    if (socket && motionProtocol.current) {
-      const packet = encodeMotion({ ...snapshot, motionId: 0, seq: ++outboundSequence.current });
-      if (snapshot.pose !== lastOutboundPose.current) socket.emit('room:motion', packet);
-      else socket.volatile.emit('room:motion', packet);
-    } else socket?.volatile.emit('room:position', snapshot);
-    lastOutboundPose.current = snapshot.pose;
-    if (Math.hypot(snapshot.x - lastVoicePosition.current.x, snapshot.z - lastVoicePosition.current.z) > 0.2 || Date.now() - lastVoicePosition.current.at > 2000) {
-      lastVoicePosition.current = { x: snapshot.x, z: snapshot.z, at: Date.now() };
-      mediaRef.current?.setPosition(snapshot.x, snapshot.z);
-    }
+    mediaRef.current?.sendMotion({
+      x: Number(snapshot.x.toFixed(3)), y: Number(snapshot.y.toFixed(3)), z: Number(snapshot.z.toFixed(3)),
+      r: Number(snapshot.yaw.toFixed(3)), pose: snapshot.pose,
+    });
   }, []);
 
   const showRouteToast = useCallback((msg: string) => {
@@ -295,16 +287,19 @@ export default function HangoutScreen() {
     MusicService.init();
     let active = true;
     let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
-    const motions = peerMotions.current;
-    const usersByMotionId = motionUsers.current;
-    const sequencesByMotionId = motionSequences.current;
+    const queues = peerSnapshots.current;
     const onPeer = (peer: RoomPeer) => {
-      for (const [id, name] of usersByMotionId) if (name === peer.userId && id !== peer.motionId) {
-        usersByMotionId.delete(id);
-        sequencesByMotionId.delete(id);
-      }
-      if (peer.motionId !== undefined) usersByMotionId.set(peer.motionId, peer.userId);
-      motions.set(peer.userId, { peer, receivedAt: Date.now() });
+      let q = queues.get(peer.userId);
+      if (!q) { q = []; queues.set(peer.userId, q); }
+      q.push({
+        id: peer.userId,
+        x: peer.x,
+        y: peer.y ?? 0,
+        z: peer.z,
+        r: peer.yaw,
+        pose: peer.pose ?? 'idle',
+        time: Date.now(),
+      });
       setPeers(current => {
         const exists = current.some(item => item.userId === peer.userId);
         if (!exists) return [...current, peer];
@@ -318,11 +313,7 @@ export default function HangoutScreen() {
       });
     };
     const onLeft = ({ userId }: { userId: string }) => {
-      motions.delete(userId);
-      for (const [id, name] of usersByMotionId) if (name === userId) {
-        usersByMotionId.delete(id);
-        sequencesByMotionId.delete(id);
-      }
+      queues.delete(userId);
       setPeers(current => current.filter(peer => peer.userId !== userId));
       setInvitedIds(current => {
         if (!current.has(userId)) return current;
@@ -330,21 +321,6 @@ export default function HangoutScreen() {
         next.delete(userId);
         return next;
       });
-    };
-    const onMotionBatch = (packet: unknown) => {
-      const states = decodeMotionBatch(packet);
-      if (!states) return;
-      const receivedAt = Date.now();
-      for (const state of states) {
-        const userId = usersByMotionId.get(state.motionId);
-        if (!userId) continue;
-        const last = sequencesByMotionId.get(state.motionId);
-        if (last !== undefined && !isNewerSequence(state.seq, last)) continue;
-        const previous = motions.get(userId);
-        if (!previous) continue;
-        sequencesByMotionId.set(state.motionId, state.seq);
-        motions.set(userId, { peer: { ...previous.peer, ...state }, receivedAt });
-      }
     };
     const onMessage = (message: RoomMessage) => setMessages(current => [...current, message].slice(-50));
     const onRadioSync = (radio: { enabled?: boolean; trackIndex?: number }) => {
@@ -377,7 +353,6 @@ export default function HangoutScreen() {
         avatar,
         groupId: params.groupId,
         roomId: params.roomId,
-        motionProtocol: 2,
       }, (error: Error | null, result?: { ok: boolean; value?: RoomJoin; error?: string }) => {
         if (!active) return;
         if (error || !result?.ok || !result.value) {
@@ -390,14 +365,17 @@ export default function HangoutScreen() {
           }
           return;
         }
-        motions.clear();
-        usersByMotionId.clear();
-        sequencesByMotionId.clear();
-        motionProtocol.current = result.value.motionProtocol === 2;
-        setMotionV2(motionProtocol.current);
+        queues.clear();
         for (const peer of result.value.peers) {
-          motions.set(peer.userId, { peer, receivedAt: Date.now() });
-          if (peer.motionId !== undefined) usersByMotionId.set(peer.motionId, peer.userId);
+          queues.set(peer.userId, [{
+            id: peer.userId,
+            x: peer.x,
+            y: peer.y ?? 0,
+            z: peer.z,
+            r: peer.yaw,
+            pose: peer.pose ?? 'idle',
+            time: Date.now(),
+          }]);
         }
         setPeers(result.value.peers);
         setMessages(result.value.messages);
@@ -423,7 +401,6 @@ export default function HangoutScreen() {
       live = socket;
       presenceRef.current = socket;
       socket.on('room:peer', onPeer);
-      socket.on('room:motion-batch', onMotionBatch);
       socket.on('room:peer-left', onLeft);
       socket.on('room:message', onMessage);
       socket.on('room:radio-sync', onRadioSync);
@@ -436,7 +413,6 @@ export default function HangoutScreen() {
       active = false;
       MusicService.stopAll();
       live?.off('room:peer', onPeer);
-      live?.off('room:motion-batch', onMotionBatch);
       live?.off('room:peer-left', onLeft);
       live?.off('room:message', onMessage);
       live?.off('room:radio-sync', onRadioSync);
@@ -444,11 +420,7 @@ export default function HangoutScreen() {
       live?.off('room:deleted', onRoomDeleted);
       live?.off('connect', onReconnect);
       live?.emit('room:leave');
-      motions.clear();
-      usersByMotionId.clear();
-      sequencesByMotionId.clear();
-      motionProtocol.current = false;
-      setMotionV2(false);
+      queues.clear();
       setPeers([]);
       if (presenceRef.current === live) presenceRef.current = null;
     };
@@ -481,7 +453,7 @@ export default function HangoutScreen() {
   }, []);
 
   useEffect(() => {
-    if (!username || !focused) return;
+    if (!username || !focused || !shardId) return;
     let active = true;
 
     // 1. Request Bluetooth permission on Android 12+ so InCallManager can start Bluetooth SCO
@@ -536,13 +508,14 @@ export default function HangoutScreen() {
     const media = new GroupMedia(tracks => {
       if (active) setNearbySpeakers(new Set(tracks.filter(track => track.kind === 'audio').map(track => track.userId)).size);
     }, error => { if (active) setVoiceStatus(error); });
+    media.setMotionListener(onSnapshot);
     media.setMuted(micMutedRef.current);
     media.setPlaybackMuted(speakerMutedRef.current);
     for (const userId of mutedPeersRef.current) media.setUserMuted(userId, true);
     mediaRef.current = media;
     void media.join({ kind: 'room', id: activeRoomId }, false, positionRef.current).then(() => {
       if (!active) return;
-      media.setPosition(positionRef.current.x, positionRef.current.z);
+      onPosition(positionRef.current);
       setVoiceStatus('Nearby voice on');
     }).catch(error => { if (active) setVoiceStatus(error instanceof Error ? error.message : 'Voice unavailable.'); });
     return () => {
@@ -555,7 +528,7 @@ export default function HangoutScreen() {
       setNearbySpeakers(0);
       if (mediaRef.current === media) mediaRef.current = null;
     };
-  }, [activeRoomId, username, voiceEpoch, focused, applyAudioRoute]);
+  }, [activeRoomId, shardId, username, voiceEpoch, focused, applyAudioRoute, onSnapshot, onPosition]);
 
   const toggleMic = () => {
     const next = !micMutedRef.current;
@@ -598,7 +571,7 @@ export default function HangoutScreen() {
   return <View style={styles.screen}>
     <StatusBar hidden />
     <NavigationBar hidden />
-    {landscapeReady && (width >= height || orientationFailed) && <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} peerMotionsRef={peerMotions} motionV2={motionV2} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} onOpenRadio={() => { setMusicModalTab('radio'); setMusicModalOpen(true); }} />}
+    {landscapeReady && (width >= height || orientationFailed) && <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} peerSnapshotsRef={peerSnapshots} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} onOpenRadio={() => { setMusicModalTab('radio'); setMusicModalOpen(true); }} />}
     <View style={[styles.topBar, { left: Math.max(16, insets.left + 8), right: Math.max(16, insets.right + 8), top: Math.max(8, insets.top + 4) }]}>
       <View style={styles.toolbar}>
         <Pressable accessibilityRole="button" accessibilityLabel="Room menu" accessibilityState={{ expanded: roomMenuOpen }} onPress={() => { setRoomMenuOpen(current => !current); setPlayersOpen(false); setChatOpen(false); }} style={[styles.toolButton, roomMenuOpen && styles.toolButtonActive]}><House size={22} color="#F7FAF8" /></Pressable>

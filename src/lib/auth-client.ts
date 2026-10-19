@@ -57,6 +57,9 @@ export const authStorage = {
 export const authClient = createAuthClient({
   baseURL: API_BASE_URL,
   fetchOptions: {
+    headers: {
+      Origin: API_BASE_URL,
+    },
     onSuccess: async (context) => {
       const token = context.response.headers.get('set-auth-token');
       if (token) await authStorage.setAccessToken(token);

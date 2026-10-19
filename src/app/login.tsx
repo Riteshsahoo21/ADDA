@@ -21,7 +21,7 @@ import {
 } from '@react-native-google-signin/google-signin';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
-import { authClient, authStorage } from '@/lib/auth-client';
+import { API_BASE_URL, authClient, authStorage } from '@/lib/auth-client';
 import { configureGoogleSignIn } from '@/lib/google-sign-in';
 
 type AuthMode = 'login' | 'register';
@@ -158,6 +158,11 @@ export default function LoginScreen() {
           provider: 'google',
           idToken: {
             token: idToken,
+          },
+          fetchOptions: {
+            headers: {
+              Origin: API_BASE_URL,
+            },
           },
         });
 

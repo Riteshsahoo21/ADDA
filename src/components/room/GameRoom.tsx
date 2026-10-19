@@ -18,9 +18,9 @@ import { loadBundledGlb } from '@/three/loaders/loadBundledGlb';
 import { createNativeRenderer } from '@/three/renderer/createNativeRenderer';
 import { avatarScale, loadAvatar } from '@/three/player/avatarAssets';
 import { createLoungerSemiSleepClip } from '@/three/player/loungeAnimation';
-import { SnapshotInterpolator } from '@/three/player/SnapshotInterpolator';
+import { RobloxInterpolator } from '@/three/player/RobloxInterpolator';
 import { AvatarStyle, type AvatarBody } from '@/three/player/avatarStyle';
-import type { RoomMotionSnapshot, RoomPeer, RoomPeerMotion, RoomPose } from '@/lib/rooms';
+import type { PlayerSnapshot, RoomMotionSnapshot, RoomPeer, RoomPose } from '@/lib/rooms';
 import { createVintageRadio } from '@/three/environment/vintageRadio';
 import { MusicService } from '@/audio/MusicService';
 
@@ -106,8 +106,7 @@ export function GameRoom({
   avatar,
   onPortal,
   peers = [],
-  peerMotionsRef,
-  motionV2 = false,
+  peerSnapshotsRef,
   onPosition,
   onOpenRadio,
 }: {
@@ -115,8 +114,7 @@ export function GameRoom({
   avatar: AvatarStyle;
   onPortal: () => void;
   peers?: RoomPeer[];
-  peerMotionsRef: RefObject<Map<string, RoomPeerMotion>>;
-  motionV2?: boolean;
+  peerSnapshotsRef: RefObject<Map<string, PlayerSnapshot[] | PlayerSnapshot>>;
   onPosition?: (snapshot: RoomMotionSnapshot) => void;
   onOpenRadio?: () => void;
 }) {
@@ -149,7 +147,6 @@ export function GameRoom({
   const cleanup = useRef<(() => void) | null>(null);
   const peersRef = useRef(peers);
   const positionRef = useRef(onPosition);
-  const motionV2Ref = useRef(motionV2);
   const openRadioRef = useRef(onOpenRadio);
   const lookTranslation = useRef({ x: 0, y: 0 });
   const insets = useSafeAreaInsets();
@@ -157,7 +154,6 @@ export function GameRoom({
   useEffect(() => { windowSize.current = { width: windowWidth, height: windowHeight }; }, [windowWidth, windowHeight]);
   useEffect(() => { peersRef.current = peers; }, [peers]);
   useEffect(() => { positionRef.current = onPosition; }, [onPosition]);
-  useEffect(() => { motionV2Ref.current = motionV2; }, [motionV2]);
   useEffect(() => { openRadioRef.current = onOpenRadio; }, [onOpenRadio]);
 
   const updateStick = useCallback((x: number, y: number) => {
@@ -300,10 +296,8 @@ export function GameRoom({
         mixer?: THREE.AnimationMixer;
         actions: Partial<Record<RoomPose, THREE.AnimationAction>>;
         playing?: THREE.AnimationAction;
-        lastMovingAt: number;
         initialized: boolean;
-        interpolator: SnapshotInterpolator;
-        latestMotion?: RoomPeerMotion;
+        interpolator: RobloxInterpolator;
       };
       const remoteAvatars = new Map<string, RemoteAvatar>();
       const remoteModelCache = new Map<AvatarBody, ReturnType<typeof loadAvatar>>();
@@ -675,62 +669,59 @@ export function GameRoom({
               if (entry) room.scene.remove(entry.mount);
               const mount = new THREE.Group();
               mount.add(fallbackAvatar());
+              const interpolator = new RobloxInterpolator(80);
               entry = {
                 mount,
                 body: peer.avatar,
                 actions: {},
-                lastMovingAt: 0,
                 initialized: false,
-                interpolator: new SnapshotInterpolator(),
+                interpolator,
               };
               room.scene.add(mount);
               remoteAvatars.set(peer.userId, entry);
               loadRemoteAvatar(peer.userId, entry);
             }
-            const incoming = peerMotionsRef.current.get(peer.userId);
-            if (incoming && incoming !== entry.latestMotion) {
-              entry.latestMotion = incoming;
-              entry.interpolator.push(incoming.peer, incoming.receivedAt);
-            } else if (!entry.latestMotion) {
-              entry.latestMotion = { peer, receivedAt: now };
-              entry.interpolator.push(peer, now);
+
+            // Drain incoming snapshots from the peer queue
+            const raw = peerSnapshotsRef.current?.get(peer.userId);
+            if (Array.isArray(raw)) {
+              while (raw.length > 0) {
+                const snap = raw.shift()!;
+                entry.interpolator.push(snap.x, snap.y, snap.z, snap.r, snap.pose, snap.time);
+              }
+            } else if (raw) {
+              const snap = raw as PlayerSnapshot;
+              entry.interpolator.push(snap.x, snap.y, snap.z, snap.r, snap.pose, snap.time);
             }
 
-            const sample = entry.interpolator.sample(now, delta);
+            // Fallback initialization if no packet has arrived yet
+            if (entry.interpolator.isEmpty()) {
+              entry.interpolator.push(peer.x, peer.y ?? 0, peer.z, peer.yaw, peer.pose ?? 'idle', now);
+            }
 
-            if (!entry.initialized) {
+            const sample = entry.interpolator.sample(delta);
+            if (sample) {
+              // Direct assignment from RobloxInterpolator - continuous 60 FPS with no rubber-band lag
               entry.mount.position.set(sample.x, sample.y, sample.z);
-              entry.mount.rotation.y = sample.yaw;
+              entry.mount.rotation.y = sample.r;
               entry.initialized = true;
-            } else {
-              // Smoothly glide position towards sample target without snapping
-              entry.mount.position.x = THREE.MathUtils.damp(entry.mount.position.x, sample.x, 22, delta);
-              entry.mount.position.y = THREE.MathUtils.damp(entry.mount.position.y, sample.y, 22, delta);
-              entry.mount.position.z = THREE.MathUtils.damp(entry.mount.position.z, sample.z, 22, delta);
 
-              // Smoothly rotate along shortest arc towards sample yaw
-              const turn = THREE.MathUtils.euclideanModulo(sample.yaw - entry.mount.rotation.y + Math.PI, Math.PI * 2) - Math.PI;
-              entry.mount.rotation.y += THREE.MathUtils.clamp(turn, -12 * delta, 12 * delta);
-            }
+              const wanted = entry.actions[sample.pose] ?? (sample.pose === 'crouch_idle' ? entry.actions.idle
+                : sample.pose === 'crouch_walk' || sample.pose === 'run' ? entry.actions.walk
+                : sample.pose === 'jump' ? entry.actions.walk
+                : sample.pose === 'lounger_idle' ? (entry.actions.lounger_idle ?? entry.actions.sit_idle)
+                : undefined) ?? entry.actions.idle ?? entry.actions.walk;
 
-            // Trust the sender's confirmed pose directly! Never override with noisy frame speed!
-            const pose: RoomPose = sample.pose;
+              if (wanted && wanted !== entry.playing) {
+                entry.playing?.fadeOut(0.18);
+                wanted.reset().fadeIn(0.18).play();
+                entry.playing = wanted;
+              }
 
-            const wanted = entry.actions[pose] ?? (pose === 'crouch_idle' ? entry.actions.idle
-              : pose === 'crouch_walk' || pose === 'run' ? entry.actions.walk
-              : pose === 'jump' ? entry.actions.walk
-              : pose === 'lounger_idle' ? (entry.actions.lounger_idle ?? entry.actions.sit_idle)
-              : undefined) ?? entry.actions.idle ?? entry.actions.walk;
-
-            if (wanted && wanted !== entry.playing) {
-              entry.playing?.fadeOut(0.18);
-              wanted.reset().fadeIn(0.18).play();
-              entry.playing = wanted;
-            }
-
-            if (entry.mixer) {
-              entry.mixer.timeScale = 1.0;
-              entry.mixer.update(delta);
+              if (entry.mixer) {
+                entry.mixer.timeScale = 1.0;
+                entry.mixer.update(delta);
+              }
             }
           }
           const width = gl.drawingBufferWidth;
@@ -1007,22 +998,12 @@ export function GameRoom({
             vz: THREE.MathUtils.clamp(velocity.z, -5, 5),
             pose,
           };
-          const secondsSinceSent = (now - lastPositionSent) / 1000;
-          const predictedX = lastSentPosition.x + lastSentPosition.vx * secondsSinceSent;
-          const predictedZ = lastSentPosition.z + lastSentPosition.vz * secondsSinceSent;
-          const velocityChanged = Math.hypot(snapshot.vx - lastSentPosition.vx, snapshot.vz - lastSentPosition.vz) > 0.4;
+          const moving = Math.hypot(velocity.x, velocity.z) > 0.05 || movingInput;
           const poseChanged = snapshot.pose !== lastSentPosition.pose;
-          const directionChanged = Math.abs(THREE.MathUtils.euclideanModulo(snapshot.yaw - lastSentPosition.yaw + Math.PI, Math.PI * 2) - Math.PI) > 0.07;
-          const correctionNeeded = Math.hypot(snapshot.x - predictedX, snapshot.z - predictedZ) > 0.25 || Math.abs(snapshot.y - lastSentPosition.y) > 0.08;
-          const moving = Math.hypot(snapshot.vx, snapshot.vz) > 0.12;
-          const movingStreamDue = moving && (now - lastPositionSent >= 60);
-          const anchorDue = now - lastPositionSent > (moving ? 180 : 1500);
-          const legacyChanged = Math.hypot(snapshot.x - lastSentPosition.x, snapshot.z - lastSentPosition.z) > 0.025 ||
-            Math.abs(snapshot.y - lastSentPosition.y) > 0.025 ||
-            Math.abs(THREE.MathUtils.euclideanModulo(snapshot.yaw - lastSentPosition.yaw + Math.PI, Math.PI * 2) - Math.PI) > 0.035 || poseChanged;
-          const legacyDue = now - lastPositionSent >= 66 && (legacyChanged || now - lastPositionSent > 1500);
-          const v2Due = poseChanged || movingStreamDue || (now - lastPositionSent >= 60 && (velocityChanged || directionChanged || correctionNeeded || anchorDue));
-          if (lastPositionSent === 0 || (motionV2Ref.current ? v2Due : legacyDue)) {
+          const moved = Math.hypot(snapshot.x - lastSentPosition.x, snapshot.z - lastSentPosition.z) > 0.015 ||
+            Math.abs(THREE.MathUtils.euclideanModulo(snapshot.yaw - lastSentPosition.yaw + Math.PI, Math.PI * 2) - Math.PI) > 0.02;
+          const sendDue = lastPositionSent === 0 || poseChanged || (now - lastPositionSent >= 50 && (moving || moved)) || (now - lastPositionSent >= 1000);
+          if (sendDue) {
             lastPositionSent = now;
             lastSentPosition = snapshot;
             positionRef.current?.(snapshot);
@@ -1123,7 +1104,7 @@ export function GameRoom({
       console.error('[ADDA GL] Initialization failed', cause);
       if (mounted.current) { setError(message); setStatus('error'); }
     }
-  }, [roomKind, avatar, onPortal, updateStick, peerMotionsRef]);
+  }, [roomKind, avatar, onPortal, updateStick, peerSnapshotsRef]);
 
   const toggleView = () => { modeRef.current = modeRef.current === 'FPP' ? 'TPP' : 'FPP'; setViewMode(modeRef.current); };
 

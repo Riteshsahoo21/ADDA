@@ -9,7 +9,7 @@ export type PublicProfile = {
   lastMessage?: string | null;
   lastAt?: string | null;
 };
-export type OwnProfile = PublicProfile & { friendCode: string };
+export type OwnProfile = PublicProfile & { friendCode: string; usernameChangedAt?: string | null };
 export type ChatGroup = {
   id: string;
   name: string;

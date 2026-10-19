@@ -3,6 +3,7 @@ import type { AvatarBody } from '@/three/player/avatarStyle';
 
 export type RoomPose = 'idle' | 'walk' | 'run' | 'jump' | 'crouch_idle' | 'crouch_walk' | 'sit_enter' | 'sit_idle' | 'sit_exit' | 'lounger_idle';
 export type RoomMotionSnapshot = { x: number; y: number; z: number; yaw: number; vx: number; vz: number; pose: RoomPose };
+export type PlayerSnapshot = { id: string; x: number; y: number; z: number; r: number; pose: RoomPose; time: number };
 export type RoomPeer = { userId: string; name: string; avatar: AvatarBody; motionId?: number; x: number; y?: number; z: number; yaw: number; vx?: number; vz?: number; pose?: RoomPose };
 export type RoomPeerMotion = { peer: RoomPeer; receivedAt: number };
 export type RoomMessage = { id: string; room: string; userId: string; name: string; body: string; createdAt: number };
@@ -15,7 +16,6 @@ export type RoomJoin = {
   shardIndex?: number;
   totalInShard?: number;
   ownerId?: string;
-  motionProtocol?: number;
 };
 
 export async function sendRoomMessage(body: string): Promise<void> {
