@@ -10,7 +10,7 @@ type Shard = {
   timer: ReturnType<typeof setInterval>;
 };
 
-const MOTION_TICK_MS = 100;
+const MOTION_TICK_MS = 60;
 const NEAR_DISTANCE = 18;
 const FAR_UPDATE_MS = 500;
 const MAX_SPEED = 5;
