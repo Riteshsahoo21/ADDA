@@ -48,3 +48,13 @@ example
 *service-account*.json
 *firebase-admin*.json
 client_secret_*.json
+
+# Heavy raw 3D assets & offline scripts (kept local on device)
+/assets/models/beach-*.glb
+/assets/models/barber-shop.glb
+/assets/models/dance-stage.glb
+/assets/textures/beach-*
+/assets/textures/barber-shop.*
+/assets/textures/dance-stage.*
+/assets/playlist_tracks.json
+/scripts/*.py

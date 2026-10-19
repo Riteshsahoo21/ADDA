@@ -63,6 +63,50 @@ export function createTeaSeats(model: THREE.Group): TeaSeat[] {
   });
 }
 
+export const BENCH_SLOT_OFFSETS = [-0.36, 0, 0.36] as const;
+
+export function getBenchSeatSpot(
+  seat: TeaSeat,
+  hitPoint?: THREE.Vector3,
+  occupiedPositions?: THREE.Vector3[]
+): { target: THREE.Vector3; approach: THREE.Vector3 } {
+  let desiredOffset: number = 0;
+  if (hitPoint) {
+    const dx = hitPoint.x - seat.target.x;
+    const dz = hitPoint.z - seat.target.z;
+    const proj = dx * seat.axis.x + dz * seat.axis.y;
+    if (proj < -0.16) desiredOffset = -0.36;
+    else if (proj > 0.16) desiredOffset = 0.36;
+    else desiredOffset = 0;
+  }
+
+  const freeSlots: number[] = [];
+  for (const offset of BENCH_SLOT_OFFSETS) {
+    const slotX = seat.target.x + seat.axis.x * offset;
+    const slotZ = seat.target.z + seat.axis.y * offset;
+    const isOccupied = occupiedPositions?.some(pos => Math.hypot(pos.x - slotX, pos.z - slotZ) < 0.32);
+    if (!isOccupied) {
+      freeSlots.push(offset);
+    }
+  }
+
+  let finalOffset = desiredOffset;
+  if (freeSlots.length > 0) {
+    if (!freeSlots.includes(desiredOffset)) {
+      freeSlots.sort((a, b) => Math.abs(a - desiredOffset) - Math.abs(b - desiredOffset));
+      finalOffset = freeSlots[0];
+    }
+  } else {
+    finalOffset = desiredOffset;
+  }
+
+  const offsetVec = new THREE.Vector3(seat.axis.x * finalOffset, 0, seat.axis.y * finalOffset);
+  return {
+    target: seat.target.clone().add(offsetVec),
+    approach: seat.approach.clone().add(offsetVec),
+  };
+}
+
 export function teaObstacleFromBounds(bounds: THREE.Box3, padding = 0.3): TeaObstacle {
   return { minX: bounds.min.x - padding, maxX: bounds.max.x + padding,
     minZ: bounds.min.z - padding, maxZ: bounds.max.z + padding };

@@ -34,9 +34,10 @@ export async function loadBundledGlb(moduleId: number, texturePack?: NativeTextu
         const texture = new THREE.DataTexture(bytes, image.width, image.height, THREE.RGBAFormat);
         const sampler = parser.json.samplers?.[textureDef.sampler ?? -1];
         texture.flipY = false;
-        texture.magFilter = sampler?.magFilter === 9728 ? THREE.NearestFilter : THREE.LinearFilter;
-        texture.minFilter = sampler?.minFilter === 9728 || sampler?.minFilter === 9984 || sampler?.minFilter === 9986
-          ? THREE.NearestFilter : sampler?.minFilter === 9729 ? THREE.LinearFilter : THREE.LinearMipmapLinearFilter;
+        texture.anisotropy = 4;
+        texture.magFilter = THREE.LinearFilter;
+        texture.minFilter = THREE.LinearFilter;
+        texture.generateMipmaps = false;
         texture.wrapS = sampler?.wrapS === 33071 ? THREE.ClampToEdgeWrapping : sampler?.wrapS === 33648 ? THREE.MirroredRepeatWrapping : THREE.RepeatWrapping;
         texture.wrapT = sampler?.wrapT === 33071 ? THREE.ClampToEdgeWrapping : sampler?.wrapT === 33648 ? THREE.MirroredRepeatWrapping : THREE.RepeatWrapping;
         texture.needsUpdate = true;

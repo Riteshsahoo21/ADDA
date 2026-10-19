@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { createTeaBoundary } from './teaBoundary';
 
-export type RoomKind = 'loft' | 'tea' | 'roof';
+export type RoomKind = 'loft' | 'tea' | 'roof' | 'beach';
 
 export type GameScene = {
   scene: THREE.Scene;
@@ -16,14 +16,24 @@ export type GameScene = {
 /** Shared camera/player frame. Imported GLBs supply the rooms themselves. */
 export function createGameScene(aspect: number, kind: RoomKind): GameScene {
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(72, aspect, 0.05, kind === 'roof' ? 85 : kind === 'tea' ? 80 : 40);
+  const camera = new THREE.PerspectiveCamera(72, aspect, 0.05, kind === 'beach' ? 70 : kind === 'roof' ? 85 : kind === 'tea' ? 80 : 40);
   const player = new THREE.Group();
   const avatarMount = new THREE.Group();
   player.add(avatarMount);
   scene.add(player);
   const wallMeshes: THREE.Object3D[] = [];
-  const boundary = kind === 'roof' ? 12 : kind === 'tea' ? 13 : 5.3;
-  if (kind === 'roof') {
+  const boundary = kind === 'beach' ? 32 : kind === 'roof' ? 12 : kind === 'tea' ? 13 : 5.3;
+  if (kind === 'beach') {
+    // Warm Goa Sunset atmosphere (matching Map 1 & 2 single-sun architecture)
+    scene.background = new THREE.Color('#e07a5f');
+    scene.fog = new THREE.Fog('#e07a5f', 28, 70);
+    scene.add(new THREE.HemisphereLight('#ffe0cc', '#785040', 2.4));
+    const sunsetSun = new THREE.DirectionalLight('#ff934f', 2.8);
+    sunsetSun.position.set(-25, 24, -35);
+    scene.add(sunsetSun);
+    // Player spawns on the soft warm sand overlooking the sunset water
+    player.position.set(0, 0.54, 8);
+  } else if (kind === 'roof') {
     scene.background = new THREE.Color('#947d9d');
     scene.fog = new THREE.Fog('#947d9d', 38, 78);
     scene.add(new THREE.HemisphereLight('#d3d7ff', '#725c6b', 2.0));
@@ -49,7 +59,7 @@ export function createGameScene(aspect: number, kind: RoomKind): GameScene {
     scene.add(lamp);
     player.position.set(0, 0, 2.5);
   }
-  camera.position.set(player.position.x, 1.63, player.position.z);
+  camera.position.set(player.position.x, player.position.y + 1.63, player.position.z);
   return {
     scene, camera, player, avatarMount, wallMeshes, boundary,
     dispose: () => {

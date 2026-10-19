@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   AppState,
+  DeviceEventEmitter,
+  PermissionsAndroid,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -10,6 +13,7 @@ import {
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
+  Headphones,
   Lock,
   Mic,
   MicOff,
@@ -18,6 +22,7 @@ import {
   User,
   Video,
   VideoOff,
+  Volume1,
   Volume2,
   VolumeX,
 } from 'lucide-react-native';
@@ -37,6 +42,7 @@ import { callRequest, type CallInfo } from '@/lib/calls';
 import { getRealtimeSocket } from '@/lib/realtime';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
 import { GroupMedia, type RemoteTrack } from '@/lib/group-media';
+import { MusicService } from '@/audio/MusicService';
 
 type Signal = { type: 'offer' | 'answer'; sdp: string } | { candidate: object };
 const ONGOING_CALL_NOTIF_ID = 'adda_active_call_notification';
@@ -63,10 +69,16 @@ export default function CallScreen() {
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [speakerOn, setSpeakerOn] = useState(true);
+  const [isHeadsetConnected, setIsHeadsetConnected] = useState(false);
+  const [routeToast, setRouteToast] = useState<string | null>(null);
   const [userNames, setUserNames] = useState<Record<string, string>>({});
 
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mutedRef = useRef(false);
   const cameraOffRef = useRef(false);
+  const speakerOnRef = useRef(true);
+  const isBluetoothRef = useRef(false);
+  const isHeadsetConnectedRef = useRef(false);
   const pc = useRef<RTCPeerConnection | null>(null);
   const localRef = useRef<MediaStream | null>(null);
   const pendingCandidates = useRef<RTCIceCandidate[]>([]);
@@ -77,15 +89,97 @@ export default function CallScreen() {
   const groupMedia = useRef<GroupMedia | null>(null);
   const pendingPeer = useRef<string | null>(null);
 
+  const applyCallAudioRoute = (forceSpeaker: boolean) => {
+    speakerOnRef.current = forceSpeaker;
+    setSpeakerOn(forceSpeaker);
+    if (forceSpeaker) {
+      InCallManager.setForceSpeakerphoneOn(true);
+      InCallManager.setSpeakerphoneOn(true);
+      void InCallManager.chooseAudioRoute('SPEAKER_PHONE');
+    } else {
+      InCallManager.setSpeakerphoneOn(false);
+      if (isBluetoothRef.current) {
+        InCallManager.setForceSpeakerphoneOn(null as any);
+        void InCallManager.chooseAudioRoute('BLUETOOTH');
+      } else if (isHeadsetConnectedRef.current) {
+        InCallManager.setForceSpeakerphoneOn(null as any);
+        void InCallManager.chooseAudioRoute('WIRED_HEADSET');
+      } else {
+        InCallManager.setForceSpeakerphoneOn(false);
+        void InCallManager.chooseAudioRoute('EARPIECE');
+      }
+    }
+  };
+
   // InCallManager audio session management
   useEffect(() => {
-    InCallManager.start({ media: 'video' });
+    // Release any background music completely so Android audio focus belongs solely to the call (no dual volume sliders!)
+    MusicService.stopAll();
+
+    // 1. Request Bluetooth permission on Android 12+ so InCallManager can start Bluetooth SCO
+    if (Platform.OS === 'android' && Number(Platform.Version) >= 31) {
+      void PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT).catch(() => {});
+    }
+
+    InCallManager.start({ media: call?.media === 'video' ? 'video' : 'audio', auto: true });
     InCallManager.setKeepScreenOn(true);
-    InCallManager.setSpeakerphoneOn(true);
+
+    // Initial check for earphones/headsets
+    void InCallManager.getIsWiredHeadsetPluggedIn().then(({ isWiredHeadsetPluggedIn }) => {
+      const hasHeadset = Boolean(isWiredHeadsetPluggedIn);
+      setIsHeadsetConnected(hasHeadset);
+      isHeadsetConnectedRef.current = hasHeadset;
+      if (hasHeadset) {
+        applyCallAudioRoute(false);
+      } else {
+        const defaultSpeaker = call?.media === 'video';
+        applyCallAudioRoute(defaultSpeaker);
+      }
+    }).catch(() => {});
+
+    // Listen for real audio device changes (wired headset, Bluetooth, or speaker)
+    const audioDeviceSub = DeviceEventEmitter.addListener('onAudioDeviceChanged', (data: { selectedAudioDevice?: string; availableAudioDeviceList?: string }) => {
+      let hasBt = false;
+      let hasWired = false;
+      if (data?.availableAudioDeviceList) {
+        try {
+          const list = JSON.parse(data.availableAudioDeviceList) as string[];
+          hasBt = list.includes('BLUETOOTH');
+          hasWired = list.includes('WIRED_HEADSET');
+          isBluetoothRef.current = hasBt;
+          setIsHeadsetConnected(hasBt || hasWired);
+          isHeadsetConnectedRef.current = hasBt || hasWired;
+        } catch {}
+      }
+      void InCallManager.getIsWiredHeadsetPluggedIn().then(({ isWiredHeadsetPluggedIn }) => {
+        const plugged = Boolean(isWiredHeadsetPluggedIn) || hasBt;
+        setIsHeadsetConnected(plugged);
+        isHeadsetConnectedRef.current = plugged;
+        if (plugged && speakerOnRef.current) {
+          applyCallAudioRoute(false);
+          showRouteToast(hasBt ? '🎧 Wireless Earphones Connected' : '🎧 Earphones Audio Active');
+        }
+      }).catch(() => {});
+    });
+
+    const headsetSub = DeviceEventEmitter.addListener('WiredHeadset', (data: { isPlugged?: boolean }) => {
+      const plugged = Boolean(data?.isPlugged);
+      setIsHeadsetConnected(plugged);
+      isHeadsetConnectedRef.current = plugged;
+      if (plugged && speakerOnRef.current) {
+        applyCallAudioRoute(false);
+        showRouteToast('🎧 Earphones Audio Active');
+      }
+    });
+
     return () => {
+      headsetSub.remove();
+      audioDeviceSub.remove();
+      InCallManager.setForceSpeakerphoneOn(false);
       InCallManager.stop();
+      MusicService.stopAll();
     };
-  }, []);
+  }, [call?.media]);
 
   // Live call timer
   useEffect(() => {
@@ -257,13 +351,6 @@ export default function CallScreen() {
         const joined = await callRequest<CallInfo>('call:join', callId);
         if (!active) return;
         currentCall = joined;
-        setCall(joined);
-        if (joined.media === 'video') {
-          InCallManager.setSpeakerphoneOn(true);
-        } else {
-          InCallManager.setSpeakerphoneOn(false);
-          setSpeakerOn(false);
-        }
 
         if (joined.usingRelay) { await startRelay(); return; }
         if (joined.target.kind === 'group') {
@@ -334,6 +421,14 @@ export default function CallScreen() {
     localRef.current?.getAudioTracks().forEach(track => { track.enabled = !next; });
     groupMedia.current?.setMuted(next);
     setMuted(next);
+
+    // Root fix: when unmuting, WebRTC restarts AudioRecord.
+    // Re-assert route after 100ms so WebRTC does NOT kick audio to loudspeaker!
+    if (!next) {
+      setTimeout(() => {
+        applyCallAudioRoute(speakerOnRef.current);
+      }, 100);
+    }
   };
 
   const toggleCamera = () => {
@@ -351,16 +446,28 @@ export default function CallScreen() {
     }
   };
 
+  const showRouteToast = (msg: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setRouteToast(msg);
+    toastTimer.current = setTimeout(() => setRouteToast(null), 2500);
+  };
+
   const toggleSpeaker = () => {
-    const next = !speakerOn;
-    setSpeakerOn(next);
-    InCallManager.setSpeakerphoneOn(next);
-    InCallManager.setForceSpeakerphoneOn(next);
+    const next = !speakerOnRef.current;
+    applyCallAudioRoute(next);
+    if (next) {
+      showRouteToast('🔊 Loud Speaker Active');
+    } else if (isHeadsetConnectedRef.current) {
+      showRouteToast('🎧 Earphones Audio Active');
+    } else {
+      showRouteToast('👂 Normal Speaker (Earpiece)');
+    }
   };
 
   const endCall = () => {
     ending.current = true;
     void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
+    InCallManager.setForceSpeakerphoneOn(false);
     InCallManager.stop();
     if (callId) void getRealtimeSocket().then(s => s.emit('call:leave', callId));
     router.back();
@@ -482,7 +589,9 @@ export default function CallScreen() {
           </View>
           <Text style={styles.headerTitle} numberOfLines={1}>{displayName}</Text>
           <Text style={styles.headerSubtitle}>
-            {status === 'Connected' ? formatDuration(callDuration) : status}
+            {status === 'Connected'
+              ? `${formatDuration(callDuration)} • ${speakerOn ? '🔊 Loud Speaker' : isHeadsetConnected ? '🎧 Earphones' : '👂 Normal Speaker'}`
+              : status}
           </Text>
         </View>
       </View>
@@ -491,6 +600,11 @@ export default function CallScreen() {
           BOTTOM FLOATING ACTION BAR (WhatsApp Call Controls)
           ======================================================== */}
       <View style={[styles.bottomBarContainer, { bottom: Math.max(insets.bottom, 20) + 12 }]}>
+        {routeToast && (
+          <View style={styles.routeToastPill}>
+            <Text style={styles.routeToastText}>{routeToast}</Text>
+          </View>
+        )}
         <View style={styles.bottomBarPill}>
           {/* Mute Button */}
           <Pressable
@@ -523,13 +637,22 @@ export default function CallScreen() {
             </Pressable>
           )}
 
-          {/* Speakerphone Button */}
+          {/* Speakerphone / Normal Speaker Toggle Button */}
           <Pressable
-            accessibilityLabel={speakerOn ? 'Speaker on' : 'Speaker off'}
+            accessibilityLabel={speakerOn ? 'Switch to normal speaker' : 'Switch to loud speaker'}
             onPress={toggleSpeaker}
-            style={[styles.controlBtn, speakerOn && styles.controlBtnActiveGreen]}
+            style={[
+              styles.controlBtn,
+              speakerOn ? styles.controlBtnActiveGreen : isHeadsetConnected ? styles.controlBtnActiveCyan : styles.controlBtn,
+            ]}
           >
-            {speakerOn ? <Volume2 size={22} color="#FFFFFF" /> : <VolumeX size={22} color="#FFFFFF" />}
+            {speakerOn ? (
+              <Volume2 size={22} color="#FFFFFF" />
+            ) : isHeadsetConnected ? (
+              <Headphones size={22} color="#FFFFFF" />
+            ) : (
+              <Volume1 size={22} color="#FFFFFF" />
+            )}
           </Pressable>
 
           {/* End Call Button */}
@@ -774,10 +897,28 @@ const styles = StyleSheet.create({
   controlBtnActiveGreen: {
     backgroundColor: '#059669',
   },
+  controlBtnActiveCyan: {
+    backgroundColor: '#0284C7',
+  },
   hangupBtn: {
     backgroundColor: '#DC2626',
     width: 54,
     height: 54,
     borderRadius: 27,
+  },
+  routeToastPill: {
+    backgroundColor: 'rgba(10, 23, 17, 0.90)',
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#34D399',
+    alignSelf: 'center',
+  },
+  routeToastText: {
+    color: '#34D399',
+    fontSize: 13,
+    fontWeight: '700',
   },
 });

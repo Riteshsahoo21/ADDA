@@ -2,7 +2,10 @@ import fs from 'node:fs';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
-for (const name of ['loft16', 'school-rooftop', 'chai-stall', 'three-shops', 'tea-ground', 'maple-tree', 'avatar-man', 'avatar-uncle', 'avatar-photo-boy', 'avatar-self', 'avatar-woman', 'avatar-chinese-woman', 'avatar-nepali-woman', 'avatar-white-top-woman']) {
+const baseModels = ['loft16', 'school-rooftop', 'chai-stall', 'three-shops', 'barber-shop', 'dance-stage', 'tea-ground', 'maple-tree', 'avatar-man', 'avatar-uncle', 'avatar-photo-boy', 'avatar-self', 'avatar-woman', 'avatar-chinese-woman', 'avatar-nepali-woman', 'avatar-white-top-woman'];
+const beachModels = ['beach-shack', 'beach-wooden-pier', 'beach-fishing-boat', 'beach-lifeguard-tower', 'beach-chai-tapri', 'beach-maggi-stall', 'beach-palm-tree', 'beach-sun-lounger', 'beach-umbrella', 'beach-campfire', 'beach-signpost'];
+
+for (const name of [...baseModels, ...beachModels]) {
   const path = `assets/runtime_models/${name}`;
   const texPath = `assets/textures/${name}`;
   const data = fs.readFileSync(`${path}.glb`);

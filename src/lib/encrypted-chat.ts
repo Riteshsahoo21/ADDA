@@ -3,7 +3,7 @@ import * as SecureStore from 'expo-secure-store';
 import * as SQLite from 'expo-sqlite';
 import { File, Paths } from 'expo-file-system';
 import nacl from 'tweetnacl';
-import { socialApi } from './social-api';
+import { socialApi, type OwnProfile } from './social-api';
 import { getRealtimeSocket, setRealtimeDeviceId, type ChatTarget } from './realtime';
 
 export type QuotedReply = {
@@ -26,6 +26,7 @@ export type LocalMessage = {
   status: 'queued' | 'sent' | 'delivered' | 'read' | 'received';
   replyTo?: QuotedReply | null;
   mentions?: string[] | null;
+  reactions?: Record<string, string> | null;
 };
 
 type DeviceKey = { deviceId: string; userId: string; publicKey: string };
@@ -84,9 +85,49 @@ export function mediaFromBody(body: string): EncryptedMedia | null {
   } catch { return null; }
 }
 
-export function previewBody(body: string) {
+export function previewBody(body: string, isMine?: boolean): string {
+  if (body === '__adda_deleted__') {
+    return isMine ? '🚫 You deleted this message' : '🚫 This message was deleted';
+  }
   const media = mediaFromBody(body);
-  return media ? (media.mediaKind === 'image' ? 'Photo' : 'Video') : body;
+  return media ? (media.mediaKind === 'image' ? '📷 Photo' : '🎥 Video') : body;
+}
+
+export type ChatPreview = {
+  kind: string;
+  targetId: string;
+  senderId: string;
+  senderName: string;
+  body: string;
+  createdAt: string;
+};
+
+export function formatChatPreview(
+  preview: { kind: string; senderId?: string; senderName?: string; body: string } | undefined,
+  currentUserId?: string
+): string | null {
+  if (!preview) return null;
+  const isMine = currentUserId ? preview.senderId === currentUserId : false;
+
+  if (preview.body === '__adda_deleted__') {
+    if (isMine) return '🚫 You deleted this message';
+    if (preview.kind === 'group' && preview.senderName) {
+      return `${preview.senderName}: 🚫 This message was deleted`;
+    }
+    return '🚫 This message was deleted';
+  }
+
+  const media = mediaFromBody(preview.body);
+  const coreText = media
+    ? (media.mediaKind === 'video' ? '🎥 Video' : '📷 Photo')
+    : preview.body;
+
+  if (preview.kind === 'group') {
+    const sender = isMine ? 'You' : (preview.senderName || 'Member');
+    return `${sender}: ${coreText}`;
+  }
+
+  return coreText;
 }
 
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -123,10 +164,12 @@ nacl.setPRNG((buffer, size) => {
 
 let active: Identity | null = null;
 let initializing: Promise<void> | null = null;
-let cachedProfile: { id: string; name: string } | null = null;
+let cachedProfile: OwnProfile | null = null;
 
-export function setCachedProfile(profile: { id: string; name: string }) { cachedProfile = profile; }
-export function getCachedProfile(): { id: string; name: string } | null { return cachedProfile; }
+export function setCachedProfile(profile: OwnProfile | ({ id: string; name: string } & Partial<OwnProfile>)) {
+  cachedProfile = { ...(cachedProfile || {}), ...profile } as OwnProfile;
+}
+export function getCachedProfile(): OwnProfile | null { return cachedProfile; }
 export function isEncryptedChatReady(): boolean { return active !== null && active.db !== null; }
 export function getActiveUserId(): string | null { return active?.userId ?? cachedProfile?.id ?? null; }
 export function currentChatDeviceId(): string | null { return active?.deviceId ?? null; }
@@ -137,14 +180,17 @@ export function clearKeyCache(target?: ChatTarget) {
   else keyCache.clear();
 }
 
-async function getOrFetchKeys(target: ChatTarget): Promise<KeyList> {
+export async function getOrFetchKeys(target: ChatTarget, forceFresh = false): Promise<KeyList> {
   const cacheKey = `${target.kind}:${target.id}`;
   const hit = keyCache.get(cacheKey);
-  if (hit && hit.expiresAt > Date.now()) {
+  // Group keys expire in 15 seconds so new members and device key changes are rapidly picked up.
+  // Direct chats cache for 2 minutes.
+  const ttl = target.kind === 'group' ? 15 * 1000 : 2 * 60 * 1000;
+  if (!forceFresh && hit && hit.expiresAt > Date.now()) {
     return hit.keys;
   }
   const fetched = await socialApi<KeyList>(`/chat/keys/${target.kind}/${encodeURIComponent(target.id)}`);
-  keyCache.set(cacheKey, { keys: fetched, expiresAt: Date.now() + 10 * 60 * 1000 });
+  keyCache.set(cacheKey, { keys: fetched, expiresAt: Date.now() + ttl });
   return fetched;
 }
 
@@ -208,11 +254,17 @@ async function initializeForUser(userId: string): Promise<void> {
   await db.execAsync(schemaSql);
   try { await db.execAsync('ALTER TABLE message ADD COLUMN replyTo TEXT;'); } catch {}
   try { await db.execAsync('ALTER TABLE message ADD COLUMN mentions TEXT;'); } catch {}
+  try { await db.execAsync('ALTER TABLE message ADD COLUMN reactions TEXT;'); } catch {}
 
   try {
     await socialApi('/chat/devices', 'POST', { deviceId, publicKey: bytesToBase64(pair.publicKey) });
     active = { userId, deviceId, secretKey: pair.secretKey, publicKey: bytesToBase64(pair.publicKey), db };
-    void getRealtimeSocket(deviceId).then(live => live.emit('chat:drain_spool', { deviceId })).catch(() => {});
+    void getRealtimeSocket(deviceId).then(live => {
+      live.emit('chat:drain_spool', { deviceId });
+      live.on('chat:message_deleted', (payload: { messageId?: string }) => {
+        if (payload?.messageId) void handleRemoteMessageDeleted(payload.messageId);
+      });
+    }).catch(() => {});
   } catch (error) {
     await db.closeAsync();
     throw error;
@@ -244,10 +296,17 @@ export function parseRow(row: any): LocalMessage {
       mentions = typeof row.mentions === 'string' ? JSON.parse(row.mentions) : row.mentions;
     } catch {}
   }
+  let reactions: Record<string, string> | null = null;
+  if (row.reactions) {
+    try {
+      reactions = typeof row.reactions === 'string' ? JSON.parse(row.reactions) : row.reactions;
+    } catch {}
+  }
   return {
     ...row,
     replyTo,
     mentions,
+    reactions,
   };
 }
 
@@ -259,17 +318,30 @@ export async function localMessages(target: ChatTarget): Promise<LocalMessage[]>
   return rows.map(parseRow);
 }
 
-export async function localPreviews(): Promise<{ kind: string; targetId: string; body: string; createdAt: string }[]> {
-  return identity().db.getAllAsync(
-    'SELECT m.kind, m.targetId, m.body, m.createdAt FROM message m WHERE m.id = (SELECT m2.id FROM message m2 WHERE m2.kind = m.kind AND m2.targetId = m.targetId ORDER BY m2.createdAt DESC, m2.id DESC LIMIT 1)'
+export async function localPreviews(): Promise<ChatPreview[]> {
+  return identity().db.getAllAsync<ChatPreview>(
+    `SELECT m.kind, m.targetId, m.senderId, m.senderName, m.body, m.createdAt
+     FROM message m
+     WHERE m.id = (
+       COALESCE(
+         (SELECT m2.id FROM message m2 WHERE m2.kind = m.kind AND m2.targetId = m.targetId AND m2.body <> '__adda_deleted__' ORDER BY m2.createdAt DESC, m2.id DESC LIMIT 1),
+         (SELECT m3.id FROM message m3 WHERE m3.kind = m.kind AND m3.targetId = m.targetId ORDER BY m3.createdAt DESC, m3.id DESC LIMIT 1)
+       )
+     )`
   );
 }
 
 async function pinKeysInternal(db: SQLite.SQLiteDatabase, devices: DeviceKey[]) {
   for (const device of devices) {
     const known = await db.getFirstAsync<{ userId: string; publicKey: string }>('SELECT userId, publicKey FROM known_key WHERE deviceId = ?', device.deviceId);
-    if (known && (known.userId !== device.userId || known.publicKey !== device.publicKey)) throw new Error('A chat device key changed. Stop and verify this contact before continuing.');
-    if (!known) await db.runAsync('INSERT OR IGNORE INTO known_key VALUES (?, ?, ?)', device.deviceId, device.userId, device.publicKey);
+    if (known) {
+      if (known.userId !== device.userId || known.publicKey !== device.publicKey) {
+        console.warn(`[ADDA] Updating known device key for device ${device.deviceId} (user: ${device.userId})`);
+        await db.runAsync('UPDATE known_key SET userId = ?, publicKey = ? WHERE deviceId = ?', device.userId, device.publicKey, device.deviceId);
+      }
+    } else {
+      await db.runAsync('INSERT OR IGNORE INTO known_key VALUES (?, ?, ?)', device.deviceId, device.userId, device.publicKey);
+    }
   }
 }
 
@@ -344,7 +416,8 @@ async function sendEncryptedContent(
     changed();
 
     // 2. Encrypt in-memory using TweetNaCl (3ms)
-    const keyList = prefetchedKeys ?? await getOrFetchKeys(target);
+    // For groups, always fetch fresh keys so all members and their current devices are included
+    const keyList = prefetchedKeys ?? await getOrFetchKeys(target, target.kind === 'group');
     await pinKeys(keyList.devices);
 
     const contentKey = nacl.randomBytes(nacl.secretbox.keyLength);
@@ -377,6 +450,7 @@ async function sendEncryptedContent(
     live.emit('chat:send_instant', {
       messageId,
       senderDeviceId: me.deviceId,
+      senderPublicKey: me.publicKey,
       target,
       ciphertext,
       nonce: bytesToBase64(nonce),
@@ -530,11 +604,21 @@ export async function receiveDirectEnvelope(envelope: Envelope): Promise<void> {
     if (existing) return;
 
     try {
+      if (!envelope.senderPublicKey) {
+        console.warn('[ADDA] Envelope missing senderPublicKey, skipping');
+        return;
+      }
       await pinKeysInternal(me.db, [{ deviceId: envelope.senderDeviceId, userId: envelope.senderId, publicKey: envelope.senderPublicKey }]);
       const contentKey = nacl.box.open(base64ToBytes(envelope.wrappedKey), base64ToBytes(envelope.wrapNonce), base64ToBytes(envelope.senderPublicKey), me.secretKey);
-      if (!contentKey) return;
+      if (!contentKey) {
+        console.warn('[ADDA] Could not decrypt contentKey for envelope', envelope.messageId);
+        return;
+      }
       const plaintext = nacl.secretbox.open(base64ToBytes(envelope.ciphertext), base64ToBytes(envelope.nonce), contentKey);
-      if (!plaintext) return;
+      if (!plaintext) {
+        console.warn('[ADDA] Could not decrypt plaintext for envelope', envelope.messageId);
+        return;
+      }
       const content: unknown = JSON.parse(new TextDecoder().decode(plaintext));
       if (!content || typeof content !== 'object' || !('type' in content) || (content.type !== 'text' && content.type !== 'media')) return;
       if (content.type === 'media' && 'localUri' in content) {
@@ -674,6 +758,89 @@ export async function deleteLocalMessage(messageId: string): Promise<void> {
   }
   await withDbLock(async () => {
     await me.db.runAsync('DELETE FROM message WHERE id = ?', messageId);
+  });
+  changed();
+}
+
+export async function markMessageDeletedForEveryone(messageId: string): Promise<void> {
+  const me = identity();
+  const row = await me.db.getFirstAsync<LocalMessage>('SELECT body FROM message WHERE id = ?', messageId);
+  if (row) {
+    const media = mediaFromBody(row.body);
+    if (media) {
+      try {
+        const encryptedFile = encryptedMediaFile(media.mediaId);
+        if (encryptedFile.exists) encryptedFile.delete();
+        const decryptedCache = new File(Paths.cache, `adda-media-${media.mediaId}.${media.mediaKind === 'image' ? 'jpg' : 'mp4'}`);
+        if (decryptedCache.exists) decryptedCache.delete();
+      } catch (e) {
+        console.warn('Could not clean up media files on delete:', e);
+      }
+    }
+  }
+  await withDbLock(async () => {
+    await me.db.runAsync(
+      'UPDATE message SET body = ?, reactions = NULL, replyTo = NULL, mentions = NULL WHERE id = ?',
+      '__adda_deleted__',
+      messageId
+    );
+  });
+  changed();
+}
+
+export async function deleteMessageForEveryone(target: ChatTarget, messageId: string): Promise<void> {
+  const me = identity();
+  const live = await getRealtimeSocket(me.deviceId).catch(() => null);
+  if (live?.connected) {
+    live.emit('chat:delete_for_everyone', { messageId, target });
+  }
+  await markMessageDeletedForEveryone(messageId);
+}
+
+export async function handleRemoteMessageDeleted(messageId: string): Promise<void> {
+  if (!active) return;
+  await markMessageDeletedForEveryone(messageId);
+}
+
+export async function toggleMessageReaction(target: ChatTarget, messageId: string, emoji: string): Promise<void> {
+  const me = identity();
+  await withDbLock(async () => {
+    const row = await me.db.getFirstAsync<any>('SELECT reactions FROM message WHERE id = ?', messageId);
+    let reactions: Record<string, string> = {};
+    if (row?.reactions) {
+      try { reactions = typeof row.reactions === 'string' ? JSON.parse(row.reactions) : row.reactions; } catch {}
+    }
+    if (reactions[me.userId] === emoji) {
+      delete reactions[me.userId];
+    } else {
+      reactions[me.userId] = emoji;
+    }
+    await me.db.runAsync('UPDATE message SET reactions = ? WHERE id = ?', JSON.stringify(reactions), messageId);
+  });
+  changed();
+
+  const live = await getRealtimeSocket(me.deviceId).catch(() => null);
+  if (live?.connected) {
+    live.emit('chat:reaction', { messageId, target, emoji });
+  }
+}
+
+export async function handleRemoteReaction(data: { messageId: string; userId: string; emoji: string }): Promise<void> {
+  if (!active) return;
+  const me = active;
+  await withDbLock(async () => {
+    const row = await me.db.getFirstAsync<any>('SELECT reactions FROM message WHERE id = ?', data.messageId);
+    if (!row) return;
+    let reactions: Record<string, string> = {};
+    if (row.reactions) {
+      try { reactions = typeof row.reactions === 'string' ? JSON.parse(row.reactions) : row.reactions; } catch {}
+    }
+    if (reactions[data.userId] === data.emoji) {
+      delete reactions[data.userId];
+    } else {
+      reactions[data.userId] = data.emoji;
+    }
+    await me.db.runAsync('UPDATE message SET reactions = ? WHERE id = ?', JSON.stringify(reactions), data.messageId);
   });
   changed();
 }

@@ -8,15 +8,20 @@ const ACCESS_TOKEN_KEY = 'adda_bearer_session_v2';
 const LEGACY_TOKEN_KEY = 'adda_jwt_access_token';
 const REFRESH_TOKEN_KEY = 'adda_jwt_refresh_token';
 
+let inMemoryAccessToken: string | null = null;
+
 export const authStorage = {
   getAccessToken: async (): Promise<string | null> => {
+    if (inMemoryAccessToken) return inMemoryAccessToken;
     try {
-      return await SecureStore.getItemAsync(ACCESS_TOKEN_KEY);
+      inMemoryAccessToken = await SecureStore.getItemAsync(ACCESS_TOKEN_KEY);
+      return inMemoryAccessToken;
     } catch {
       return null;
     }
   },
   setAccessToken: async (token: string): Promise<void> => {
+    inMemoryAccessToken = token;
     try {
       await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, token);
     } catch (e) {
@@ -38,6 +43,7 @@ export const authStorage = {
     }
   },
   clearTokens: async (): Promise<void> => {
+    inMemoryAccessToken = null;
     try {
       await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
       await SecureStore.deleteItemAsync(LEGACY_TOKEN_KEY);

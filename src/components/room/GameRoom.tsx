@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GLView, ExpoWebGLRenderingContext } from 'expo-gl';
 import { ActivityIndicator, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { Accessibility, ArrowBigUp, Camera, Eye, PersonStanding } from 'lucide-react-native';
+import { Accessibility, ArrowBigUp, Camera, Eye, PersonStanding, Radio as RadioIcon } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as THREE from 'three';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
@@ -10,12 +10,18 @@ import { colors } from '@/constants/theme';
 import { createGameScene, RoomKind } from '@/three/environment/createGameScene';
 import { createLoftDetails } from '@/three/environment/loftDetails';
 import { addMapleTrees } from '@/three/environment/teaBoundary';
-import { canWalkTea, createTeaSeats, TeaObstacle, TeaSeat, teaObstacleFromBounds, teaStallObstacle } from '@/three/environment/teaInteractions';
+import { canWalkTea, createTeaSeats, getBenchSeatSpot, TeaObstacle, TeaSeat, teaObstacleFromBounds, teaStallObstacle } from '@/three/environment/teaInteractions';
+import { BEACH_ASSETS } from '@/three/environment/beachAssets';
+import { canWalkBeach, createBeachEnvironment, getBeachSandElevation, BeachEnvironment } from '@/three/environment/beachEnvironment';
+import { BeachSeat, createLoungerBeachSeat, getBeachSeatSpot } from '@/three/environment/beachInteractions';
 import { loadBundledGlb } from '@/three/loaders/loadBundledGlb';
 import { createNativeRenderer } from '@/three/renderer/createNativeRenderer';
 import { avatarScale, loadAvatar } from '@/three/player/avatarAssets';
+import { createLoungerSemiSleepClip } from '@/three/player/loungeAnimation';
 import { AvatarStyle, type AvatarBody } from '@/three/player/avatarStyle';
 import type { RoomMotionSnapshot, RoomPeer, RoomPose } from '@/lib/rooms';
+import { createVintageRadio } from '@/three/environment/vintageRadio';
+import { MusicService } from '@/audio/MusicService';
 
 const STICK_SIZE = 110;
 const STICK_TRAVEL = 37;
@@ -24,7 +30,7 @@ type Stick = { x: number; y: number };
 type ViewMode = 'FPP' | 'TPP';
 type SeatUi = 'free' | 'approaching' | 'entering' | 'seated' | 'exiting';
 
-function fitModel(model: THREE.Group, desiredSize: number, axis: 'x' | 'y') {
+function fitModel(model: THREE.Group, desiredSize: number, axis: 'x' | 'y' | 'z') {
   const bounds = new THREE.Box3().setFromObject(model);
   const size = bounds.getSize(new THREE.Vector3());
   model.scale.setScalar(desiredSize / size[axis]);
@@ -94,7 +100,21 @@ function fallbackAvatar() {
   return group;
 }
 
-export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }: { roomKind: RoomKind; avatar: AvatarStyle; onPortal: () => void; peers?: RoomPeer[]; onPosition?: (snapshot: RoomMotionSnapshot) => void }) {
+export function GameRoom({
+  roomKind,
+  avatar,
+  onPortal,
+  peers = [],
+  onPosition,
+  onOpenRadio,
+}: {
+  roomKind: RoomKind;
+  avatar: AvatarStyle;
+  onPortal: () => void;
+  peers?: RoomPeer[];
+  onPosition?: (snapshot: RoomMotionSnapshot) => void;
+  onOpenRadio?: () => void;
+}) {
   const [status, setStatus] = useState<'initializing' | 'ready' | 'error'>('initializing');
   const [assetStatus, setAssetStatus] = useState('');
   const [error, setError] = useState('');
@@ -105,7 +125,10 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
   const [viewMode, setViewMode] = useState<ViewMode>('FPP');
   const [seatUi, setSeatUi] = useState<SeatUi>('free');
   const [nearSofa, setNearSofa] = useState(false);
+  const [nearSeatType, setNearSeatType] = useState<'bench' | 'lounger' | 'sofa'>('sofa');
+  const [activeSeatType, setActiveSeatType] = useState<'bench' | 'lounger' | 'sofa'>('bench');
   const [nearDoor, setNearDoor] = useState(false);
+  const [nearRadio, setNearRadio] = useState(false);
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const mounted = useRef(true);
   const movement = useRef<Stick>({ x: 0, y: 0 });
@@ -121,12 +144,14 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
   const cleanup = useRef<(() => void) | null>(null);
   const peersRef = useRef(peers);
   const positionRef = useRef(onPosition);
+  const openRadioRef = useRef(onOpenRadio);
   const lookTranslation = useRef({ x: 0, y: 0 });
   const insets = useSafeAreaInsets();
 
   useEffect(() => { windowSize.current = { width: windowWidth, height: windowHeight }; }, [windowWidth, windowHeight]);
   useEffect(() => { peersRef.current = peers; }, [peers]);
   useEffect(() => { positionRef.current = onPosition; }, [onPosition]);
+  useEffect(() => { openRadioRef.current = onOpenRadio; }, [onOpenRadio]);
 
   const updateStick = useCallback((x: number, y: number) => {
     const distance = Math.hypot(x, y);
@@ -202,6 +227,7 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
       sitEnter?: THREE.AnimationAction;
       sitIdle?: THREE.AnimationAction;
       sitExit?: THREE.AnimationAction;
+      loungerIdle?: THREE.AnimationAction;
     };
     const clips: AvatarClips = {};
     let playing: THREE.AnimationAction | undefined;
@@ -219,6 +245,7 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
     const portalMeshes: THREE.Object3D[] = [];
     const teaSeats: TeaSeat[] = [];
     const teaObstacles: TeaObstacle[] = [];
+    const beachSeats: BeachSeat[] = [];
     const loftDoor = new THREE.Vector3();
     const roofDoor = new THREE.Vector3();
     let roofDoorBounds: THREE.Box3 | null = null;
@@ -227,8 +254,10 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
     let seatHeading = -Math.PI / 2;
     let seatElevation = 0;
     let currentSeatElevation = 0;
+    let currentGroundElevation = roomKind === 'beach' ? getBeachSandElevation(8) : 0;
     let seatPhase: SeatUi = 'free';
     let seatTime = 0;
+    let currentSeatType: 'bench' | 'lounger' = 'bench';
     let wasNearSofa = false;
     let wasNearDoor = false;
     let cameraTooClose = false;
@@ -236,6 +265,26 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
       renderer = createNativeRenderer(gl);
       world = createGameScene(gl.drawingBufferWidth / gl.drawingBufferHeight, roomKind);
       const room = world;
+      let radioPos = new THREE.Vector3(0, 0.48, 0);
+      let radioRot = 0;
+      if (roomKind === 'tea') {
+        radioPos = new THREE.Vector3(-6.45, 1.02, -2.15);
+        radioRot = Math.PI / 2;
+      } else if (roomKind === 'beach') {
+        radioPos = new THREE.Vector3(-6.6, 1.05, 12.2);
+        radioRot = Math.PI / 2;
+      } else if (roomKind === 'roof') {
+        radioPos = new THREE.Vector3(6.2, 0.95, 0);
+        radioRot = -Math.PI / 2;
+      }
+      const radio3D = createVintageRadio(room.scene, radioPos, radioRot);
+      let wasNearRadio = false;
+
+      let beachEnv: BeachEnvironment | null = null;
+      if (roomKind === 'beach') {
+        beachEnv = createBeachEnvironment(room.scene);
+        beachSeats.push(...beachEnv.beachSeats);
+      }
       const fallback = fallbackAvatar();
       room.avatarMount.add(fallback);
       type RemoteAvatar = { mount: THREE.Group; body: AvatarBody; mixer?: THREE.AnimationMixer; actions: Partial<Record<RoomPose, THREE.AnimationAction>>; playing?: THREE.AnimationAction; lastMovingAt: number; initialized: boolean };
@@ -268,6 +317,14 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
               action.clampWhenFinished = true;
             }
             entry.actions[pose] = action;
+            if (name === 'sit_idle') {
+              try {
+                const loungerClip = createLoungerSemiSleepClip(clip);
+                entry.actions.lounger_idle = entry.mixer.clipAction(loungerClip);
+              } catch (err) {
+                console.warn('[ADDA] Remote lounger clip synthesis failed', err);
+              }
+            }
           }
           entry.playing = entry.actions.idle ?? entry.actions.walk;
           entry.playing?.play();
@@ -275,6 +332,8 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
       };
       let lastPositionSent = 0;
       let lastSentPosition: RoomMotionSnapshot = { x: Number.POSITIVE_INFINITY, y: Number.POSITIVE_INFINITY, z: Number.POSITIVE_INFINITY, yaw: Number.POSITIVE_INFINITY, pose: 'idle' };
+
+      const beachHolders: { holder: THREE.Group; x: number; z: number }[] = [];
 
       const loadModels = async () => {
         const failures: string[] = [];
@@ -300,7 +359,15 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
             else if (name === 'crouch_idle' || name === 'crouchidle' || name === 'crouch_idle_loop') clips.crouchIdle = action;
             else if (name === 'crouch_walk' || name === 'crouchwalk' || name === 'crouch_fwd_loop') clips.crouchWalk = action;
             else if (name === 'sit_enter') clips.sitEnter = action;
-            else if (name === 'sit_idle') clips.sitIdle = action;
+            else if (name === 'sit_idle') {
+              clips.sitIdle = action;
+              try {
+                const loungerClip = createLoungerSemiSleepClip(clip);
+                clips.loungerIdle = mixer.clipAction(loungerClip);
+              } catch (err) {
+                console.warn('[ADDA] Lounger clip synthesis failed', err);
+              }
+            }
             else if (name === 'sit_exit') clips.sitExit = action;
           }
           clips.sprint = clips.sprint ?? clips.walk;
@@ -315,7 +382,77 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
           playing = clips.idle;
           playing?.play();
         } catch (cause) { failures.push(`avatar: ${String(cause)}`); console.warn('[ADDA GL] Avatar failed', cause); }
-        const roomAssets = roomKind === 'loft' ? [
+        if (roomKind === 'beach') {
+          for (const item of BEACH_ASSETS) {
+            try {
+              const gltf = await loadBundledGlb(item.model, { moduleId: item.texture, images: item.images });
+              if (!active) return;
+              const holder = new THREE.Group();
+              holder.name = `Imported ${item.name}`;
+              holder.add(fitModel(gltf.scene, item.size, item.axis));
+              const elevation = item.customY ?? getBeachSandElevation(item.z);
+              holder.position.set(item.x, elevation, item.z);
+              holder.rotation.y = item.rotationY;
+              holder.traverse((child) => {
+                if ((child as THREE.Mesh).isMesh) {
+                  const mesh = child as THREE.Mesh;
+                  mesh.frustumCulled = true;
+                  mesh.geometry.computeBoundingSphere?.();
+                  const mat = mesh.material as THREE.MeshStandardMaterial;
+                  if (mat && mat.isMeshStandardMaterial) {
+                    mat.roughness = 0.78;
+                    mat.metalness = 0.08;
+                    if (mat.normalMap) {
+                      mat.normalScale.set(0.6, 0.6);
+                    }
+                  }
+                }
+              });
+              room.scene.add(holder);
+              beachHolders.push({ holder, x: item.x, z: item.z });
+              if (item.name === 'Beach Sun Lounger') {
+                beachSeats.push(createLoungerBeachSeat(holder, item.x, item.z, item.rotationY, 'lounger-main', 'Beach Sun Lounger 1'));
+              }
+
+              if (item.clones) {
+                let cloneIdx = 0;
+                for (const clone of item.clones) {
+                  const cloneHolder = new THREE.Group();
+                  cloneHolder.name = `Imported ${item.name} Clone`;
+                  cloneHolder.add(gltf.scene.clone(true));
+                  const cloneElevation = clone.customY ?? getBeachSandElevation(clone.z);
+                  cloneHolder.position.set(clone.x, cloneElevation, clone.z);
+                  cloneHolder.rotation.y = clone.rotationY;
+                  cloneHolder.traverse((child) => {
+                    if ((child as THREE.Mesh).isMesh) {
+                      const mesh = child as THREE.Mesh;
+                      mesh.frustumCulled = true;
+                      mesh.geometry.computeBoundingSphere?.();
+                      const mat = mesh.material as THREE.MeshStandardMaterial;
+                      if (mat && mat.isMeshStandardMaterial) {
+                        mat.roughness = 0.78;
+                        mat.metalness = 0.08;
+                        if (mat.normalMap) {
+                          mat.normalScale.set(0.6, 0.6);
+                        }
+                      }
+                    }
+                  });
+                  room.scene.add(cloneHolder);
+                  beachHolders.push({ holder: cloneHolder, x: clone.x, z: clone.z });
+                  if (item.name === 'Beach Sun Lounger') {
+                    beachSeats.push(createLoungerBeachSeat(cloneHolder, clone.x, clone.z, clone.rotationY, `lounger-clone-${cloneIdx + 1}`, `Beach Sun Lounger ${cloneIdx + 2}`));
+                  }
+                  cloneIdx++;
+                }
+              }
+            } catch (cause) {
+              failures.push(`${item.name}: ${String(cause)}`);
+              console.warn(`[ADDA GL] ${item.name} failed`, cause);
+            }
+          }
+        }
+        const roomAssets = roomKind === 'beach' ? [] : roomKind === 'loft' ? [
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           { id: require('../../../assets/runtime_models/loft16.glb'), texture: require('../../../assets/textures/loft16.rgba'), images: require('../../../assets/textures/loft16.json'), name: 'Loft 16', size: 10.6, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: false },
         ] : roomKind === 'roof' ? [
@@ -328,6 +465,10 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
           { id: require('../../../assets/runtime_models/chai-stall.glb'), texture: require('../../../assets/textures/chai-stall.rgba'), images: require('../../../assets/textures/chai-stall.json'), name: 'chai stall and bench', size: 3.2, axis: 'y' as const, x: -7.2, z: -2.2, rotation: Math.PI / 2, rawScale: false },
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           { id: require('../../../assets/runtime_models/three-shops.glb'), texture: require('../../../assets/textures/three-shops.rgba'), images: require('../../../assets/textures/three-shops.json'), name: 'three shops', size: 2.8, axis: 'y' as const, x: 7.7, z: -2.2, rotation: -Math.PI / 2, rawScale: false },
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          { id: require('../../../assets/runtime_models/barber-shop.glb'), texture: require('../../../assets/textures/barber-shop.rgba'), images: require('../../../assets/textures/barber-shop.json'), name: 'desi barber shop', size: 2.8, axis: 'y' as const, x: 7.7, z: 6.8, rotation: -Math.PI / 2, rawScale: false },
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          { id: require('../../../assets/runtime_models/dance-stage.glb'), texture: require('../../../assets/textures/dance-stage.rgba'), images: require('../../../assets/textures/dance-stage.json'), name: 'dance stage', size: 2.5, axis: 'y' as const, x: -7.5, z: 5.2, rotation: Math.PI / 2, rawScale: false },
         ];
         for (const item of roomAssets) {
           try {
@@ -355,6 +496,38 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
             if (roomKind === 'tea' && item.name === 'three shops') {
               holder.updateMatrixWorld(true);
               teaObstacles.push(teaObstacleFromBounds(new THREE.Box3().setFromObject(holder), 0.32));
+            }
+            if (roomKind === 'tea' && item.name === 'desi barber shop') {
+              holder.updateMatrixWorld(true);
+              const barberBounds = new THREE.Box3().setFromObject(holder);
+              teaObstacles.push({
+                minX: barberBounds.max.x - 0.9,
+                maxX: barberBounds.max.x + 0.3,
+                minZ: barberBounds.min.z - 0.1,
+                maxZ: barberBounds.max.z + 0.1,
+              });
+              teaObstacles.push({
+                minX: barberBounds.min.x - 0.1,
+                maxX: barberBounds.max.x + 0.1,
+                minZ: barberBounds.min.z - 0.25,
+                maxZ: barberBounds.min.z + 0.45,
+              });
+              teaObstacles.push({
+                minX: barberBounds.min.x - 0.1,
+                maxX: barberBounds.max.x + 0.1,
+                minZ: barberBounds.max.z - 0.45,
+                maxZ: barberBounds.max.z + 0.25,
+              });
+            }
+            if (roomKind === 'tea' && item.name === 'dance stage') {
+              holder.updateMatrixWorld(true);
+              const stageBounds = new THREE.Box3().setFromObject(holder);
+              teaObstacles.push({
+                minX: stageBounds.min.x - 0.35,
+                maxX: stageBounds.min.x + 0.45,
+                minZ: stageBounds.min.z - 0.2,
+                maxZ: stageBounds.max.z + 0.2,
+              });
             }
             if (roomKind === 'roof') {
               holder.updateMatrixWorld(true);
@@ -403,34 +576,63 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
       const clock = new THREE.Clock();
       let jumpHeight = 0;
       let verticalVelocity = 0;
-      const beginSeat = (onSide: boolean, coordinate: number, teaSeat?: TeaSeat) => {
+      const beginSeat = (
+        onSide: boolean,
+        coordinate: number,
+        teaSeat?: TeaSeat,
+        hitPoint?: THREE.Vector3,
+        beachSeat?: BeachSeat
+      ) => {
         if (!clips.sitEnter || !clips.sitIdle || !clips.sitExit) {
           if (mounted.current) setAssetStatus('Sitting animation is unavailable');
           return;
         }
-        if (teaSeat) {
-          // Align the butt firmly on the center of the bench plank without clipping.
-          // Bench plank surface is at y ~ 0.655 m; seatElevation 0.245 m places
-          // the bottom of the avatar's thighs and buttocks squarely on top of the plank.
-          // An offset of 0.08 m along the facing direction keeps the avatar seated
-          // comfortably on the bench with legs hanging naturally off the edge.
-          seatTarget.copy(teaSeat.target).add(new THREE.Vector3(
+        if (beachSeat) {
+          currentSeatType = beachSeat.seatType ?? 'bench';
+          if (mounted.current) setActiveSeatType(currentSeatType);
+          const occupied = Array.from(remoteAvatars.values()).map(e => e.mount.position);
+          const spot = getBeachSeatSpot(beachSeat, hitPoint, occupied);
+          seatTarget.copy(spot.target);
+          if (beachSeat.seatType === 'bench') {
+            seatTarget.add(new THREE.Vector3(
+              -Math.sin(beachSeat.heading) * 0.08, 0,
+              -Math.cos(beachSeat.heading) * 0.08));
+          }
+          seatApproach.copy(spot.approach);
+          seatHeading = beachSeat.heading;
+          seatElevation = beachSeat.seatElevation;
+          if (__DEV__) console.info('[ADDA beach seat multi-slot]', beachSeat.name, 'heading', seatHeading.toFixed(3),
+            'target', seatTarget.toArray().map(value => value.toFixed(2)),
+            'approach', seatApproach.toArray().map(value => value.toFixed(2)));
+          modeRef.current = 'TPP';
+          if (mounted.current) setViewMode('TPP');
+        } else if (teaSeat) {
+          currentSeatType = 'bench';
+          if (mounted.current) setActiveSeatType('bench');
+          // Compute slot on bench plank taking into account tap location and other avatars
+          const occupied = Array.from(remoteAvatars.values()).map(e => e.mount.position);
+          const spot = getBenchSeatSpot(teaSeat, hitPoint, occupied);
+          seatTarget.copy(spot.target).add(new THREE.Vector3(
             -Math.sin(teaSeat.heading) * 0.08, 0,
             -Math.cos(teaSeat.heading) * 0.08));
-          seatApproach.copy(teaSeat.approach);
+          seatApproach.copy(spot.approach);
           seatHeading = teaSeat.heading;
           seatElevation = 0.245;
-          if (__DEV__) console.info('[ADDA tea seat v4]', 'heading', seatHeading.toFixed(3),
-            'normal', teaSeat.normal.toArray().map(value => value.toFixed(2)),
-            'root', seatTarget.toArray().map(value => value.toFixed(2)));
+          if (__DEV__) console.info('[ADDA tea seat multi-slot]', 'heading', seatHeading.toFixed(3),
+            'target', seatTarget.toArray().map(value => value.toFixed(2)),
+            'approach', seatApproach.toArray().map(value => value.toFixed(2)));
           modeRef.current = 'TPP';
           if (mounted.current) setViewMode('TPP');
         } else if (onSide) {
+          currentSeatType = 'bench';
+          if (mounted.current) setActiveSeatType('sofa');
           seatElevation = 0;
           seatTarget.set(-2.59, 0, THREE.MathUtils.clamp(coordinate, -3.7, 1.1));
           seatApproach.set(seatTarget.x + 0.68, 0, seatTarget.z);
           seatHeading = -Math.PI / 2;
         } else {
+          currentSeatType = 'bench';
+          if (mounted.current) setActiveSeatType('sofa');
           seatElevation = 0;
           seatTarget.set(THREE.MathUtils.clamp(coordinate, -2.2, 0.8), 0, -3.38);
           seatApproach.set(seatTarget.x, 0, seatTarget.z + 0.68);
@@ -479,7 +681,9 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
             const pose = peer.pose ?? (now - entry.lastMovingAt < 260 ? 'walk' : 'idle');
             const wanted = entry.actions[pose] ?? (pose === 'crouch_idle' ? entry.actions.idle
               : pose === 'crouch_walk' || pose === 'run' ? entry.actions.walk
-              : pose === 'jump' ? entry.actions.walk : undefined) ?? entry.actions.idle ?? entry.actions.walk;
+              : pose === 'jump' ? entry.actions.walk
+              : pose === 'lounger_idle' ? (entry.actions.lounger_idle ?? entry.actions.sit_idle)
+              : undefined) ?? entry.actions.idle ?? entry.actions.walk;
             if (wanted && wanted !== entry.playing) {
               entry.playing?.fadeOut(0.18);
               wanted.reset().fadeIn(0.18).play();
@@ -514,6 +718,7 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
           const oldX = room.player.position.x;
           const oldZ = room.player.position.z;
           const canOccupy = (x: number, z: number) => {
+            if (roomKind === 'beach' && beachEnv) return canWalkBeach(x, z, beachEnv.obstacles);
             if (roomKind === 'tea') return canWalkTea(x, z, teaObstacles, teaSeats);
             if (roomKind === 'roof' && roofDoorBounds) {
               return !(x >= roofDoorBounds.min.x - 0.35 && x <= roofDoorBounds.max.x + 0.35
@@ -522,15 +727,41 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
             if (portalMeshes.length && x > loftDoor.x - 0.55 && Math.abs(z - loftDoor.z) < 0.72) return false;
             return true;
           };
-          const xLimit = roomKind === 'loft' ? 4.45 : roomKind === 'roof' ? 11.5 : room.boundary - 0.4;
-          const minZ = roomKind === 'loft' ? -4.42 : roomKind === 'roof' ? -8.8 : -room.boundary + 0.4;
-          const maxZ = roomKind === 'loft' ? 4.4 : roomKind === 'roof' ? 8.55 : room.boundary - 0.4;
+          const xLimit = roomKind === 'beach' ? 31 : roomKind === 'loft' ? 4.45 : roomKind === 'roof' ? 11.5 : room.boundary - 0.4;
+          const minZ = roomKind === 'beach' ? -17.3 : roomKind === 'loft' ? -4.42 : roomKind === 'roof' ? -8.8 : -room.boundary + 0.4;
+          const maxZ = roomKind === 'beach' ? 42 : roomKind === 'loft' ? 4.4 : roomKind === 'roof' ? 8.55 : room.boundary - 0.4;
           const nextX = THREE.MathUtils.clamp(oldX + velocity.x * delta, -xLimit, xLimit);
           if (canOccupy(nextX, oldZ)) room.player.position.x = nextX;
           else velocity.x = 0;
           const nextZ = THREE.MathUtils.clamp(oldZ + velocity.z * delta, minZ, maxZ);
           if (canOccupy(room.player.position.x, nextZ)) room.player.position.z = nextZ;
           else velocity.z = 0;
+          if (roomKind === 'beach') {
+            const onPier = Math.abs(room.player.position.x) <= 1.75 && room.player.position.z <= 2.85 && room.player.position.z >= -17.3;
+            const sandY = getBeachSandElevation(room.player.position.z);
+            const targetY = onPier ? 0.42 : Math.max(sandY, -0.2);
+            currentGroundElevation = THREE.MathUtils.damp(currentGroundElevation, targetY, 14, delta);
+
+            // GPU Optimization: Distance culling beyond 36m (sunset fog horizon)
+            if (beachHolders.length > 0) {
+              const px = room.player.position.x;
+              const pz = room.player.position.z;
+              const MAX_BEACH_DRAW_DIST_SQ = 36 * 36;
+              for (let bi = 0; bi < beachHolders.length; bi++) {
+                const bh = beachHolders[bi];
+                const bdx = bh.x - px;
+                const bdz = bh.z - pz;
+                const isVisible = bdx * bdx + bdz * bdz <= MAX_BEACH_DRAW_DIST_SQ;
+                if (bh.holder.visible !== isVisible) {
+                  bh.holder.visible = isVisible;
+                }
+              }
+            }
+          } else if (roomKind === 'tea') {
+            const onStage = room.player.position.x >= -9.3 && room.player.position.x <= -5.8 && room.player.position.z >= 3.4 && room.player.position.z <= 7.0;
+            const targetY = onStage ? 0.61 : 0;
+            currentGroundElevation = THREE.MathUtils.damp(currentGroundElevation, targetY, 14, delta);
+          }
           let actualSpeed = Math.hypot(room.player.position.x - oldX, room.player.position.z - oldZ) / Math.max(delta, 0.001);
           let walking = actualSpeed > 0.12;
           const door = roomKind === 'roof' ? roofDoor : loftDoor;
@@ -547,15 +778,63 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
           const closestTeaSeat = roomKind === 'tea' ? teaSeats.reduce<TeaSeat | null>((best, seat) =>
             !best || room.player.position.distanceToSquared(seat.approach) < room.player.position.distanceToSquared(best.approach) ? seat : best, null) : null;
           const nearTeaSeat = closestTeaSeat !== null && Math.hypot(room.player.position.x - closestTeaSeat.approach.x, room.player.position.z - closestTeaSeat.approach.z) < 1.7;
-          const isNearSofa = seatPhase === 'free' && (roomKind === 'loft' && sofaMeshes.length > 0 && Math.min(sideDistance, backDistance) < 1.55 || roomKind === 'tea' && nearTeaSeat);
+          const closestBeachSeat = roomKind === 'beach' ? beachSeats.reduce<BeachSeat | null>((best, seat) =>
+            !best || room.player.position.distanceToSquared(seat.approach) < room.player.position.distanceToSquared(best.approach) ? seat : best, null) : null;
+          const nearBeachSeat = closestBeachSeat !== null && Math.hypot(room.player.position.x - closestBeachSeat.approach.x, room.player.position.z - closestBeachSeat.approach.z) < 2.0;
+          const isNearSofa = seatPhase === 'free' && (
+            (roomKind === 'loft' && sofaMeshes.length > 0 && Math.min(sideDistance, backDistance) < 1.55) ||
+            (roomKind === 'tea' && nearTeaSeat) ||
+            (roomKind === 'beach' && nearBeachSeat)
+          );
           if (isNearSofa !== wasNearSofa) {
             wasNearSofa = isNearSofa;
-            if (mounted.current) setNearSofa(isNearSofa);
+            if (mounted.current) {
+              setNearSofa(isNearSofa);
+              if (isNearSofa) {
+                const detected: 'bench' | 'lounger' | 'sofa' =
+                  roomKind === 'beach' ? (closestBeachSeat?.seatType ?? 'bench')
+                  : roomKind === 'tea' ? 'bench'
+                  : 'sofa';
+                setNearSeatType(detected);
+              }
+            }
           }
           if (sitRequested.current) {
             sitRequested.current = false;
-            if (isNearSofa && seatPhase === 'free') beginSeat(sideDistance < backDistance, sideDistance < backDistance ? sideZ : backX, roomKind === 'tea' ? closestTeaSeat ?? undefined : undefined);
+            if (isNearSofa && seatPhase === 'free') {
+              beginSeat(
+                sideDistance < backDistance,
+                sideDistance < backDistance ? sideZ : backX,
+                roomKind === 'tea' ? closestTeaSeat ?? undefined : undefined,
+                roomKind === 'tea' || roomKind === 'beach' ? room.player.position : undefined,
+                roomKind === 'beach' ? closestBeachSeat ?? undefined : undefined
+              );
+            }
           }
+
+          // Spatial audio distance attenuation & proximity check
+          const radioDist = room.player.position.distanceTo(radioPos);
+          const MAX_HEAR_DIST = 42.0;
+          let spatialAtten = 0;
+          if (radioDist <= 2.5) {
+            spatialAtten = 1.0;
+          } else if (radioDist < MAX_HEAR_DIST) {
+            const t = (radioDist - 2.5) / (MAX_HEAR_DIST - 2.5);
+            spatialAtten = Math.max(0.15, Math.pow(1.0 - t, 1.4));
+          } else {
+            spatialAtten = 0;
+          }
+          MusicService.updateSpatialAttenuation(spatialAtten);
+
+          const isNearRadio = radioDist < 2.8;
+          if (isNearRadio !== wasNearRadio) {
+            wasNearRadio = isNearRadio;
+            if (mounted.current) setNearRadio(isNearRadio);
+          }
+
+          const isRadioEmitting = MusicService.state.radioEnabled && !MusicService.state.radioMuted && spatialAtten > 0.05;
+          radio3D.setPowered(MusicService.state.radioEnabled);
+          radio3D.update(delta, isRadioEmitting);
 
           if (movingInput) {
             // A model facing -Z rotates toward +X with a negative Three.js Y angle.
@@ -635,7 +914,7 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
           }
           currentSeatElevation = THREE.MathUtils.damp(currentSeatElevation,
             seatPhase === 'entering' || seatPhase === 'seated' ? seatElevation : 0, 6, delta);
-          room.player.position.y = jumpHeight + currentSeatElevation;
+          room.player.position.y = currentGroundElevation + jumpHeight + currentSeatElevation;
           const targetScaleY = (!clips.crouchIdle && crouchRef.current) ? 0.65 : 1;
           room.avatarMount.scale.y = THREE.MathUtils.damp(room.avatarMount.scale.y, targetScaleY, 13, delta);
 
@@ -643,7 +922,7 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
           if (seatPhase === 'entering') {
             wanted = clips.sitEnter;
           } else if (seatPhase === 'seated') {
-            wanted = clips.sitIdle;
+            wanted = (currentSeatType === 'lounger' && clips.loungerIdle) ? clips.loungerIdle : clips.sitIdle;
           } else if (seatPhase === 'exiting') {
             wanted = clips.sitExit;
           } else if (jumpHeight > 0.05) {
@@ -673,7 +952,7 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
           }
           mixer?.update(delta);
           const pose: RoomPose = seatPhase === 'entering' ? 'sit_enter'
-            : seatPhase === 'seated' ? 'sit_idle'
+            : seatPhase === 'seated' ? (currentSeatType === 'lounger' ? 'lounger_idle' : 'sit_idle')
             : seatPhase === 'exiting' ? 'sit_exit'
             : jumpHeight > 0.05 ? 'jump'
             : crouchRef.current ? (walking ? 'crouch_walk' : 'crouch_idle')
@@ -693,10 +972,10 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
           heading.set(Math.sin(yaw.current) * Math.cos(pitch.current), Math.sin(pitch.current), -Math.cos(yaw.current) * Math.cos(pitch.current));
           const sittingCamera = seatPhase === 'entering' || seatPhase === 'seated' || seatPhase === 'exiting';
           if (modeRef.current === 'FPP') {
-            room.camera.position.set(room.player.position.x, room.player.position.y + (sittingCamera ? 1.15 : crouchRef.current ? 1.05 : 1.63), room.player.position.z);
+            room.camera.position.set(room.player.position.x, room.player.position.y + (sittingCamera ? (currentSeatType === 'lounger' ? 0.75 : 1.15) : crouchRef.current ? 1.05 : 1.63), room.player.position.z);
             room.camera.lookAt(focus.copy(room.camera.position).add(heading));
           } else {
-            focus.set(room.player.position.x, room.player.position.y + (sittingCamera ? 0.95 : crouchRef.current ? 1.0 : 1.4), room.player.position.z);
+            focus.set(room.player.position.x, room.player.position.y + (sittingCamera ? (currentSeatType === 'lounger' ? 0.55 : 0.95) : crouchRef.current ? 1.0 : 1.4), room.player.position.z);
             desired.set(focus.x - Math.sin(yaw.current) * 2.15, THREE.MathUtils.clamp(focus.y + 0.85 - Math.sin(pitch.current) * 1.2, 0.75, 3.2), focus.z + Math.cos(yaw.current) * 2.15);
             desired.x = THREE.MathUtils.clamp(desired.x, -room.boundary - 0.2, room.boundary + 0.2);
             desired.z = THREE.MathUtils.clamp(desired.z, -room.boundary - 0.2, room.boundary + 0.2);
@@ -727,10 +1006,13 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
           room.avatarMount.visible = modeRef.current === 'TPP' && !cameraTooClose;
           const tap = pendingWorldTap.current;
           pendingWorldTap.current = null;
-          if (tap && (roomKind === 'loft' || roomKind === 'roof' || roomKind === 'tea')) {
+          if (tap) {
             tapNdc.set(tap.x / windowSize.current.width * 2 - 1, 1 - tap.y / windowSize.current.height * 2);
             ray.setFromCamera(tapNdc, room.camera);
-            if (isNearDoor && portalMeshes.length && ray.intersectObjects(portalMeshes, true).length) {
+            const radioHits = ray.intersectObjects(radio3D.group.children, true);
+            if (radioHits.length > 0 && isNearRadio) {
+              openRadioRef.current?.();
+            } else if (isNearDoor && portalMeshes.length && ray.intersectObjects(portalMeshes, true).length) {
               onPortal();
             } else if (roomKind === 'loft' && seatPhase === 'free' && sofaMeshes.length) {
               const sofaHit = ray.intersectObjects(sofaMeshes, false)[0];
@@ -741,9 +1023,18 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
             } else if (roomKind === 'tea' && seatPhase === 'free' && teaSeats.length) {
               const hit = ray.intersectObjects(teaSeats.map(seat => seat.tapTarget), false)[0];
               const selected = teaSeats.find(seat => seat.tapTarget === hit?.object);
-              if (selected && Math.hypot(room.player.position.x - selected.approach.x, room.player.position.z - selected.approach.z) < 2.4) beginSeat(false, 0, selected);
+              if (selected && Math.hypot(room.player.position.x - selected.approach.x, room.player.position.z - selected.approach.z) < 2.4) {
+                beginSeat(false, 0, selected, hit.point);
+              }
+            } else if (roomKind === 'beach' && seatPhase === 'free' && beachSeats.length) {
+              const hit = ray.intersectObjects(beachSeats.map(seat => seat.tapTarget), false)[0];
+              const selected = beachSeats.find(seat => seat.tapTarget === hit?.object);
+              if (selected && Math.hypot(room.player.position.x - selected.approach.x, room.player.position.z - selected.approach.z) < 3.2) {
+                beginSeat(false, 0, undefined, hit.point, selected);
+              }
             }
           }
+          beachEnv?.update(delta);
           renderer.render(room.scene, room.camera);
           gl.endFrameEXP();
           frame = requestAnimationFrame(render);
@@ -758,6 +1049,8 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
         active = false;
         cancelAnimationFrame(frame);
         mixer?.stopAllAction();
+        radio3D?.dispose();
+        beachEnv?.dispose();
         room.dispose();
         renderer?.dispose();
       };
@@ -794,9 +1087,10 @@ export function GameRoom({ roomKind, avatar, onPortal, peers = [], onPosition }:
       {seatUi === 'free' ? <View style={[styles.actions, { right: 28 + insets.right, bottom: 20 + insets.bottom }]}>
         <GestureDetector gesture={gestures.jumpTap}><View accessible accessibilityRole="button" accessibilityLabel="Jump" style={styles.actionButton}><ArrowBigUp size={30} strokeWidth={2.4} color="#F7FAF8" /><Text style={styles.actionLabel}>JUMP</Text></View></GestureDetector>
         <GestureDetector gesture={gestures.crouchTap}><View accessible accessibilityRole="button" accessibilityLabel={crouched ? 'Stand up' : 'Crouch'} accessibilityState={{ selected: crouched }} style={[styles.actionButton, crouched && styles.crouchedButton]}>{crouched ? <PersonStanding size={30} strokeWidth={2.2} color="#F7FAF8" /> : <Accessibility size={30} strokeWidth={2.2} color="#F7FAF8" />}<Text style={styles.actionLabel}>{crouched ? 'STAND' : 'CROUCH'}</Text></View></GestureDetector>
-      </View> : seatUi === 'seated' ? <Pressable accessibilityRole="button" accessibilityLabel="Stand up" onPress={standUp} style={[styles.standButton, { right: 28 + insets.right, bottom: 32 + insets.bottom }]}><Text style={styles.standText}>STAND UP</Text></Pressable> : <View pointerEvents="none" style={styles.seatMessage}><Text style={styles.seatMessageText}>{seatUi === 'approaching' ? roomKind === 'tea' ? 'Walking to bench…' : 'Walking to sofa…' : seatUi === 'entering' ? 'Sitting down…' : 'Standing up…'}</Text></View>}
+      </View> : seatUi === 'seated' ? <Pressable accessibilityRole="button" accessibilityLabel="Stand up" onPress={standUp} style={[styles.standButton, { right: 28 + insets.right, bottom: 32 + insets.bottom }]}><Text style={styles.standText}>STAND UP</Text></Pressable> : <View pointerEvents="none" style={styles.seatMessage}><Text style={styles.seatMessageText}>{activeSeatType === 'lounger' ? (seatUi === 'approaching' ? 'Walking to sunbed…' : seatUi === 'entering' ? 'Lying down…' : 'Getting up…') : seatUi === 'approaching' ? (roomKind === 'tea' || roomKind === 'beach' ? 'Walking to bench…' : 'Walking to sofa…') : seatUi === 'entering' ? 'Sitting down…' : 'Standing up…'}</Text></View>}
       {nearDoor && seatUi === 'free' && (roomKind === 'loft' || roomKind === 'roof') && <Pressable accessibilityRole="button" accessibilityLabel={roomKind === 'roof' ? 'Back to Loft' : 'Go to Rooftop'} onPress={onPortal} style={styles.doorButton}><Text style={styles.doorButtonText}>{roomKind === 'roof' ? 'BACK TO LOFT' : 'GO TO ROOFTOP'}</Text></Pressable>}
-      {nearSofa && seatUi === 'free' && <Pressable accessibilityRole="button" accessibilityLabel={roomKind === 'tea' ? 'Sit on chai bench' : 'Sit on the black sofa'} onPress={sitDown} style={styles.sitButton}><Text style={styles.doorButtonText}>{roomKind === 'tea' ? 'SIT ON BENCH' : 'SIT ON SOFA'}</Text></Pressable>}
+      {nearSofa && seatUi === 'free' && <Pressable accessibilityRole="button" accessibilityLabel={nearSeatType === 'lounger' ? 'Relax on sunbed' : roomKind === 'tea' || roomKind === 'beach' ? 'Sit on bench' : 'Sit on the black sofa'} onPress={sitDown} style={styles.sitButton}><Text style={styles.doorButtonText}>{nearSeatType === 'lounger' ? 'RELAX ON SUNBED' : roomKind === 'tea' || roomKind === 'beach' ? 'SIT ON BENCH' : 'SIT ON SOFA'}</Text></Pressable>}
+      {nearRadio && seatUi === 'free' && <Pressable accessibilityRole="button" accessibilityLabel="Tune room radio" onPress={onOpenRadio} style={styles.radioTuneButton}><RadioIcon size={20} color="#00E5FF" /><Text style={styles.radioTuneButtonText}>TUNE RADIO</Text></Pressable>}
     </>}
   </View>;
 }
@@ -827,6 +1121,8 @@ const styles = StyleSheet.create({
   doorButton: { position: 'absolute', bottom: 32, alignSelf: 'center', backgroundColor: '#FFFFFFF0', borderWidth: 1.5, borderColor: colors.primary, borderRadius: 16, paddingHorizontal: 20, paddingVertical: 13 },
   sitButton: { position: 'absolute', bottom: 32, alignSelf: 'center', backgroundColor: '#FFFFFFF0', borderWidth: 1.5, borderColor: colors.primary, borderRadius: 16, paddingHorizontal: 20, paddingVertical: 13 },
   doorButtonText: { color: colors.text, fontWeight: '900', fontSize: 12, letterSpacing: 0.8 },
+  radioTuneButton: { position: 'absolute', bottom: 84, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#0F261FF2', borderWidth: 1.8, borderColor: '#00E5FF', borderRadius: 18, paddingHorizontal: 20, paddingVertical: 12, elevation: 6 },
+  radioTuneButtonText: { color: '#00E5FF', fontWeight: '900', fontSize: 13, letterSpacing: 1.0 },
   seatMessage: { position: 'absolute', bottom: 70, alignSelf: 'center', backgroundColor: '#FFFFFFE8', borderRadius: 12, paddingHorizontal: 18, paddingVertical: 10 },
   seatMessageText: { color: colors.text, fontWeight: '800', fontSize: 12 },
 });

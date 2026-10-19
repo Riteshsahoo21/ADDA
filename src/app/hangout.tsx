@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BackHandler, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { AppState, BackHandler, DeviceEventEmitter, KeyboardAvoidingView, PermissionsAndroid, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { NavigationBar } from 'expo-navigation-bar';
 import { router, useIsFocused, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { House, MessageCircle, Mic, MicOff, Send, Users, Volume2, VolumeX, X } from 'lucide-react-native';
+import { Headphones, House, MessageCircle, Mic, MicOff, Music, Send, Users, Volume1, Volume2, VolumeX, X } from 'lucide-react-native';
 import { GameRoom } from '@/components/room/GameRoom';
 import InCallManager from 'react-native-incall-manager';
 import { RoomKind } from '@/three/environment/createGameScene';
@@ -15,6 +15,8 @@ import { AvatarBody } from '@/three/player/avatarStyle';
 import { GroupMedia } from '@/lib/group-media';
 import { getRealtimeSocket } from '@/lib/realtime';
 import { sendRoomMessage, type RoomJoin, type RoomMessage, type RoomMotionSnapshot, type RoomPeer } from '@/lib/rooms';
+import { MusicHubModal } from '@/components/music/MusicHubModal';
+import { MusicService } from '@/audio/MusicService';
 
 const avatarBodies = new Set(['man', 'uncle', 'photo_boy', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman']);
 
@@ -22,7 +24,7 @@ export default function HangoutScreen() {
   const { username, avatarStyle } = useSession();
   const focused = useIsFocused();
   const params = useLocalSearchParams<{ room?: string; avatar?: string }>();
-  const [roomKind, setRoomKind] = useState<RoomKind>(params.room === 'tea' ? 'tea' : params.room === 'roof' ? 'roof' : 'loft');
+  const [roomKind, setRoomKind] = useState<RoomKind>(params.room === 'beach' ? 'beach' : params.room === 'tea' ? 'tea' : params.room === 'roof' ? 'roof' : 'loft');
   const avatar: AvatarBody = avatarBodies.has(params.avatar ?? '') ? params.avatar as AvatarBody : avatarStyle.body;
   const roomAvatar = useMemo(() => ({ ...avatarStyle, body: avatar }), [avatarStyle, avatar]);
   const { width, height } = useWindowDimensions();
@@ -32,12 +34,15 @@ export default function HangoutScreen() {
   const [voiceStatus, setVoiceStatus] = useState('Connecting voice…');
   const [micMuted, setMicMuted] = useState(false);
   const [speakerMuted, setSpeakerMuted] = useState(false);
+  const [routeToast, setRouteToast] = useState<string | null>(null);
   const [mutedPeers, setMutedPeers] = useState<Set<string>>(() => new Set());
   const [voiceEpoch, setVoiceEpoch] = useState(0);
   const [nearbySpeakers, setNearbySpeakers] = useState(0);
   const [chatOpen, setChatOpen] = useState(false);
   const [playersOpen, setPlayersOpen] = useState(false);
   const [roomMenuOpen, setRoomMenuOpen] = useState(false);
+  const [musicModalOpen, setMusicModalOpen] = useState(false);
+  const [musicModalTab, setMusicModalTab] = useState<'headphones' | 'radio'>('headphones');
   const [chatText, setChatText] = useState('');
   const [chatError, setChatError] = useState('');
   const [messages, setMessages] = useState<RoomMessage[]>([]);
@@ -45,6 +50,9 @@ export default function HangoutScreen() {
   const mediaRef = useRef<GroupMedia | null>(null);
   const micMutedRef = useRef(false);
   const speakerMutedRef = useRef(false);
+  const isBluetoothRef = useRef(false);
+  const isWiredRef = useRef(false);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mutedPeersRef = useRef<Set<string>>(new Set());
   const presenceRef = useRef<Awaited<ReturnType<typeof getRealtimeSocket>> | null>(null);
   const positionRef = useRef<RoomMotionSnapshot>({ x: 0, y: 0, z: 0, yaw: 0, pose: 'idle' });
@@ -81,11 +89,20 @@ export default function HangoutScreen() {
 
   useEffect(() => {
     if (!username || !focused) return;
+    MusicService.init();
     let active = true;
     let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
     const onPeer = (peer: RoomPeer) => setPeers(current => [...current.filter(item => item.userId !== peer.userId), peer]);
     const onLeft = ({ userId }: { userId: string }) => setPeers(current => current.filter(peer => peer.userId !== userId));
     const onMessage = (message: RoomMessage) => setMessages(current => [...current, message].slice(-50));
+    const onRadioSync = (radio: { enabled?: boolean; trackIndex?: number }) => {
+      if (typeof radio?.enabled === 'boolean' && radio.enabled !== MusicService.state.radioEnabled) {
+        MusicService.setRadioEnabled(radio.enabled);
+      }
+      if (typeof radio?.trackIndex === 'number' && radio.trackIndex !== MusicService.state.radioTrackIndex) {
+        MusicService.playRadioTrack(radio.trackIndex);
+      }
+    };
     const onReconnect = () => { joinPresence(); setVoiceEpoch(current => current + 1); };
     const joinPresence = () => {
       if (!live || !active) return;
@@ -94,6 +111,10 @@ export default function HangoutScreen() {
         if (error || !result?.ok || !result.value) { setChatError(result?.error || 'Could not join room chat.'); return; }
         setPeers(result.value.peers);
         setMessages(result.value.messages);
+        if (result.value.radio) {
+          MusicService.setRadioEnabled(result.value.radio.enabled, true);
+          MusicService.playRadioTrack(result.value.radio.trackIndex);
+        }
         setChatError('');
         live?.volatile.emit('room:position', positionRef.current);
       });
@@ -105,23 +126,106 @@ export default function HangoutScreen() {
       socket.on('room:peer', onPeer);
       socket.on('room:peer-left', onLeft);
       socket.on('room:message', onMessage);
+      socket.on('room:radio-sync', onRadioSync);
       socket.on('connect', onReconnect);
       joinPresence();
     }).catch(error => { if (active) setChatError(error instanceof Error ? error.message : 'Room chat offline.'); });
     return () => {
       active = false;
+      MusicService.stopAll();
       live?.off('room:peer', onPeer); live?.off('room:peer-left', onLeft); live?.off('room:message', onMessage);
+      live?.off('room:radio-sync', onRadioSync);
       live?.off('connect', onReconnect);
       live?.emit('room:leave');
       if (presenceRef.current === live) presenceRef.current = null;
     };
   }, [roomKind, username, avatar, focused]);
 
+  // Pause background music when the app is minimized to prevent audio stream conflicts
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', state => {
+      if (state === 'background' || state === 'inactive') {
+        MusicService.pauseAll();
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
+  const showRouteToast = (msg: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setRouteToast(msg);
+    toastTimer.current = setTimeout(() => setRouteToast(null), 2500);
+  };
+
+  const applyAudioRoute = useCallback(() => {
+    if (isBluetoothRef.current) {
+      InCallManager.setForceSpeakerphoneOn(null as any);
+      InCallManager.setSpeakerphoneOn(false);
+      void InCallManager.chooseAudioRoute('BLUETOOTH');
+    } else if (isWiredRef.current) {
+      InCallManager.setForceSpeakerphoneOn(null as any);
+      InCallManager.setSpeakerphoneOn(false);
+      void InCallManager.chooseAudioRoute('WIRED_HEADSET');
+    } else {
+      InCallManager.setForceSpeakerphoneOn(true);
+      InCallManager.setSpeakerphoneOn(true);
+      void InCallManager.chooseAudioRoute('SPEAKER_PHONE');
+    }
+  }, []);
+
   useEffect(() => {
     if (!username || !focused) return;
     let active = true;
-    InCallManager.start({ media: 'video', auto: false });
-    InCallManager.setForceSpeakerphoneOn(true);
+
+    // 1. Request Bluetooth permission on Android 12+ so InCallManager can start Bluetooth SCO
+    if (Platform.OS === 'android' && Number(Platform.Version) >= 31) {
+      void PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT).catch(() => {});
+    }
+
+    // 2. Start InCallManager with audio media (room is proximity voice chat, auto starts Bluetooth SCO manager)
+    InCallManager.start({ media: 'audio', auto: true });
+
+    // Initial check for wired earphones
+    void InCallManager.getIsWiredHeadsetPluggedIn().then(({ isWiredHeadsetPluggedIn }) => {
+      if (!active) return;
+      isWiredRef.current = Boolean(isWiredHeadsetPluggedIn);
+      applyAudioRoute();
+    }).catch(() => {});
+
+    // Listen for audio device changes (Bluetooth wireless, wired headset, or speaker)
+    const audioDeviceSub = DeviceEventEmitter.addListener('onAudioDeviceChanged', (data: { selectedAudioDevice?: string; availableAudioDeviceList?: string }) => {
+      if (!active) return;
+      console.log('[ADDA Hangout Audio Device]', data);
+      let hasBt = false;
+      let hasWired = false;
+      if (data?.availableAudioDeviceList) {
+        try {
+          const list = JSON.parse(data.availableAudioDeviceList) as string[];
+          hasBt = list.includes('BLUETOOTH');
+          hasWired = list.includes('WIRED_HEADSET');
+        } catch {}
+      }
+      const prevBt = isBluetoothRef.current;
+      const prevWired = isWiredRef.current;
+      isBluetoothRef.current = hasBt;
+      isWiredRef.current = hasWired;
+      applyAudioRoute();
+
+      if (hasBt && !prevBt) {
+        showRouteToast('🎧 Wireless Earphones Connected (Bluetooth SCO)');
+      } else if (hasWired && !prevWired) {
+        showRouteToast('🎧 Wired Earphones Connected');
+      }
+    });
+
+    const headsetSub = DeviceEventEmitter.addListener('WiredHeadset', (data: { isPlugged?: boolean }) => {
+      if (!active) return;
+      const plugged = Boolean(data?.isPlugged);
+      isWiredRef.current = plugged;
+      applyAudioRoute();
+      if (plugged) showRouteToast('🎧 Wired Earphones Connected');
+    });
+
     const media = new GroupMedia(tracks => {
       if (active) setNearbySpeakers(new Set(tracks.filter(track => track.kind === 'audio').map(track => track.userId)).size);
     }, error => { if (active) setVoiceStatus(error); });
@@ -134,15 +238,33 @@ export default function HangoutScreen() {
       media.setPosition(positionRef.current.x, positionRef.current.z);
       setVoiceStatus('Nearby voice on');
     }).catch(error => { if (active) setVoiceStatus(error instanceof Error ? error.message : 'Voice unavailable.'); });
-    return () => { active = false; media.close(); InCallManager.setForceSpeakerphoneOn(false); InCallManager.stop(); setNearbySpeakers(0); if (mediaRef.current === media) mediaRef.current = null; };
-  }, [roomKind, username, voiceEpoch, focused]);
+    return () => {
+      active = false;
+      audioDeviceSub.remove();
+      headsetSub.remove();
+      media.close();
+      InCallManager.setForceSpeakerphoneOn(false);
+      InCallManager.stop();
+      setNearbySpeakers(0);
+      if (mediaRef.current === media) mediaRef.current = null;
+    };
+  }, [roomKind, username, voiceEpoch, focused, applyAudioRoute]);
 
   const toggleMic = () => {
     const next = !micMutedRef.current;
     micMutedRef.current = next;
     mediaRef.current?.setMuted(next);
     setMicMuted(next);
+
+    // Root fix: when unmuting, WebRTC ADM restarts AudioRecord.
+    // Re-assert route after 100ms so WebRTC does NOT kick audio to loudspeaker!
+    if (!next) {
+      setTimeout(() => {
+        applyAudioRoute();
+      }, 100);
+    }
   };
+
   const toggleSpeaker = () => {
     const next = !speakerMutedRef.current;
     speakerMutedRef.current = next;
@@ -169,20 +291,26 @@ export default function HangoutScreen() {
   return <View style={styles.screen}>
     <StatusBar hidden />
     <NavigationBar hidden />
-    {landscapeReady && (width >= height || orientationFailed) && <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} />}
+    {landscapeReady && (width >= height || orientationFailed) && <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} onOpenRadio={() => { setMusicModalTab('radio'); setMusicModalOpen(true); }} />}
     <View style={[styles.topBar, { left: Math.max(16, insets.left + 8), right: Math.max(16, insets.right + 8), top: Math.max(8, insets.top + 4) }]}>
       <View style={styles.toolbar}>
         <Pressable accessibilityRole="button" accessibilityLabel="Room menu" accessibilityState={{ expanded: roomMenuOpen }} onPress={() => { setRoomMenuOpen(current => !current); setPlayersOpen(false); setChatOpen(false); }} style={[styles.toolButton, roomMenuOpen && styles.toolButtonActive]}><House size={22} color="#F7FAF8" /></Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Room chat" accessibilityState={{ expanded: chatOpen }} onPress={() => { setChatOpen(current => !current); setPlayersOpen(false); setRoomMenuOpen(false); }} style={[styles.toolButton, chatOpen && styles.toolButtonActive]}><MessageCircle size={22} color="#F7FAF8" /></Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={micMuted ? 'Unmute my microphone' : 'Mute my microphone'} accessibilityState={{ selected: micMuted }} onPress={toggleMic} style={[styles.toolButton, micMuted && styles.toolButtonOff]}>{micMuted ? <MicOff size={22} color="#F7FAF8" /> : <Mic size={22} color="#F7FAF8" />}</Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={speakerMuted ? 'Turn my speaker on' : 'Mute my speaker'} accessibilityState={{ selected: speakerMuted }} onPress={toggleSpeaker} style={[styles.toolButton, speakerMuted && styles.toolButtonOff]}>{speakerMuted ? <VolumeX size={22} color="#F7FAF8" /> : <Volume2 size={22} color="#F7FAF8" />}</Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Open Music Studio & Radio" accessibilityState={{ expanded: musicModalOpen }} onPress={() => { setMusicModalTab('headphones'); setMusicModalOpen(true); setPlayersOpen(false); setChatOpen(false); setRoomMenuOpen(false); }} style={[styles.toolButton, musicModalOpen && styles.toolButtonActive]}><Music size={21} color="#00E5FF" /></Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Players in room" accessibilityState={{ expanded: playersOpen }} onPress={() => { setPlayersOpen(current => !current); setChatOpen(false); setRoomMenuOpen(false); }} style={[styles.toolButton, playersOpen && styles.toolButtonActive]}><Users size={22} color="#F7FAF8" /><Text style={styles.playerCount}>{peers.length + 1}</Text></Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={roomKind === 'roof' ? 'Back to Loft' : 'Exit room'} onPress={() => roomKind === 'roof' ? setRoomKind('loft') : router.replace('/home')} style={styles.toolButton}><X size={22} color="#F7FAF8" /></Pressable>
       </View>
-      <View style={styles.roomIdentity}><Text style={styles.title}>{roomKind === 'tea' ? 'Tea Party' : roomKind === 'roof' ? 'School Rooftop' : 'Loft 16'}</Text><Text style={styles.roomStatus} numberOfLines={1}>{voiceStatus}{nearbySpeakers ? ` · ${nearbySpeakers} nearby` : ''}</Text></View>
+      <View style={styles.roomIdentity}><Text style={styles.title}>{roomKind === 'beach' ? 'Goa Beach' : roomKind === 'tea' ? 'Tea Party' : roomKind === 'roof' ? 'School Rooftop' : 'Loft 16'}</Text><Text style={styles.roomStatus} numberOfLines={1}>{voiceStatus}{nearbySpeakers ? ` · ${nearbySpeakers} nearby` : ''}</Text></View>
     </View>
+    {!!routeToast && (
+      <View style={[styles.routeToastPill, { top: Math.max(56, insets.top + 52) }]} pointerEvents="none">
+        <Text style={styles.routeToastText}>{routeToast}</Text>
+      </View>
+    )}
     {roomMenuOpen && <View style={[styles.playersPanel, { left: Math.max(16, insets.left + 8), top: Math.max(66, insets.top + 62) }]}>
-      <Text style={styles.panelTitle}>{roomKind === 'tea' ? 'Tea Party' : roomKind === 'roof' ? 'School Rooftop' : 'Loft 16'}</Text>
+      <Text style={styles.panelTitle}>{roomKind === 'beach' ? 'Goa Beach' : roomKind === 'tea' ? 'Tea Party' : roomKind === 'roof' ? 'School Rooftop' : 'Loft 16'}</Text>
       <Text style={styles.roomMenuStatus}>{voiceStatus}</Text>
       <Pressable accessibilityRole="button" accessibilityLabel={roomKind === 'roof' ? 'Back to Loft' : 'Exit room'} onPress={() => roomKind === 'roof' ? setRoomKind('loft') : router.replace('/home')} style={styles.roomMenuExit}><Text style={styles.roomMenuExitText}>{roomKind === 'roof' ? 'Back to Loft' : 'Exit room'}</Text></Pressable>
     </View>}
@@ -203,6 +331,12 @@ export default function HangoutScreen() {
       {!!chatError && <Text style={styles.chatError}>{chatError}</Text>}
       <View style={styles.chatInputRow}><TextInput style={styles.chatInput} placeholder="Message the room" placeholderTextColor="#A7B6AC" value={chatText} onChangeText={setChatText} maxLength={500} onSubmitEditing={() => void sendMessage()} /><Pressable accessibilityRole="button" accessibilityLabel="Send room message" onPress={() => void sendMessage()}><Send size={21} color="#F7FAF8" /></Pressable></View>
     </KeyboardAvoidingView>}
+    <MusicHubModal
+      visible={musicModalOpen}
+      onClose={() => setMusicModalOpen(false)}
+      initialTab={musicModalTab}
+      onSyncRadioToServer={(sync) => presenceRef.current?.emit('room:radio-sync', sync)}
+    />
   </View>;
 }
 
@@ -216,6 +350,9 @@ const styles = StyleSheet.create({
   toolButton: { width: 42, height: 42, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
   toolButtonOff: { backgroundColor: '#A74141' },
   toolButtonActive: { backgroundColor: '#277A55' },
+  toolButtonNormalSpeaker: { backgroundColor: '#1B4D68' },
+  routeToastPill: { position: 'absolute', alignSelf: 'center', backgroundColor: '#10221DF2', borderWidth: 1, borderColor: '#FFFFFF33', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 7, zIndex: 999 },
+  routeToastText: { color: '#F7FAF8', fontSize: 12, fontWeight: '700' },
   playerCount: { position: 'absolute', right: 2, top: 1, color: '#F7FAF8', fontSize: 9, fontWeight: '800' },
   playersPanel: { position: 'absolute', width: 240, maxHeight: 230, backgroundColor: '#10221DF2', borderRadius: 16, padding: 13, gap: 5 },
   playersList: { maxHeight: 178 },

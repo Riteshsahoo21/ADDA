@@ -12,6 +12,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams, type Href } from 'expo-router';
 import {
@@ -153,6 +154,54 @@ export default function GroupInfoScreen() {
     } finally {
       setSavingEdit(false);
     }
+  };
+
+  const handleChangeGroupAvatar = async () => {
+    if (!group?.isAdmin) {
+      Alert.alert('Group Icon', 'Only group admins can change the group icon.');
+      return;
+    }
+    const options: any[] = [
+      {
+        text: 'Choose from Gallery',
+        onPress: async () => {
+          try {
+            const res = await ImagePicker.launchImageLibraryAsync({
+              mediaTypes: ImagePicker.MediaTypeOptions.Images,
+              allowsEditing: true,
+              aspect: [1, 1],
+              quality: 0.6,
+              base64: true,
+            });
+            if (!res.canceled && res.assets[0]?.base64) {
+              const dataUrl = `data:image/jpeg;base64,${res.assets[0].base64}`;
+              await socialApi(`/groups/${group.id}`, 'PATCH', { avatarUrl: dataUrl });
+              await loadDetails();
+            }
+          } catch (err) {
+            Alert.alert('Error', err instanceof Error ? err.message : 'Could not update group photo.');
+          }
+        },
+      },
+    ];
+
+    if (group.avatarUrl) {
+      options.push({
+        text: 'Remove Group Icon',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await socialApi(`/groups/${group.id}`, 'PATCH', { avatarUrl: null });
+            await loadDetails();
+          } catch (err) {
+            Alert.alert('Error', err instanceof Error ? err.message : 'Could not remove group photo.');
+          }
+        },
+      });
+    }
+
+    options.push({ text: 'Cancel', style: 'cancel' });
+    Alert.alert('Group Icon', 'Change or remove group icon', options);
   };
 
   const handleOpenAddMembers = async () => {
@@ -297,7 +346,11 @@ export default function GroupInfoScreen() {
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         {/* Hero Section */}
         <View style={styles.heroSection}>
-          <View style={styles.avatarWrap}>
+          <Pressable
+            onPress={handleChangeGroupAvatar}
+            style={styles.avatarWrap}
+            accessibilityLabel="Group icon"
+          >
             {group?.avatarUrl ? (
               <Image source={{ uri: group.avatarUrl }} style={styles.avatarImg} />
             ) : (
@@ -306,15 +359,11 @@ export default function GroupInfoScreen() {
               </View>
             )}
             {group?.isAdmin && (
-              <Pressable
-                onPress={() => setShowEditModal(true)}
-                style={styles.avatarBadge}
-                accessibilityLabel="Edit group icon"
-              >
+              <View style={styles.avatarBadge}>
                 <Camera size={16} color="#FFFFFF" />
-              </Pressable>
+              </View>
             )}
-          </View>
+          </Pressable>
 
           <View style={styles.titleRow}>
             <Text style={styles.groupTitle}>{displayName}</Text>
@@ -364,13 +413,15 @@ export default function GroupInfoScreen() {
           <View style={styles.actionItem}>
             <Pressable
               onPress={() => {
-                setShowSearch((prev) => !prev);
-                if (showSearch) setSearchQuery('');
+                router.push({
+                  pathname: '/conversation',
+                  params: { kind: 'group', id: group?.id || groupId, name: displayName, search: '1' },
+                } as unknown as Href);
               }}
-              style={[styles.actionCircle, showSearch && styles.actionCircleActive]}
-              accessibilityLabel="Search"
+              style={styles.actionCircle}
+              accessibilityLabel="Search chat messages"
             >
-              <Search size={22} color={showSearch ? '#FFFFFF' : '#25D366'} />
+              <Search size={22} color="#25D366" />
             </Pressable>
             <Text style={styles.actionLabel}>Search</Text>
           </View>
