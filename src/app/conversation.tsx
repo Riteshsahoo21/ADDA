@@ -21,7 +21,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import { VideoView } from 'expo-video';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
 import {
   ArrowLeft,
@@ -193,6 +193,7 @@ function SwipeableBubbleRow({
 
 export default function ConversationScreen() {
   const { kind, id, name, search, avatar } = useLocalSearchParams<{ kind?: string; id?: string; name?: string; search?: string; avatar?: string }>();
+  const insets = useSafeAreaInsets();
   const [chatTitle, setChatTitle] = useState(name || '');
   const [chatAvatarUrl, setChatAvatarUrl] = useState<string | null>(avatar || null);
   const [wallpaperTheme, setWallpaperTheme] = useState<ChatWallpaperTheme>('light');
@@ -1008,9 +1009,9 @@ export default function ConversationScreen() {
                 )}
               </View>
               <View style={styles.titleWrap}>
-                <Text style={styles.title} numberOfLines={1}>{activeTitle}</Text>
+                <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">{activeTitle}</Text>
                 <View style={styles.subtitleRow}>
-                  <Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]}>
+                  <Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]} numberOfLines={1} ellipsizeMode="tail">
                     {Object.keys(typingNames).length
                       ? `${Object.values(typingNames).slice(0, 2).join(', ')} typing`
                       : 'Tap for group info'}
@@ -1029,9 +1030,9 @@ export default function ConversationScreen() {
                 )}
               </View>
               <View style={styles.titleWrap}>
-                <Text style={styles.title} numberOfLines={1}>{activeTitle}</Text>
+                <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">{activeTitle}</Text>
                 <View style={styles.subtitleRow}>
-                  <Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]}>
+                  <Text style={[styles.subtitle, Object.keys(typingNames).length > 0 && styles.typingSubtitle]} numberOfLines={1} ellipsizeMode="tail">
                     {Object.keys(typingNames).length
                       ? `${Object.values(typingNames).slice(0, 2).join(', ')} typing`
                       : 'Contact'}
@@ -1042,31 +1043,30 @@ export default function ConversationScreen() {
             </View>
           )}
 
-          <Pressable
-            accessibilityLabel="Toggle chat background theme"
-            onPress={() => setWallpaperTheme(curr => curr === 'light' ? 'dark' : 'light')}
-            style={styles.callAction}
-          >
-            <Text style={{ fontSize: 16 }}>{wallpaperTheme === 'light' ? '🌙' : '☀️'}</Text>
-          </Pressable>
-          <Pressable accessibilityLabel="Search in chat" onPress={() => setIsSearching(true)} style={styles.callAction}>
-            <Search size={20} color={colors.primary} />
-          </Pressable>
-          <Pressable accessibilityLabel="Voice call" onPress={() => void startCall('audio')} style={styles.callAction}>
-            <Phone size={20} color={colors.primary} />
-          </Pressable>
-          <Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}>
-            <Video size={22} color={colors.primary} />
-          </Pressable>
-          {kind === 'group' && (
-            <Pressable
-              accessibilityLabel="Group Hangout Room"
-              onPress={() => setShowRoomModal(true)}
-              style={[styles.callAction, activeGroupRoom && styles.callActionActiveRoom]}
-            >
-              <DoorOpen size={20} color={activeGroupRoom ? '#25D366' : colors.primary} />
+          <View style={styles.headerRightActions}>
+            {kind === 'group' && (
+              <Pressable
+                accessibilityLabel="Group Hangout Room"
+                onPress={() => setShowRoomModal(true)}
+                style={[styles.callAction, activeGroupRoom && styles.callActionActiveRoom]}
+              >
+                <DoorOpen size={21} color={activeGroupRoom ? '#25D366' : colors.primary} />
+              </Pressable>
+            )}
+            <Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}>
+              <Video size={22} color={colors.primary} />
             </Pressable>
-          )}
+            <Pressable accessibilityLabel="Voice call" onPress={() => void startCall('audio')} style={styles.callAction}>
+              <Phone size={20} color={colors.primary} />
+            </Pressable>
+            <Pressable
+              accessibilityLabel="More options"
+              onPress={() => setShowMenu(true)}
+              style={styles.callAction}
+            >
+              <MoreVertical size={20} color={colors.text} />
+            </Pressable>
+          </View>
         </View>
       )}
 
@@ -1490,6 +1490,95 @@ export default function ConversationScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
+      {/* WhatsApp-style 3-dots Dropdown Menu */}
+      <Modal
+        visible={showMenu}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowMenu(false)}
+      >
+        <Pressable style={styles.menuOverlay} onPress={() => setShowMenu(false)}>
+          <View style={[styles.menuDropdown, { top: insets.top + (Platform.OS === 'ios' ? 44 : 40) }, wallpaperTheme === 'dark' && styles.menuDropdownDark]}>
+            {kind === 'group' && (
+              <Pressable
+                style={styles.menuItem}
+                onPress={() => {
+                  setShowMenu(false);
+                  router.push({
+                    pathname: '/group-info',
+                    params: { id: target?.id, name: activeTitle },
+                  } as unknown as Href);
+                }}
+              >
+                <Text style={[styles.menuItemText, wallpaperTheme === 'dark' && styles.menuItemTextDark]}>Group info</Text>
+              </Pressable>
+            )}
+
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setShowMenu(false);
+                setIsSearching(true);
+              }}
+            >
+              <Text style={[styles.menuItemText, wallpaperTheme === 'dark' && styles.menuItemTextDark]}>Search</Text>
+            </Pressable>
+
+            {kind === 'group' && (
+              <Pressable
+                style={styles.menuItem}
+                onPress={() => {
+                  setShowMenu(false);
+                  setShowRoomModal(true);
+                }}
+              >
+                <Text style={[styles.menuItemText, wallpaperTheme === 'dark' && styles.menuItemTextDark]}>3D Hangout Room</Text>
+              </Pressable>
+            )}
+
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setShowMenu(false);
+                setWallpaperTheme(curr => curr === 'light' ? 'dark' : 'light');
+              }}
+            >
+              <Text style={[styles.menuItemText, wallpaperTheme === 'dark' && styles.menuItemTextDark]}>
+                {wallpaperTheme === 'light' ? '🌙 Dark wallpaper' : '☀️ Light wallpaper'}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setShowMenu(false);
+                Alert.alert(
+                  'Clear messages?',
+                  'Clear local messages in this conversation?',
+                  [
+                    {
+                      text: 'Clear',
+                      style: 'destructive',
+                      onPress: async () => {
+                        try {
+                          for (const m of messages) {
+                            await deleteLocalMessage(m.id);
+                          }
+                          setMessages([]);
+                        } catch {}
+                      },
+                    },
+                    { text: 'Cancel', style: 'cancel' },
+                  ]
+                );
+              }}
+            >
+              <Text style={[styles.menuItemText, styles.menuItemTextDanger]}>Clear chat</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+
       {viewerMedia && (
         <Modal visible={!!viewerMedia} transparent={false} animationType="fade" onRequestClose={() => { setViewerMedia(null); setShowMenu(false); }}>
           <SafeAreaView style={styles.viewerContainer}>
@@ -1728,30 +1817,46 @@ const styles = StyleSheet.create({
   top: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
     backgroundColor: colors.surface,
-    gap: 12,
   },
-  back: { padding: 4 },
-  headerPressable: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  back: { padding: 6, marginRight: 2 },
+  headerPressable: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 6,
+  },
   avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
+    marginRight: 10,
   },
-  initial: { color: '#FFFFFF', fontWeight: '800', fontSize: 18 },
-  titleWrap: { flex: 1 },
-  title: { color: colors.text, fontWeight: '800', fontSize: 16 },
-  subtitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 },
-  subtitle: { color: colors.muted, fontSize: 12 },
+  initial: { color: '#FFFFFF', fontWeight: '800', fontSize: 17 },
+  titleWrap: { flex: 1, minWidth: 0, justifyContent: 'center' },
+  title: { color: colors.text, fontWeight: '700', fontSize: 16, lineHeight: 20 },
+  subtitleRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 1, minWidth: 0 },
+  subtitle: { color: colors.muted, fontSize: 12, lineHeight: 15, flexShrink: 1 },
   typingSubtitle: { color: colors.primary, fontWeight: '600' },
-  callAction: { padding: 6 },
+  headerRightActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  callAction: {
+    padding: 7,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   flex: { flex: 1 },
   messages: { padding: 16, gap: 10 },
   bubble: {
@@ -2396,5 +2501,43 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '700',
+  },
+  menuOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.15)',
+  },
+  menuDropdown: {
+    position: 'absolute',
+    right: 12,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    paddingVertical: 6,
+    minWidth: 180,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.08)',
+  },
+  menuDropdownDark: {
+    backgroundColor: '#202C33',
+    borderColor: '#2A3942',
+  },
+  menuItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  menuItemText: {
+    color: '#111B21',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  menuItemTextDark: {
+    color: '#E9EDEF',
+  },
+  menuItemTextDanger: {
+    color: colors.error,
   },
 });
