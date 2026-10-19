@@ -38,17 +38,22 @@ export const groupRoomOwners = new Map<string, string>(); // shardId -> ownerId
 export const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes of inactivity
 export const roomInactivityTimers = new Map<string, NodeJS.Timeout>();
 
-export async function deleteGroupRoomInstance(io: Server, shardId: string, groupId: string, reason: string) {
+export async function deleteGroupRoomInstance(io: Server, shardId: string, groupId?: string, reason?: string, roomId?: string) {
   const timer = roomInactivityTimers.get(shardId);
   if (timer) {
     clearTimeout(timer);
     roomInactivityTimers.delete(shardId);
   }
 
-  await pool.query(
-    'UPDATE "group_room" SET "isActive" = false, "updatedAt" = now() WHERE "groupId" = $1 AND "isActive" = true',
-    [groupId]
-  ).catch(() => {});
+  const effectiveRoomId = roomId || (shardId.startsWith('room:') ? shardId.slice(5) : undefined);
+  if (effectiveRoomId) {
+    await pool.query('UPDATE "group_room" SET "isActive" = false, "updatedAt" = now() WHERE id = $1', [effectiveRoomId]).catch(() => {});
+  } else if (groupId) {
+    await pool.query(
+      'UPDATE "group_room" SET "isActive" = false, "updatedAt" = now() WHERE "groupId" = $1 AND "isActive" = true',
+      [groupId]
+    ).catch(() => {});
+  }
 
   groupRoomOwners.delete(shardId);
   roomRadios.delete(shardId);
@@ -60,7 +65,7 @@ export async function deleteGroupRoomInstance(io: Server, shardId: string, group
     for (const sockId of [...roomSockets]) {
       const sock = io.sockets.sockets.get(sockId);
       if (sock) {
-        sock.emit('room:deleted', { roomId: shardId, reason });
+        sock.emit('room:deleted', { roomId: shardId, reason: reason || 'Room was closed.' });
         sock.leave(channel(shardId));
         motionHub.leave(shardId, sockId, peers.get(sockId)?.motionId);
         peers.delete(sockId);
@@ -72,8 +77,12 @@ export async function deleteGroupRoomInstance(io: Server, shardId: string, group
     }
   }
 
-  const mems = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1', [groupId]);
-  publishGroupRoomUpdate(mems.rows.map(r => r.userId), { groupId, active: false });
+  if (groupId) {
+    const mems = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1', [groupId]).catch(() => ({ rows: [] }));
+    publishGroupRoomUpdate(mems.rows.map(r => r.userId), { groupId, active: false });
+  }
+
+  io.emit('room:public_closed', { shardId, roomId: effectiveRoomId });
 
   try {
     await closeMediaSession(shardId);
@@ -82,7 +91,7 @@ export async function deleteGroupRoomInstance(io: Server, shardId: string, group
   }
 }
 
-export function scheduleRoomInactivity(io: Server, shardId: string, groupId: string) {
+export function scheduleRoomInactivity(io: Server, shardId: string, groupId?: string, roomId?: string) {
   if (roomInactivityTimers.has(shardId)) {
     clearTimeout(roomInactivityTimers.get(shardId)!);
   }
@@ -91,7 +100,7 @@ export function scheduleRoomInactivity(io: Server, shardId: string, groupId: str
     const count = getShardPeerCount(io, shardId);
     if (count === 0) {
       console.log(`[rooms] Room ${shardId} inactive for 10 minutes. Deleting instance...`);
-      void deleteGroupRoomInstance(io, shardId, groupId, 'Room was closed after 10 minutes of inactivity.');
+      void deleteGroupRoomInstance(io, shardId, groupId, 'Room was closed after 10 minutes of inactivity.', roomId);
     }
   }, INACTIVITY_TIMEOUT_MS);
   roomInactivityTimers.set(shardId, timer);
@@ -124,13 +133,13 @@ export function initRoomInactivitySweeper(io: Server) {
       );
 
       for (const room of activeGroupRooms.rows) {
-        const shardId = `group:${room.groupId}:${room.roomKind}`;
+        const shardId = room.groupId ? `group:${room.groupId}:${room.roomKind}` : `room:${room.id}`;
         const count = getShardPeerCount(io, shardId);
         if (count === 0) {
           const lastActivity = new Date(room.updatedAt || room.createdAt).getTime();
           if (Date.now() - lastActivity > INACTIVITY_TIMEOUT_MS) {
             console.log(`[rooms sweeper] Room ${shardId} inactive for > 10m. Cleaning up...`);
-            void deleteGroupRoomInstance(io, shardId, room.groupId, 'Room auto-closed after 10 minutes of inactivity.');
+            void deleteGroupRoomInstance(io, shardId, room.groupId, 'Room auto-closed after 10 minutes of inactivity.', room.id);
           }
         }
       }
@@ -161,9 +170,14 @@ const defaultRadios: Record<RoomKind, RoomRadioState> = {
 
 export const channel = (shardId: string) => `presence:${shardId}`;
 
-export function parseRoomInput(roomInput: string): { baseRoom: RoomKind; shardIndex?: number; groupId?: string } | null {
+export function parseRoomInput(roomInput: string): { baseRoom: RoomKind; shardIndex?: number; groupId?: string; roomId?: string } | null {
   if (!roomInput || typeof roomInput !== 'string') return null;
   const parts = roomInput.trim().split(':');
+  if (parts[0] === 'room' && parts[1]) {
+    const roomId = parts[1];
+    const kind = (parts[2] || 'loft') as RoomKind;
+    return { baseRoom: BASE_ROOM_IDS.has(kind) ? kind : 'loft', roomId };
+  }
   if (parts[0] === 'group' && parts[1]) {
     const groupId = parts[1];
     const kind = (parts[2] || 'loft') as RoomKind;
@@ -235,6 +249,9 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
           const parts = shardId.split(':');
           const gId = parts[1];
           scheduleRoomInactivity(io, shardId, gId);
+        } else if (shardId.startsWith('room:')) {
+          const rId = shardId.slice(5);
+          scheduleRoomInactivity(io, shardId, undefined, rId);
         }
       }
     }
@@ -247,7 +264,81 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
       return;
     }
 
+    const targetRoomId = input?.roomId || parsed.roomId;
     const targetGroupId = input?.groupId || parsed.groupId;
+
+    if (targetRoomId) {
+      const roomRow = await pool.query<{ id: string; creatorId: string; roomKind: string; isPrivate: boolean; name: string }>(
+        'SELECT id, "creatorId", "roomKind", "isPrivate", name FROM "group_room" WHERE id = $1 AND "isActive" = true LIMIT 1',
+        [targetRoomId]
+      );
+      if (!roomRow.rows.length) {
+        ack?.({ ok: false, error: 'This server has ended or does not exist.' });
+        return;
+      }
+      const roomData = roomRow.rows[0];
+      if (roomData.isPrivate && roomData.creatorId !== userId) {
+        const invCheck = await pool.query(
+          `SELECT 1 FROM "room_invite" WHERE "roomId" = $1 AND "inviteeId" = $2 AND status != 'dismissed'
+           UNION
+           SELECT 1 FROM "chat_group_member" m
+           JOIN "room_invite" ri ON ri."groupId" = m."groupId"
+           WHERE ri."roomId" = $1 AND m."userId" = $2`,
+          [targetRoomId, userId]
+        );
+        if (!invCheck.rows.length) {
+          ack?.({ ok: false, error: 'This private server is invite-only.' });
+          return;
+        }
+      }
+
+      leave();
+      let shardId: string = `room:${targetRoomId}`;
+      cancelRoomInactivity(shardId);
+      let shardIndex: number = 1;
+      let ownerId: string | undefined = roomData.creatorId;
+      groupRoomOwners.set(shardId, ownerId);
+
+      const peer: RoomPeer = { userId, name, avatar: input.avatar as AvatarBody, motionId: motionHub.allocateId(), x: 0, z: 0, yaw: 0 };
+      socket.data.roomId = shardId;
+      socket.data.baseRoomId = parsed.baseRoom;
+      socket.data.motionProtocol = input.motionProtocol === 2 ? 2 : 1;
+      socket.join(channel(shardId));
+      peers.set(socket.id, peer);
+      motionHub.join(shardId, socket, peer);
+
+      const existingPeers = [...io.sockets.adapter.rooms.get(channel(shardId)) ?? []]
+        .filter(id => id !== socket.id)
+        .map(id => peers.get(id))
+        .filter((value): value is RoomPeer => !!value);
+
+      let currentRadio = roomRadios.get(shardId);
+      if (!currentRadio) {
+        const baseRadio = defaultRadios[parsed.baseRoom];
+        currentRadio = { ...baseRadio, enabled: true, lastUpdated: Date.now() };
+        roomRadios.set(shardId, currentRadio);
+      } else if (existingPeers.length === 0) {
+        currentRadio.enabled = true;
+        currentRadio.lastUpdated = Date.now();
+      }
+
+      const shardMessages = messages.get(shardId) ?? [];
+      ack?.({
+        ok: true,
+        value: {
+          peers: existingPeers,
+          messages: shardMessages,
+          radio: currentRadio,
+          shardId,
+          shardIndex,
+          totalInShard: existingPeers.length + 1,
+          ownerId,
+          motionProtocol: socket.data.motionProtocol,
+        },
+      });
+      return;
+    }
+
     if (targetGroupId) {
       const mem = await pool.query('SELECT 1 FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2', [targetGroupId, userId]);
       if (!mem.rows.length) {

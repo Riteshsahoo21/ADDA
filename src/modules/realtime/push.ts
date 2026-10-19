@@ -114,11 +114,12 @@ export async function sendRoomInvitePush(
   userIds: string[],
   invite: {
     inviterName: string;
-    groupName: string;
+    groupName?: string;
     roomKind: string;
-    groupId: string;
+    groupId?: string;
     roomId: string;
     ownerId: string;
+    roomName?: string;
   }
 ) {
   if (!enabled || !userIds.length) return;
@@ -134,7 +135,11 @@ export async function sendRoomInvitePush(
     : 'Loft 16';
 
   const title = `${invite.inviterName} invited you to Hangout!`;
-  const body = `Join ${invite.inviterName} in ${invite.groupName}'s room (${roomTitle})`;
+  const body = invite.roomName
+    ? `Join ${invite.inviterName} in ${invite.roomName} (${roomTitle})`
+    : invite.groupName
+    ? `Join ${invite.inviterName} in ${invite.groupName}'s room (${roomTitle})`
+    : `Join ${invite.inviterName} in ${roomTitle}`;
 
   for (let start = 0; start < result.rows.length; start += 500) {
     const batch = result.rows.slice(start, start + 500);
@@ -143,12 +148,13 @@ export async function sendRoomInvitePush(
       notification: { title, body },
       data: {
         kind: 'room_invite',
-        groupId: invite.groupId,
+        groupId: invite.groupId || '',
         roomId: invite.roomId,
         roomKind: invite.roomKind,
         ownerId: invite.ownerId,
-        groupName: invite.groupName,
+        groupName: invite.groupName || '',
         inviterName: invite.inviterName,
+        roomName: invite.roomName || '',
       },
       android: {
         priority: 'high' as const,

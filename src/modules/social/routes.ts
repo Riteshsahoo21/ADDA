@@ -3,8 +3,9 @@ import { Router, type RequestHandler } from 'express';
 import { auth } from '../auth/auth.js';
 import { pool } from '../../db/pool.js';
 import { ensureProfile, validUsername } from './profile.js';
-import { publishFriendUpdate, publishGroupUpdate, publishGroupRoomUpdate } from '../realtime/server.js';
-import { groupRoomOwners } from '../realtime/rooms.js';
+import { publishFriendUpdate, publishGroupUpdate, publishGroupRoomUpdate, getIO, publishPublicRoomsUpdate } from '../realtime/server.js';
+import { groupRoomOwners, getShardPeerCount, deleteGroupRoomInstance } from '../realtime/rooms.js';
+import { sendRoomInvitePush } from '../realtime/push.js';
 import { getCachedGroupMembers, invalidateGroupMembersCache } from '../realtime/cache.js';
 import { closeMediaSession } from '../realtime/media.js';
 import { env } from '../../config/env.js';
@@ -57,7 +58,7 @@ socialRoutes.use(authenticated);
 
 socialRoutes.get('/social/bundle', run(async (_request, response) => {
   const userId = response.locals.userId;
-  const [me, contacts, groups, people, friendRequests] = await Promise.all([
+  const [me, contacts, groups, friendRequests] = await Promise.all([
     ensureProfile(userId),
     pool.query(
       `SELECT u.id, u.name, u.username, u.image AS "avatarUrl", u.about FROM "contact" c
@@ -70,13 +71,6 @@ socialRoutes.get('/social/bundle', run(async (_request, response) => {
        FROM "chat_group" g JOIN "chat_group_member" mine ON mine."groupId" = g.id AND mine."userId" = $1
        JOIN "chat_group_member" m2 ON m2."groupId" = g.id
        GROUP BY g.id, g.name, g."avatarUrl", g."createdAt" ORDER BY g."createdAt" DESC`,
-      [userId],
-    ),
-    pool.query(
-      `SELECT u.id, u.name, u.username, u.image AS "avatarUrl" FROM "user" u
-       WHERE u.id <> $1 AND u.username IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM "contact" c WHERE (c."userA" = $1 AND c."userB" = u.id) OR (c."userB" = $1 AND c."userA" = u.id))
-       ORDER BY u."createdAt" DESC LIMIT 20`,
       [userId],
     ),
     pool.query(
@@ -97,7 +91,7 @@ socialRoutes.get('/social/bundle', run(async (_request, response) => {
     me,
     contacts: contacts.rows,
     groups: groups.rows,
-    people: people.rows,
+    people: [],
     friendRequests: friendRequests.rows,
   });
 }));
@@ -172,18 +166,6 @@ socialRoutes.get('/contacts', run(async (_request, response) => {
      JOIN "user" u ON u.id = CASE WHEN c."userA" = $1 THEN c."userB" ELSE c."userA" END
      WHERE c."userA" = $1 OR c."userB" = $1 ORDER BY u.name`,
     [response.locals.userId],
-  );
-  response.json(result.rows);
-}));
-
-socialRoutes.get('/people', run(async (request, response) => {
-  const search = typeof request.query.search === 'string' ? request.query.search.trim().toLowerCase().slice(0, 24) : '';
-  const result = await pool.query(
-    `SELECT u.id, u.name, u.username, u.image AS "avatarUrl" FROM "user" u WHERE u.id <> $1 AND u.username IS NOT NULL
-     AND ($2 = '' OR LOWER(u.username) LIKE $2 || '%')
-     AND NOT EXISTS (SELECT 1 FROM "contact" c WHERE (c."userA" = $1 AND c."userB" = u.id) OR (c."userB" = $1 AND c."userA" = u.id))
-     ORDER BY u."createdAt" DESC LIMIT 20`,
-    [response.locals.userId, search],
   );
   response.json(result.rows);
 }));
@@ -815,48 +797,291 @@ socialRoutes.delete('/groups/:id/rooms/active', run(async (request, response) =>
   response.json({ ok: true, deleted: true });
 }));
 
+socialRoutes.get('/rooms/public', run(async (_request, response) => {
+  const result = await pool.query<{
+    id: string;
+    roomKind: string;
+    creatorId: string;
+    name: string;
+    code: string;
+    isPrivate: boolean;
+    createdAt: string;
+    creatorName: string;
+    creatorAvatarUrl: string | null;
+  }>(
+    `SELECT r.id, r."roomKind", r."creatorId", r.name, r.code, r."isPrivate", r."createdAt",
+            u.name AS "creatorName", u.image AS "creatorAvatarUrl"
+     FROM "group_room" r
+     JOIN "user" u ON u.id = r."creatorId"
+     WHERE r."isActive" = true AND r."isPrivate" = false
+     ORDER BY r."createdAt" DESC LIMIT 50`
+  );
+  const io = getIO();
+  const rooms = result.rows.map(room => ({
+    ...room,
+    peerCount: io ? getShardPeerCount(io, `room:${room.id}`) : 0,
+  }));
+  response.json({ rooms });
+}));
+
+socialRoutes.post('/rooms', run(async (request, response) => {
+  const userId = response.locals.userId as string;
+  const rawKind = request.body?.roomKind;
+  const roomKind = (typeof rawKind === 'string' && ['loft', 'roof', 'tea', 'beach'].includes(rawKind)) ? rawKind : 'loft';
+  const isPrivate = Boolean(request.body?.isPrivate);
+  const code = Math.floor(1000 + Math.random() * 9000).toString();
+  const rawName = typeof request.body?.name === 'string' ? request.body.name.trim() : '';
+
+  const themeTitles: Record<string, string> = {
+    tea: 'Chai Shop',
+    beach: 'Sunset Beach',
+    loft: 'Lounge Loft',
+    roof: 'Rooftop Lounge',
+  };
+
+  const name = rawName || (isPrivate ? `Private Server #${code}` : `ADDA Server ${themeTitles[roomKind] || 'Hangout'}#${code}`);
+
+  const roomId = randomUUID();
+  await pool.query(
+    `INSERT INTO "group_room" (id, "roomKind", "creatorId", "isActive", name, "isPrivate", code, "lastActivityAt")
+     VALUES ($1, $2, $3, true, $4, $5, $6, now())`,
+    [roomId, roomKind, userId, name, isPrivate, code]
+  );
+
+  const shardId = `room:${roomId}`;
+  groupRoomOwners.set(shardId, userId);
+
+  const userRes = await pool.query<{ name: string; username: string }>('SELECT name, username FROM "user" WHERE id = $1', [userId]);
+  const creatorName = userRes.rows[0]?.name || 'Host';
+
+  const groupInvites = Array.isArray(request.body?.groupInvites) ? (request.body.groupInvites as string[]) : [];
+  const userInvites = Array.isArray(request.body?.userInvites) ? (request.body.userInvites as string[]) : [];
+
+  if (isPrivate) {
+    for (const gId of groupInvites) {
+      if (typeof gId !== 'string') continue;
+      const memCheck = await pool.query('SELECT 1 FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2', [gId, userId]);
+      if (!memCheck.rows.length) continue;
+
+      const groupRes = await pool.query<{ name: string }>('SELECT name FROM "chat_group" WHERE id = $1', [gId]);
+      const gName = groupRes.rows[0]?.name || 'Group';
+
+      await pool.query(
+        `INSERT INTO "room_invite" (id, "roomId", "groupId", "inviterId", "roomKind", "roomName", "isPrivate", status)
+         VALUES ($1, $2, $3, $4, $5, $6, true, 'pending')`,
+        [randomUUID(), roomId, gId, userId, roomKind, name]
+      );
+
+      const memsRes = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" != $2', [gId, userId]);
+      const memIds = memsRes.rows.map(r => r.userId);
+      if (memIds.length) {
+        publishGroupRoomUpdate(memIds, { roomId, roomKind, name, isPrivate: true, creatorId: userId, creatorName, groupId: gId, groupName: gName });
+        void sendRoomInvitePush(memIds, {
+          inviterName: creatorName,
+          groupName: gName,
+          roomKind,
+          groupId: gId,
+          roomId,
+          ownerId: userId,
+          roomName: name,
+        });
+      }
+    }
+
+    for (const targetUserId of userInvites) {
+      if (typeof targetUserId !== 'string' || targetUserId === userId) continue;
+      await pool.query(
+        `INSERT INTO "room_invite" (id, "roomId", "inviteeId", "inviterId", "roomKind", "roomName", "isPrivate", status)
+         VALUES ($1, $2, $3, $4, $5, $6, true, 'pending')`,
+        [randomUUID(), roomId, targetUserId, userId, roomKind, name]
+      );
+      publishGroupRoomUpdate([targetUserId], { roomId, roomKind, name, isPrivate: true, creatorId: userId, creatorName });
+      void sendRoomInvitePush([targetUserId], {
+        inviterName: creatorName,
+        roomKind,
+        roomId,
+        ownerId: userId,
+        roomName: name,
+      });
+    }
+  } else {
+    publishPublicRoomsUpdate();
+  }
+
+  response.status(201).json({
+    ok: true,
+    room: {
+      id: roomId,
+      roomKind,
+      creatorId: userId,
+      creatorName,
+      name,
+      isPrivate,
+      code,
+      createdAt: new Date().toISOString(),
+    },
+  });
+}));
+
+socialRoutes.post('/rooms/:id/invite', run(async (request, response) => {
+  const roomId = String(request.params.id);
+  const userId = response.locals.userId as string;
+
+  const roomRes = await pool.query<{ id: string; creatorId: string; roomKind: string; name: string; isPrivate: boolean }>(
+    'SELECT id, "creatorId", "roomKind", name, "isPrivate" FROM "group_room" WHERE id = $1 AND "isActive" = true',
+    [roomId]
+  );
+  if (!roomRes.rows.length) {
+    response.status(404).json({ error: 'Active room not found.' });
+    return;
+  }
+  const room = roomRes.rows[0];
+  if (room.creatorId !== userId) {
+    response.status(403).json({ error: 'Only the room host can invite players.' });
+    return;
+  }
+
+  const userRes = await pool.query<{ name: string }>('SELECT name FROM "user" WHERE id = $1', [userId]);
+  const creatorName = userRes.rows[0]?.name || 'Host';
+
+  const groupInvites = Array.isArray(request.body?.groupInvites) ? (request.body.groupInvites as string[]) : [];
+  const userInvites = Array.isArray(request.body?.userInvites) ? (request.body.userInvites as string[]) : [];
+
+  for (const gId of groupInvites) {
+    if (typeof gId !== 'string') continue;
+    const memCheck = await pool.query('SELECT 1 FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2', [gId, userId]);
+    if (!memCheck.rows.length) continue;
+
+    const groupRes = await pool.query<{ name: string }>('SELECT name FROM "chat_group" WHERE id = $1', [gId]);
+    const gName = groupRes.rows[0]?.name || 'Group';
+
+    await pool.query(
+      `INSERT INTO "room_invite" (id, "roomId", "groupId", "inviterId", "roomKind", "roomName", "isPrivate", status)
+       VALUES ($1, $2, $3, $4, $5, $6, true, 'pending')`,
+      [randomUUID(), roomId, gId, userId, room.roomKind, room.name]
+    );
+
+    const memsRes = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" != $2', [gId, userId]);
+    const memIds = memsRes.rows.map(r => r.userId);
+    if (memIds.length) {
+      publishGroupRoomUpdate(memIds, { roomId, roomKind: room.roomKind, name: room.name, isPrivate: room.isPrivate, creatorId: userId, creatorName, groupId: gId, groupName: gName });
+      void sendRoomInvitePush(memIds, {
+        inviterName: creatorName,
+        groupName: gName,
+        roomKind: room.roomKind,
+        groupId: gId,
+        roomId,
+        ownerId: userId,
+        roomName: room.name,
+      });
+    }
+  }
+
+  for (const targetUserId of userInvites) {
+    if (typeof targetUserId !== 'string' || targetUserId === userId) continue;
+    await pool.query(
+      `INSERT INTO "room_invite" (id, "roomId", "inviteeId", "inviterId", "roomKind", "roomName", "isPrivate", status)
+       VALUES ($1, $2, $3, $4, $5, $6, true, 'pending')`,
+      [randomUUID(), roomId, targetUserId, userId, room.roomKind, room.name]
+    );
+    publishGroupRoomUpdate([targetUserId], { roomId, roomKind: room.roomKind, name: room.name, isPrivate: room.isPrivate, creatorId: userId, creatorName });
+    void sendRoomInvitePush([targetUserId], {
+      inviterName: creatorName,
+      roomKind: room.roomKind,
+      roomId,
+      ownerId: userId,
+      roomName: room.name,
+    });
+  }
+
+  response.json({ ok: true });
+}));
+
+socialRoutes.delete('/rooms/:id', run(async (request, response) => {
+  const roomId = String(request.params.id);
+  const userId = response.locals.userId as string;
+
+  const roomRes = await pool.query<{ id: string; creatorId: string; groupId: string | null; roomKind: string }>(
+    'SELECT id, "creatorId", "groupId", "roomKind" FROM "group_room" WHERE id = $1 AND "isActive" = true',
+    [roomId]
+  );
+  if (!roomRes.rows.length) {
+    response.status(404).json({ error: 'No active room found.' });
+    return;
+  }
+  const room = roomRes.rows[0];
+  if (room.creatorId !== userId) {
+    response.status(403).json({ error: 'Only the host can close this room.' });
+    return;
+  }
+
+  const io = getIO();
+  if (io) {
+    await deleteGroupRoomInstance(io, `room:${roomId}`, room.groupId || undefined, 'Host closed the room.', roomId);
+  } else {
+    await pool.query('UPDATE "group_room" SET "isActive" = false, "updatedAt" = now() WHERE id = $1', [roomId]);
+  }
+
+  publishPublicRoomsUpdate();
+  response.json({ ok: true, deleted: true });
+}));
+
 socialRoutes.get('/updates/hangouts', run(async (_request, response) => {
   const userId = response.locals.userId as string;
 
   const [activeRoomsRes, invitesRes] = await Promise.all([
     pool.query<{
       id: string;
-      groupId: string;
+      groupId: string | null;
       groupName: string;
       groupAvatarUrl: string | null;
       roomKind: string;
       creatorId: string;
       creatorName: string;
+      name: string;
+      isPrivate: boolean;
       createdAt: string;
     }>(
-      `SELECT r.id, r."groupId", g.name AS "groupName", g."avatarUrl" AS "groupAvatarUrl",
-              r."roomKind", r."creatorId", u.name AS "creatorName", r."createdAt"
+      `SELECT r.id, r."groupId", COALESCE(g.name, r.name) AS "groupName", g."avatarUrl" AS "groupAvatarUrl",
+              r."roomKind", r."creatorId", u.name AS "creatorName", r.name, r."isPrivate", r."createdAt"
        FROM "group_room" r
-       JOIN "chat_group" g ON g.id = r."groupId"
-       JOIN "chat_group_member" m ON m."groupId" = r."groupId" AND m."userId" = $1
+       LEFT JOIN "chat_group" g ON g.id = r."groupId"
        JOIN "user" u ON u.id = r."creatorId"
        WHERE r."isActive" = true
-       ORDER BY r."createdAt" DESC LIMIT 20`,
+         AND (
+           r."creatorId" = $1
+           OR (r."isPrivate" = false)
+           OR (r."groupId" IS NOT NULL AND EXISTS (SELECT 1 FROM "chat_group_member" m WHERE m."groupId" = r."groupId" AND m."userId" = $1))
+           OR EXISTS (SELECT 1 FROM "room_invite" ri WHERE ri."roomId" = r.id AND (ri."inviteeId" = $1 OR (ri."groupId" IS NOT NULL AND EXISTS (SELECT 1 FROM "chat_group_member" m2 WHERE m2."groupId" = ri."groupId" AND m2."userId" = $1))))
+         )
+       ORDER BY r."createdAt" DESC LIMIT 30`,
       [userId]
     ),
     pool.query<{
       id: string;
       roomId: string;
-      groupId: string;
+      groupId: string | null;
       groupName: string;
       roomKind: string;
+      roomName: string | null;
       inviterId: string;
       inviterName: string;
       inviterAvatarUrl: string | null;
       createdAt: string;
+      isPrivate: boolean;
     }>(
-      `SELECT i.id, i."roomId", i."groupId", g.name AS "groupName", i."roomKind",
-              i."inviterId", u.name AS "inviterName", u.image AS "inviterAvatarUrl", i."createdAt"
+      `SELECT i.id, i."roomId", i."groupId", COALESCE(g.name, i."roomName", 'Hangout') AS "groupName",
+              i."roomKind", i."roomName", i."inviterId", u.name AS "inviterName", u.image AS "inviterAvatarUrl",
+              i."createdAt", COALESCE(i."isPrivate", true) AS "isPrivate"
        FROM "room_invite" i
-       JOIN "chat_group" g ON g.id = i."groupId"
+       LEFT JOIN "chat_group" g ON g.id = i."groupId"
        JOIN "user" u ON u.id = i."inviterId"
        JOIN "group_room" r ON r.id = i."roomId"
-       WHERE i."inviteeId" = $1 AND i.status = 'pending' AND r."isActive" = true
+       WHERE r."isActive" = true AND i.status = 'pending'
+         AND (
+           i."inviteeId" = $1
+           OR (i."groupId" IS NOT NULL AND EXISTS (SELECT 1 FROM "chat_group_member" gm WHERE gm."groupId" = i."groupId" AND gm."userId" = $1))
+         )
        ORDER BY i."createdAt" DESC LIMIT 20`,
       [userId]
     ),

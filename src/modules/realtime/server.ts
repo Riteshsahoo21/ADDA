@@ -84,6 +84,14 @@ export function publishGroupRoomUpdate(userIds: string[], payload: unknown): voi
   if (userIds.length) io?.to([...new Set(userIds)].map(userRoom)).emit('group:room_updated', payload);
 }
 
+export function getIO(): Server | undefined {
+  return io;
+}
+
+export function publishPublicRoomsUpdate(): void {
+  io?.emit('rooms:public_updated');
+}
+
 async function drainOfflineSpool(socket: Socket, userId: string, deviceId?: string) {
   try {
     const spooled = await pool.query<{
