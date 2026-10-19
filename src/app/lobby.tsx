@@ -61,6 +61,8 @@ export default function LobbyScreen() {
         groupId: params.groupId || '',
         roomOwnerId: params.roomOwnerId || '',
         groupName: params.groupName || params.roomName || '',
+        roomName: params.roomName || params.groupName || '',
+        isPrivate: params.isPrivate || (isPrivate ? 'true' : 'false'),
         avatar: selectedBody,
       },
     } as any);

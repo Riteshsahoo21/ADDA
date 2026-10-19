@@ -302,11 +302,18 @@ export default function HangoutScreen() {
         sequencesByMotionId.delete(id);
       }
       if (peer.motionId !== undefined) usersByMotionId.set(peer.motionId, peer.userId);
-      const previous = motions.get(peer.userId)?.peer;
       motions.set(peer.userId, { peer, receivedAt: Date.now() });
-      if (!previous || previous.avatar !== peer.avatar || previous.name !== peer.name) {
-        setPeers(current => [...current.filter(item => item.userId !== peer.userId), peer]);
-      }
+      setPeers(current => {
+        const exists = current.some(item => item.userId === peer.userId);
+        if (!exists) return [...current, peer];
+        return current.map(item => item.userId === peer.userId ? { ...item, ...peer } : item);
+      });
+      setInvitedIds(current => {
+        if (!current.has(peer.userId)) return current;
+        const next = new Set(current);
+        next.delete(peer.userId);
+        return next;
+      });
     };
     const onLeft = ({ userId }: { userId: string }) => {
       motions.delete(userId);
@@ -315,6 +322,12 @@ export default function HangoutScreen() {
         sequencesByMotionId.delete(id);
       }
       setPeers(current => current.filter(peer => peer.userId !== userId));
+      setInvitedIds(current => {
+        if (!current.has(userId)) return current;
+        const next = new Set(current);
+        next.delete(userId);
+        return next;
+      });
     };
     const onMotionBatch = (packet: unknown) => {
       const states = decodeMotionBatch(packet);

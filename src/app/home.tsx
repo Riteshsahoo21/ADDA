@@ -213,7 +213,7 @@ export default function HomeScreen() {
           roomOwnerId: '',
           roomName: invite.roomName || invite.groupName,
           inviterName: invite.inviterName,
-          isPrivate: 'true',
+          isPrivate: String(invite.isPrivate ?? true),
         },
       } as unknown as Href);
     }
