@@ -110,3 +110,64 @@ export async function sendEncryptedChatPush(
   }
 }
 
+export async function sendRoomInvitePush(
+  userIds: string[],
+  invite: {
+    inviterName: string;
+    groupName: string;
+    roomKind: string;
+    groupId: string;
+    roomId: string;
+    ownerId: string;
+  }
+) {
+  if (!enabled || !userIds.length) return;
+  const result = await pool.query<{ token: string; userId: string }>(
+    'SELECT token, "userId" FROM push_device WHERE "userId" = ANY($1::text[])',
+    [userIds]
+  );
+  if (!result.rows.length) return;
+
+  const roomTitle = invite.roomKind === 'beach' ? 'Goa Beach'
+    : invite.roomKind === 'tea' ? 'Tea Party'
+    : invite.roomKind === 'roof' ? 'School Rooftop'
+    : 'Loft 16';
+
+  const title = `${invite.inviterName} invited you to Hangout!`;
+  const body = `Join ${invite.inviterName} in ${invite.groupName}'s room (${roomTitle})`;
+
+  for (let start = 0; start < result.rows.length; start += 500) {
+    const batch = result.rows.slice(start, start + 500);
+    const messages = batch.map(row => ({
+      token: row.token,
+      notification: { title, body },
+      data: {
+        kind: 'room_invite',
+        groupId: invite.groupId,
+        roomId: invite.roomId,
+        roomKind: invite.roomKind,
+        ownerId: invite.ownerId,
+        groupName: invite.groupName,
+        inviterName: invite.inviterName,
+      },
+      android: {
+        priority: 'high' as const,
+        notification: {
+          channelId: 'adda_messages',
+          priority: 'high' as const,
+          sound: 'default',
+        },
+      },
+    }));
+
+    const sent = await getMessaging().sendEach(messages);
+    const stale: string[] = [];
+    sent.responses.forEach((res, index) => {
+      if (!res.success && ['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(res.error?.code ?? '')) {
+        stale.push(batch[index].token);
+      }
+    });
+    if (stale.length) await pool.query('DELETE FROM push_device WHERE token = ANY($1::text[])', [stale]);
+  }
+}
+

@@ -45,6 +45,7 @@ const KNOWN_BASE_ROOMS = new Set(['loft', 'roof', 'tea', 'beach']);
 
 function isKnownRoom(id: string): boolean {
   if (KNOWN_BASE_ROOMS.has(id)) return true;
+  if (id.startsWith('group:')) return true;
   const base = id.split(':')[0];
   return KNOWN_BASE_ROOMS.has(base);
 }
@@ -59,8 +60,8 @@ function publicAddress() {
 
 function validKey(value: unknown): value is MediaKey {
   return !!value && typeof value === 'object' && 'kind' in value && 'id' in value &&
-    (value.kind === 'call' && typeof value.id === 'string' && value.id.length < 100 ||
-      value.kind === 'room' && typeof value.id === 'string' && isKnownRoom(value.id));
+    (value.kind === 'call' && typeof value.id === 'string' && value.id.length < 150 ||
+      value.kind === 'room' && typeof value.id === 'string' && value.id.length < 150 && isKnownRoom(value.id));
 }
 
 function sessionKey(value: MediaKey) { return `${value.kind}:${value.id}`; }

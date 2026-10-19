@@ -1,4 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import type { Server, Socket } from 'socket.io';
+import { pool } from '../../db/pool.js';
+import { sendRoomInvitePush } from './push.js';
 
 export type RoomKind = 'loft' | 'roof' | 'tea' | 'beach';
 export type AvatarBody = 'man' | 'uncle' | 'photo_boy' | 'self' | 'woman' | 'chinese_woman' | 'nepali_woman' | 'white_top_woman';
@@ -21,11 +24,13 @@ export type RoomJoinResponse = {
   shardId: string;
   shardIndex: number;
   totalInShard: number;
+  ownerId?: string;
 };
 
 export const BASE_ROOM_IDS = new Set<RoomKind>(['loft', 'roof', 'tea', 'beach']);
 export const MAX_SHARD_PEERS = 35; // Maximum players per room shard before dynamically spinning up the next instance
 
+export const groupRoomOwners = new Map<string, string>(); // shardId -> ownerId
 const avatars = new Set<AvatarBody>(['man', 'uncle', 'photo_boy', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman']);
 const poses = new Set<RoomPose>(['idle', 'walk', 'run', 'jump', 'crouch_idle', 'crouch_walk', 'sit_enter', 'sit_idle', 'sit_exit']);
 const peers = new Map<string, RoomPeer>();
@@ -42,9 +47,15 @@ const defaultRadios: Record<RoomKind, RoomRadioState> = {
 
 export const channel = (shardId: string) => `presence:${shardId}`;
 
-export function parseRoomInput(roomInput: string): { baseRoom: RoomKind; shardIndex?: number } | null {
+export function parseRoomInput(roomInput: string): { baseRoom: RoomKind; shardIndex?: number; groupId?: string } | null {
   if (!roomInput || typeof roomInput !== 'string') return null;
   const parts = roomInput.trim().split(':');
+  if (parts[0] === 'group' && parts[1]) {
+    const groupId = parts[1];
+    const kind = (parts[2] || 'loft') as RoomKind;
+    if (!BASE_ROOM_IDS.has(kind)) return null;
+    return { baseRoom: kind, groupId };
+  }
   const base = parts[0] as RoomKind;
   if (!BASE_ROOM_IDS.has(base)) return null;
   const shardNum = parts[1] ? parseInt(parts[1], 10) : undefined;
@@ -87,6 +98,7 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     const shardId = socket.data.roomId as string | undefined;
     socket.data.roomId = undefined;
     socket.data.baseRoomId = undefined;
+    socket.data.groupId = undefined;
     peers.delete(socket.id);
 
     if (shardId) {
@@ -101,26 +113,74 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
           currentRadio.lastUpdated = Date.now();
           roomRadios.set(shardId, currentRadio);
         }
+        if (shardId.startsWith('group:')) {
+          const parts = shardId.split(':');
+          const gId = parts[1];
+          void pool.query(
+            'UPDATE "group_room" SET "isActive" = false, "updatedAt" = now() WHERE "groupId" = $1 AND "isActive" = true',
+            [gId]
+          ).catch(() => {});
+          groupRoomOwners.delete(shardId);
+        }
       }
     }
   };
 
-  socket.on('room:join', (input: { room?: string; avatar?: string; shard?: number | string }, ack?: Ack<RoomJoinResponse>) => {
+  socket.on('room:join', async (input: { room?: string; avatar?: string; shard?: number | string; groupId?: string; roomId?: string }, ack?: Ack<RoomJoinResponse>) => {
     const parsed = parseRoomInput(input?.room ?? '');
     if (!parsed || !avatars.has(input?.avatar as AvatarBody)) {
       ack?.({ ok: false, error: 'Invalid room or avatar.' });
       return;
     }
 
+    const targetGroupId = input?.groupId || parsed.groupId;
+    if (targetGroupId) {
+      const mem = await pool.query('SELECT 1 FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2', [targetGroupId, userId]);
+      if (!mem.rows.length) {
+        ack?.({ ok: false, error: 'Only members of this group can enter this room.' });
+        return;
+      }
+    }
+
     leave();
 
-    const explicitShard = typeof input.shard === 'number'
-      ? input.shard
-      : typeof input.shard === 'string'
-        ? parseInt(input.shard, 10)
-        : parsed.shardIndex;
+    let shardId: string;
+    let shardIndex: number;
+    let ownerId: string | undefined;
 
-    const { shardId, shardIndex } = resolveShard(io, parsed.baseRoom, explicitShard);
+    if (targetGroupId) {
+      shardId = `group:${targetGroupId}:${parsed.baseRoom}`;
+      shardIndex = 1;
+      ownerId = groupRoomOwners.get(shardId);
+      if (!ownerId) {
+        const roomRow = await pool.query<{ id: string; creatorId: string }>(
+          'SELECT id, "creatorId" FROM "group_room" WHERE "groupId" = $1 AND "isActive" = true ORDER BY "createdAt" DESC LIMIT 1',
+          [targetGroupId]
+        );
+        if (roomRow.rows.length) {
+          ownerId = roomRow.rows[0].creatorId;
+        } else {
+          ownerId = userId;
+          const rId = input.roomId || randomUUID();
+          await pool.query(
+            'INSERT INTO "group_room" (id, "groupId", "roomKind", "creatorId", "isActive") VALUES ($1, $2, $3, $4, true)',
+            [rId, targetGroupId, parsed.baseRoom, userId]
+          ).catch(() => {});
+        }
+        groupRoomOwners.set(shardId, ownerId);
+      }
+      socket.data.groupId = targetGroupId;
+    } else {
+      const explicitShard = typeof input.shard === 'number'
+        ? input.shard
+        : typeof input.shard === 'string'
+          ? parseInt(input.shard, 10)
+          : parsed.shardIndex;
+      const resolved = resolveShard(io, parsed.baseRoom, explicitShard);
+      shardId = resolved.shardId;
+      shardIndex = resolved.shardIndex;
+    }
+
     const peer: RoomPeer = { userId, name, avatar: input.avatar as AvatarBody, x: 0, z: 0, yaw: 0 };
 
     socket.data.roomId = shardId;
@@ -154,6 +214,7 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
         shardId,
         shardIndex,
         totalInShard: existingPeers.length + 1,
+        ownerId,
       },
     });
 
@@ -231,6 +292,147 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
       }
     }
     ack?.({ ok: true, value: result });
+  });
+
+  // HOST MODERATION: Kick player from room
+  socket.on('room:kick', async (data: { targetUserId: string }, ack?: Ack<{ kicked: boolean }>) => {
+    const shardId = socket.data.roomId as string | undefined;
+    if (!shardId || !shardId.startsWith('group:')) {
+      ack?.({ ok: false, error: 'Kick is only available in group rooms.' });
+      return;
+    }
+    const targetUserId = data?.targetUserId;
+    if (!targetUserId || targetUserId === userId) {
+      ack?.({ ok: false, error: 'Invalid target player.' });
+      return;
+    }
+
+    let ownerId = groupRoomOwners.get(shardId);
+    if (!ownerId) {
+      const parts = shardId.split(':');
+      const gId = parts[1];
+      const roomRow = await pool.query<{ creatorId: string }>(
+        'SELECT "creatorId" FROM "group_room" WHERE "groupId" = $1 AND "isActive" = true ORDER BY "createdAt" DESC LIMIT 1',
+        [gId]
+      );
+      if (roomRow.rows.length) {
+        ownerId = roomRow.rows[0].creatorId;
+        groupRoomOwners.set(shardId, ownerId);
+      }
+    }
+
+    if (ownerId !== userId) {
+      ack?.({ ok: false, error: 'Only the room creator can kick players.' });
+      return;
+    }
+
+    const roomSockets = io.sockets.adapter.rooms.get(channel(shardId));
+    if (roomSockets) {
+      for (const sockId of [...roomSockets]) {
+        const sock = io.sockets.sockets.get(sockId);
+        if (sock && sock.data.userId === targetUserId) {
+          sock.emit('room:kicked', { roomId: shardId, reason: 'You have been removed by the room host.' });
+          sock.leave(channel(shardId));
+          peers.delete(sockId);
+          sock.data.roomId = undefined;
+          sock.data.baseRoomId = undefined;
+          sock.data.groupId = undefined;
+        }
+      }
+    }
+
+    io.to(channel(shardId)).emit('room:peer-left', { userId: targetUserId });
+    ack?.({ ok: true, value: { kicked: true } });
+  });
+
+  // INVITE SYSTEM: Invite group members to current room
+  socket.on('room:invite', async (data: { inviteeIds: string[] }, ack?: Ack<{ invitedCount: number }>) => {
+    const shardId = socket.data.roomId as string | undefined;
+    if (!shardId || !shardId.startsWith('group:')) {
+      ack?.({ ok: false, error: 'Invites are only available in group rooms.' });
+      return;
+    }
+    const parts = shardId.split(':');
+    const groupId = parts[1];
+    const roomKind = (parts[2] || socket.data.baseRoomId || 'loft') as RoomKind;
+
+    const rawIds = Array.isArray(data?.inviteeIds) ? data.inviteeIds : [];
+    const inviteeIds = [...new Set(rawIds.filter(id => typeof id === 'string' && id !== userId))];
+    if (!inviteeIds.length) {
+      ack?.({ ok: false, error: 'Select at least one member to invite.' });
+      return;
+    }
+
+    const validMembers = await pool.query<{ userId: string }>(
+      'SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = ANY($2::text[])',
+      [groupId, inviteeIds]
+    );
+    const validMemberIds = validMembers.rows.map(r => r.userId);
+    if (!validMemberIds.length) {
+      ack?.({ ok: false, error: 'None of the selected users are members of this group.' });
+      return;
+    }
+
+    const groupRes = await pool.query<{ name: string; ownerId: string }>(
+      'SELECT name, "ownerId" FROM "chat_group" WHERE id = $1',
+      [groupId]
+    );
+    const groupName = groupRes.rows[0]?.name || 'Group';
+
+    const roomRecord = await pool.query<{ id: string; creatorId: string }>(
+      'SELECT id, "creatorId" FROM "group_room" WHERE "groupId" = $1 AND "isActive" = true ORDER BY "createdAt" DESC LIMIT 1',
+      [groupId]
+    );
+    let rId = roomRecord.rows[0]?.id;
+    const roomOwnerId = roomRecord.rows[0]?.creatorId || groupRoomOwners.get(shardId) || userId;
+
+    if (!rId) {
+      rId = randomUUID();
+      await pool.query(
+        'INSERT INTO "group_room" (id, "groupId", "roomKind", "creatorId", "isActive") VALUES ($1, $2, $3, $4, true)',
+        [rId, groupId, roomKind, roomOwnerId]
+      ).catch(() => {});
+    }
+
+    const offlineUserIds: string[] = [];
+    for (const targetId of validMemberIds) {
+      const inviteId = randomUUID();
+      await pool.query(
+        `INSERT INTO "room_invite" (id, "roomId", "groupId", "inviterId", "inviteeId", "roomKind", status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
+        [inviteId, rId, groupId, userId, targetId, roomKind]
+      );
+
+      const userSockets = io.sockets.adapter.rooms.get(`user:${targetId}`);
+      if (userSockets && userSockets.size > 0) {
+        io.to(`user:${targetId}`).emit('room:invitation', {
+          id: inviteId,
+          roomId: rId,
+          groupId,
+          groupName,
+          inviterId: userId,
+          inviterName: name,
+          roomKind,
+          ownerId: roomOwnerId,
+          createdAt: new Date().toISOString(),
+        });
+      } else {
+        offlineUserIds.push(targetId);
+      }
+    }
+
+    if (offlineUserIds.length > 0) {
+      void sendRoomInvitePush(offlineUserIds, {
+        inviterName: name,
+        groupName,
+        roomKind,
+        groupId,
+        roomId: rId,
+        ownerId: roomOwnerId,
+      }).catch(err => console.warn('[ADDA] Push room invite error:', err));
+    }
+
+    ack?.({ ok: true, value: { invitedCount: validMemberIds.length } });
   });
 
   socket.on('room:leave', leave);
