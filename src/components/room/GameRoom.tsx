@@ -698,24 +698,23 @@ export function GameRoom({
 
             const sample = entry.interpolator.sample(now, delta);
 
-            entry.mount.position.set(sample.x, sample.y, sample.z);
-            entry.mount.rotation.y = sample.yaw;
-            entry.initialized = true;
+            if (!entry.initialized) {
+              entry.mount.position.set(sample.x, sample.y, sample.z);
+              entry.mount.rotation.y = sample.yaw;
+              entry.initialized = true;
+            } else {
+              // Smoothly glide position towards sample target without snapping
+              entry.mount.position.x = THREE.MathUtils.damp(entry.mount.position.x, sample.x, 22, delta);
+              entry.mount.position.y = THREE.MathUtils.damp(entry.mount.position.y, sample.y, 22, delta);
+              entry.mount.position.z = THREE.MathUtils.damp(entry.mount.position.z, sample.z, 22, delta);
 
-            const isMoving = sample.speed > 0.18;
-            if (isMoving) entry.lastMovingAt = now;
+              // Smoothly rotate along shortest arc towards sample yaw
+              const turn = THREE.MathUtils.euclideanModulo(sample.yaw - entry.mount.rotation.y + Math.PI, Math.PI * 2) - Math.PI;
+              entry.mount.rotation.y += THREE.MathUtils.clamp(turn, -12 * delta, 12 * delta);
+            }
 
-            const pose: RoomPose = (sample.pose === 'sit_enter' || sample.pose === 'sit_idle' || sample.pose === 'sit_exit' || sample.pose === 'lounger_idle')
-              ? sample.pose
-              : sample.pose === 'jump'
-              ? 'jump'
-              : sample.pose === 'crouch_walk'
-              ? (isMoving ? 'crouch_walk' : 'crouch_idle')
-              : sample.pose === 'crouch_idle'
-              ? 'crouch_idle'
-              : isMoving
-              ? (sample.speed > 2.8 ? 'run' : 'walk')
-              : 'idle';
+            // Trust the sender's confirmed pose directly! Never override with noisy frame speed!
+            const pose: RoomPose = sample.pose;
 
             const wanted = entry.actions[pose] ?? (pose === 'crouch_idle' ? entry.actions.idle
               : pose === 'crouch_walk' || pose === 'run' ? entry.actions.walk
@@ -724,19 +723,13 @@ export function GameRoom({
               : undefined) ?? entry.actions.idle ?? entry.actions.walk;
 
             if (wanted && wanted !== entry.playing) {
-              entry.playing?.fadeOut(0.14);
-              wanted.reset().fadeIn(0.14).play();
+              entry.playing?.fadeOut(0.18);
+              wanted.reset().fadeIn(0.18).play();
               entry.playing = wanted;
             }
 
             if (entry.mixer) {
-              if (isMoving && (pose === 'walk' || pose === 'run' || pose === 'crouch_walk')) {
-                const targetBaseSpeed = pose === 'run' ? 3.8 : 2.1;
-                const dynamicScale = THREE.MathUtils.clamp(sample.speed / targetBaseSpeed, 0.65, 1.4);
-                entry.mixer.timeScale = dynamicScale;
-              } else {
-                entry.mixer.timeScale = 1.0;
-              }
+              entry.mixer.timeScale = 1.0;
               entry.mixer.update(delta);
             }
           }
@@ -1006,11 +999,12 @@ export function GameRoom({
             : jumpHeight > 0.05 ? 'jump'
             : crouchRef.current ? (walking ? 'crouch_walk' : 'crouch_idle')
             : walking ? (running ? 'run' : 'walk') : 'idle';
+          const normalizedLocalYaw = Math.atan2(Math.sin(room.avatarMount.rotation.y), Math.cos(room.avatarMount.rotation.y));
           const snapshot: RoomMotionSnapshot = {
             x: room.player.position.x, y: room.player.position.y, z: room.player.position.z,
-            yaw: room.avatarMount.rotation.y,
-            vx: THREE.MathUtils.clamp((room.player.position.x - oldX) / Math.max(delta, 0.001), -5, 5),
-            vz: THREE.MathUtils.clamp((room.player.position.z - oldZ) / Math.max(delta, 0.001), -5, 5),
+            yaw: normalizedLocalYaw,
+            vx: THREE.MathUtils.clamp(velocity.x, -5, 5),
+            vz: THREE.MathUtils.clamp(velocity.z, -5, 5),
             pose,
           };
           const secondsSinceSent = (now - lastPositionSent) / 1000;

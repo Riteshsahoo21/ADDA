@@ -25,24 +25,21 @@ export interface InterpolatedState {
 /**
  * Snapshot Interpolator for real-time 3D multiplayer movement.
  *
- * Implements client-side entity interpolation (rendering slightly in the past)
- * using Cubic Hermite Splines and shortest-arc angular slerp.
- *
- * Eliminates all rubber-banding, jitter, and angular snapping.
+ * Implements historical client-side entity interpolation (rendering 90ms in the past)
+ * with TCP packet-bunching anti-jitter protection, linear trajectory interpolation,
+ * and shortest-arc angular slerp.
  */
 export class SnapshotInterpolator {
   private readonly buffer: MotionSnapshot[] = [];
   private readonly capacity = 16;
   public delayMs = 90; // Optimal 90ms buffer for 15-20 Hz mobile networking
 
-  private lastSampledPos = new THREE.Vector3();
-  private hasSampled = false;
-
   push(peer: RoomPeer, receivedAt: number): void {
     const x = peer.x;
     const y = peer.y ?? 0;
     const z = peer.z;
-    const yaw = peer.yaw ?? 0;
+    // Guarantee yaw is strictly in [-PI, PI]
+    const yaw = Math.atan2(Math.sin(peer.yaw ?? 0), Math.cos(peer.yaw ?? 0));
     const vx = Number.isFinite(peer.vx) ? (peer.vx as number) : 0;
     const vz = Number.isFinite(peer.vz) ? (peer.vz as number) : 0;
     const pose = peer.pose ?? 'idle';
@@ -50,14 +47,15 @@ export class SnapshotInterpolator {
     if (this.buffer.length > 0) {
       const last = this.buffer[this.buffer.length - 1];
 
-      // Teleport detection: if distance is > 6 meters, flush buffer for instant jump
+      // Teleport detection: if distance is > 5 meters, flush buffer for instant jump
       const dx = x - last.x;
       const dz = z - last.z;
-      if (dx * dx + dz * dz > 36) {
+      if (dx * dx + dz * dz > 25) {
         this.buffer.length = 0;
-      } else if (receivedAt <= last.time) {
-        // Enforce strictly monotonic timestamps
-        receivedAt = last.time + 1;
+      } else if (receivedAt <= last.time + 30) {
+        // TCP / radio bunching: two packets arrived together in < 30ms.
+        // Space them by at least 50ms to reflect true physical sender duration
+        receivedAt = last.time + 50;
       }
     }
 
@@ -77,7 +75,7 @@ export class SnapshotInterpolator {
     }
   }
 
-  sample(now: number, delta: number): InterpolatedState {
+  sample(now: number, _delta: number): InterpolatedState {
     const len = this.buffer.length;
 
     if (len === 0) {
@@ -155,57 +153,26 @@ export class SnapshotInterpolator {
       };
     }
 
-    const dtSec = intervalMs / 1000;
     const alpha = THREE.MathUtils.clamp((targetTime - s0.time) / intervalMs, 0, 1);
 
-    // Cubic Hermite Spline calculation
-    const a2 = alpha * alpha;
-    const a3 = a2 * alpha;
-    const h00 = 2 * a3 - 3 * a2 + 1;
-    const h10 = a3 - 2 * a2 + alpha;
-    const h01 = -2 * a3 + 3 * a2;
-    const h11 = a3 - a2;
-
-    const m0x = s0.vx * dtSec;
-    const m0z = s0.vz * dtSec;
-    const m1x = s1.vx * dtSec;
-    const m1z = s1.vz * dtSec;
-
-    let x = h00 * s0.x + h10 * m0x + h01 * s1.x + h11 * m1x;
-    let z = h00 * s0.z + h10 * m0z + h01 * s1.z + h11 * m1z;
-
-    // Safety guard against extreme Hermite overshoot
-    const minX = Math.min(s0.x, s1.x) - 0.5;
-    const maxX = Math.max(s0.x, s1.x) + 0.5;
-    const minZ = Math.min(s0.z, s1.z) - 0.5;
-    const maxZ = Math.max(s0.z, s1.z) + 0.5;
-    if (x < minX || x > maxX || z < minZ || z > maxZ) {
-      x = THREE.MathUtils.lerp(s0.x, s1.x, alpha);
-      z = THREE.MathUtils.lerp(s0.z, s1.z, alpha);
-    }
-
+    // Linear Interpolation: perfectly straight-line path with zero overshoot or bowing
+    const x = THREE.MathUtils.lerp(s0.x, s1.x, alpha);
     const y = THREE.MathUtils.lerp(s0.y, s1.y, alpha);
+    const z = THREE.MathUtils.lerp(s0.z, s1.z, alpha);
 
     // Shortest-arc angular slerp for yaw
     const yawDelta = THREE.MathUtils.euclideanModulo(s1.yaw - s0.yaw + Math.PI, Math.PI * 2) - Math.PI;
     const yaw = s0.yaw + yawDelta * alpha;
 
-    // Calculate actual ground displacement speed for animation synchronization
-    let speed = 0;
-    if (this.hasSampled && delta > 0.001) {
-      const moved = Math.hypot(x - this.lastSampledPos.x, z - this.lastSampledPos.z);
-      speed = moved / delta;
-    } else {
-      speed = Math.hypot(
-        THREE.MathUtils.lerp(s0.vx, s1.vx, alpha),
-        THREE.MathUtils.lerp(s0.vz, s1.vz, alpha)
-      );
-    }
-    this.lastSampledPos.set(x, y, z);
-    this.hasSampled = true;
+    // Smooth speed interpolation
+    const speed = THREE.MathUtils.lerp(
+      Math.hypot(s0.vx, s0.vz),
+      Math.hypot(s1.vx, s1.vz),
+      alpha
+    );
 
-    // Pose selection
-    const pose = alpha < 0.5 ? s0.pose : s1.pose;
+    // Pose selection: trust sender's confirmed pose
+    const pose = alpha > 0.5 ? s1.pose : s0.pose;
 
     return {
       x,
@@ -220,6 +187,5 @@ export class SnapshotInterpolator {
 
   reset(): void {
     this.buffer.length = 0;
-    this.hasSampled = false;
   }
 }
