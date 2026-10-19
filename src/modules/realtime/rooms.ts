@@ -3,7 +3,7 @@ import type { Server, Socket } from 'socket.io';
 import { pool } from '../../db/pool.js';
 import { sendRoomInvitePush } from './push.js';
 import { RoomMotionHub } from './motion-hub.js';
-import { publishGroupRoomUpdate } from './server.js';
+import { publishGroupRoomUpdate, publishPublicRoomsUpdate } from './server.js';
 import { closeMediaSession } from './media.js';
 
 export type RoomKind = 'loft' | 'roof' | 'tea' | 'beach';
@@ -83,6 +83,7 @@ export async function deleteGroupRoomInstance(io: Server, shardId: string, group
   }
 
   io.emit('room:public_closed', { shardId, roomId: effectiveRoomId });
+  publishPublicRoomsUpdate();
 
   try {
     await closeMediaSession(shardId);
@@ -511,8 +512,8 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
   // HOST MODERATION: Kick player from room
   socket.on('room:kick', async (data: { targetUserId: string }, ack?: Ack<{ kicked: boolean }>) => {
     const shardId = socket.data.roomId as string | undefined;
-    if (!shardId || !shardId.startsWith('group:')) {
-      ack?.({ ok: false, error: 'Kick is only available in group rooms.' });
+    if (!shardId || (!shardId.startsWith('group:') && !shardId.startsWith('room:'))) {
+      ack?.({ ok: false, error: 'Kick is only available in custom or group rooms.' });
       return;
     }
     const targetUserId = data?.targetUserId;
@@ -523,15 +524,27 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
 
     let ownerId = groupRoomOwners.get(shardId);
     if (!ownerId) {
-      const parts = shardId.split(':');
-      const gId = parts[1];
-      const roomRow = await pool.query<{ creatorId: string }>(
-        'SELECT "creatorId" FROM "group_room" WHERE "groupId" = $1 AND "isActive" = true ORDER BY "createdAt" DESC LIMIT 1',
-        [gId]
-      );
-      if (roomRow.rows.length) {
-        ownerId = roomRow.rows[0].creatorId;
-        groupRoomOwners.set(shardId, ownerId);
+      if (shardId.startsWith('room:')) {
+        const rId = shardId.slice(5);
+        const roomRow = await pool.query<{ creatorId: string }>(
+          'SELECT "creatorId" FROM "group_room" WHERE id = $1 AND "isActive" = true LIMIT 1',
+          [rId]
+        );
+        if (roomRow.rows.length) {
+          ownerId = roomRow.rows[0].creatorId;
+          groupRoomOwners.set(shardId, ownerId);
+        }
+      } else {
+        const parts = shardId.split(':');
+        const gId = parts[1];
+        const roomRow = await pool.query<{ creatorId: string }>(
+          'SELECT "creatorId" FROM "group_room" WHERE "groupId" = $1 AND "isActive" = true ORDER BY "createdAt" DESC LIMIT 1',
+          [gId]
+        );
+        if (roomRow.rows.length) {
+          ownerId = roomRow.rows[0].creatorId;
+          groupRoomOwners.set(shardId, ownerId);
+        }
       }
     }
 
@@ -564,26 +577,49 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
   // HOST MODERATION: Delete & close room completely
   socket.on('room:delete', async (_data, ack?: Ack<{ deleted: boolean }>) => {
     const shardId = socket.data.roomId as string | undefined;
-    if (!shardId || !shardId.startsWith('group:')) {
-      ack?.({ ok: false, error: 'Only group rooms can be deleted.' });
+    if (!shardId || (!shardId.startsWith('group:') && !shardId.startsWith('room:'))) {
+      ack?.({ ok: false, error: 'Only custom or group rooms can be deleted.' });
       return;
     }
-    const parts = shardId.split(':');
-    const groupId = parts[1];
     let ownerId = groupRoomOwners.get(shardId);
-    if (!ownerId) {
-      const roomRow = await pool.query<{ creatorId: string }>(
-        'SELECT "creatorId" FROM "group_room" WHERE "groupId" = $1 AND "isActive" = true ORDER BY "createdAt" DESC LIMIT 1',
-        [groupId]
-      );
-      if (roomRow.rows.length) ownerId = roomRow.rows[0].creatorId;
+    let groupId: string | undefined;
+    let roomId: string | undefined;
+
+    if (shardId.startsWith('room:')) {
+      roomId = shardId.slice(5);
+      if (!ownerId) {
+        const roomRow = await pool.query<{ creatorId: string; groupId?: string }>(
+          'SELECT "creatorId", "groupId" FROM "group_room" WHERE id = $1 AND "isActive" = true LIMIT 1',
+          [roomId]
+        );
+        if (roomRow.rows.length) {
+          ownerId = roomRow.rows[0].creatorId;
+          groupId = roomRow.rows[0].groupId;
+          groupRoomOwners.set(shardId, ownerId);
+        }
+      }
+    } else {
+      const parts = shardId.split(':');
+      groupId = parts[1];
+      if (!ownerId) {
+        const roomRow = await pool.query<{ creatorId: string; id: string }>(
+          'SELECT id, "creatorId" FROM "group_room" WHERE "groupId" = $1 AND "isActive" = true ORDER BY "createdAt" DESC LIMIT 1',
+          [groupId]
+        );
+        if (roomRow.rows.length) {
+          ownerId = roomRow.rows[0].creatorId;
+          roomId = roomRow.rows[0].id;
+          groupRoomOwners.set(shardId, ownerId);
+        }
+      }
     }
+
     if (ownerId !== userId) {
       ack?.({ ok: false, error: 'Only the room host can delete this room.' });
       return;
     }
 
-    await deleteGroupRoomInstance(io, shardId, groupId, 'The host has ended and deleted this room.');
+    await deleteGroupRoomInstance(io, shardId, groupId, 'The host has ended and deleted this room.', roomId);
     ack?.({ ok: true, value: { deleted: true } });
   });
 
