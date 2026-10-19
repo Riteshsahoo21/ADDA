@@ -38,6 +38,10 @@ The authenticated `/api/me`, `/api/contacts`, `/api/people`, `/api/groups`, and 
 
 Socket.IO uses the same Better Auth bearer token as REST. Typing events are temporary and only reach members who joined that conversation.
 
+## Room movement
+
+Room movement uses a versioned, compact Socket.IO packet (19 bytes per player update before transport overhead). The phone sends velocity and pose changes plus occasional position anchors. The server validates speed and room membership, batches updates every 100 ms, and reduces updates for distant players. Phones predict movement between packets and smooth corrections each render frame. Joining with `motionProtocol: 2` enables this path; older clients continue receiving `room:peer` events. The motion relay is process-local, so running multiple backend instances for the same shard requires a shared room routing layer.
+
 ## Encrypted chat v1
 
 The app creates a separate Curve25519 device key pair per phone. Its private key stays in Android/iOS SecureStore. Message content uses a fresh authenticated secretbox key, wrapped separately for each recipient device. PostgreSQL keeps only encrypted pending envelopes and small routing/receipt metadata. A phone verifies and saves each message in a SQLCipher database before it acknowledges delivery; the backend then removes that device's pending envelope. The shared ciphertext is deleted after every addressed device acknowledges. There is no time-based deletion of pending messages. Users can remove lost devices from Profile; that explicitly discards those devices' pending copies.

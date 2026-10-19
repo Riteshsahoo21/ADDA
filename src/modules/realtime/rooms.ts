@@ -2,14 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { Server, Socket } from 'socket.io';
 import { pool } from '../../db/pool.js';
 import { sendRoomInvitePush } from './push.js';
-import { RoomMotionHub } from './motion-hub.js';
 import { publishGroupRoomUpdate, publishPublicRoomsUpdate } from './server.js';
 import { closeMediaSession } from './media.js';
 
 export type RoomKind = 'loft' | 'roof' | 'tea' | 'beach';
 export type AvatarBody = 'man' | 'uncle' | 'photo_boy' | 'self' | 'woman' | 'chinese_woman' | 'nepali_woman' | 'white_top_woman';
 export type RoomPose = 'idle' | 'walk' | 'run' | 'jump' | 'crouch_idle' | 'crouch_walk' | 'sit_enter' | 'sit_idle' | 'sit_exit' | 'lounger_idle';
-export type RoomPeer = { userId: string; name: string; avatar: AvatarBody; motionId: number; x: number; y?: number; z: number; yaw: number; vx?: number; vz?: number; pose?: RoomPose };
+export type RoomPeer = { userId: string; name: string; avatar: AvatarBody; motionId?: number; x: number; y?: number; z: number; yaw: number; vx?: number; vz?: number; pose?: RoomPose };
 export type RoomMessage = { id: string; room: string; userId: string; name: string; body: string; createdAt: number };
 export type Ack<T> = (reply: { ok: true; value: T } | { ok: false; error: string }) => void;
 
@@ -61,13 +60,11 @@ export async function deleteGroupRoomInstance(io: Server, shardId: string, group
 
   const roomSockets = io.sockets.adapter.rooms.get(channel(shardId));
   if (roomSockets) {
-    const motionHub = getRoomMotionHub(io);
     for (const sockId of [...roomSockets]) {
       const sock = io.sockets.sockets.get(sockId);
       if (sock) {
         sock.emit('room:deleted', { roomId: shardId, reason: reason || 'Room was closed.' });
         sock.leave(channel(shardId));
-        motionHub.leave(shardId, sockId, peers.get(sockId)?.motionId);
         peers.delete(sockId);
         sock.data.roomId = undefined;
         sock.data.baseRoomId = undefined;
@@ -151,12 +148,6 @@ export function initRoomInactivitySweeper(io: Server) {
 }
 const avatars = new Set<AvatarBody>(['man', 'uncle', 'photo_boy', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman']);
 const poses = new Set<RoomPose>(['idle', 'walk', 'run', 'jump', 'crouch_idle', 'crouch_walk', 'sit_enter', 'sit_idle', 'sit_exit', 'lounger_idle']);
-const motionHubs = new WeakMap<Server, RoomMotionHub>();
-export function getRoomMotionHub(io: Server) {
-  let hub = motionHubs.get(io);
-  if (!hub) { hub = new RoomMotionHub(io); motionHubs.set(io, hub); }
-  return hub;
-}
 const peers = new Map<string, RoomPeer>();
 const messages = new Map<string, RoomMessage[]>();
 const roomRadios = new Map<string, RoomRadioState>();
@@ -221,13 +212,11 @@ export function resolveShard(io: Server, baseRoom: RoomKind, preferredShardIndex
 
 export function attachRoomHandlers(io: Server, socket: Socket) {
   initRoomInactivitySweeper(io);
-  const motionHub = getRoomMotionHub(io);
   const userId = socket.data.userId as string;
   const name = socket.data.name as string;
 
   const leave = () => {
     const shardId = socket.data.roomId as string | undefined;
-    motionHub.leave(shardId, socket.id, peers.get(socket.id)?.motionId);
     socket.data.roomId = undefined;
     socket.data.baseRoomId = undefined;
     socket.data.groupId = undefined;
@@ -300,13 +289,12 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
       let ownerId: string | undefined = roomData.creatorId;
       groupRoomOwners.set(shardId, ownerId);
 
-      const peer: RoomPeer = { userId, name, avatar: input.avatar as AvatarBody, motionId: motionHub.allocateId(), x: 0, z: 0, yaw: 0 };
+      const peer: RoomPeer = { userId, name, avatar: input.avatar as AvatarBody, motionId: 0, x: 0, z: 0, yaw: 0, pose: 'idle' };
       socket.data.roomId = shardId;
       socket.data.baseRoomId = parsed.baseRoom;
-      socket.data.motionProtocol = input.motionProtocol === 2 ? 2 : 1;
+      socket.data.motionProtocol = 2;
       socket.join(channel(shardId));
       peers.set(socket.id, peer);
-      motionHub.join(shardId, socket, peer);
 
       const existingPeers = [...io.sockets.adapter.rooms.get(channel(shardId)) ?? []]
         .filter(id => id !== socket.id)
@@ -393,14 +381,13 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
       shardIndex = resolved.shardIndex;
     }
 
-    const peer: RoomPeer = { userId, name, avatar: input.avatar as AvatarBody, motionId: motionHub.allocateId(), x: 0, z: 0, yaw: 0 };
+    const peer: RoomPeer = { userId, name, avatar: input.avatar as AvatarBody, motionId: 0, x: 0, z: 0, yaw: 0, pose: 'idle' };
 
     socket.data.roomId = shardId;
     socket.data.baseRoomId = parsed.baseRoom;
-    socket.data.motionProtocol = input.motionProtocol === 2 ? 2 : 1;
+    socket.data.motionProtocol = 2;
     socket.join(channel(shardId));
     peers.set(socket.id, peer);
-    motionHub.join(shardId, socket, peer);
 
     const existingPeers = [...io.sockets.adapter.rooms.get(channel(shardId)) ?? []]
       .filter(id => id !== socket.id)
@@ -436,19 +423,70 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     socket.to(channel(shardId)).emit('room:peer', peer);
   });
 
+  socket.on('room:snapshot', (input: { x?: number; y?: number; z?: number; r?: number; yaw?: number; pose?: RoomPose; time?: number }) => {
+    const shardId = socket.data.roomId as string | undefined;
+    const peer = peers.get(socket.id);
+    if (!shardId || !peer) return;
+
+    const x = Number(input?.x);
+    const y = Number(input?.y ?? 0);
+    const z = Number(input?.z);
+    const r = Number(input?.r ?? input?.yaw ?? 0);
+
+    if (!Number.isFinite(x) || !Number.isFinite(z) || !Number.isFinite(r)) return;
+    if (Math.abs(x) > 100 || Math.abs(z) > 100) return;
+
+    const clampedY = Number.isFinite(y) ? Math.max(0, Math.min(5, y)) : 0;
+    const pose = input.pose && poses.has(input.pose) ? input.pose : (peer.pose ?? 'idle');
+    const poseChanged = pose !== peer.pose;
+    const time = typeof input.time === 'number' && Number.isFinite(input.time) ? input.time : Date.now();
+
+    peer.x = x;
+    peer.y = clampedY;
+    peer.z = z;
+    peer.yaw = r;
+    peer.pose = pose;
+
+    const snapshot = {
+      id: peer.userId,
+      x,
+      y: clampedY,
+      z,
+      r,
+      pose,
+      time,
+    };
+
+    if (poseChanged) {
+      socket.to(channel(shardId)).emit('room:snapshot', snapshot);
+    } else {
+      socket.to(channel(shardId)).volatile.emit('room:snapshot', snapshot);
+    }
+  });
+
   socket.on('room:position', (input: { x?: number; y?: number; z?: number; yaw?: number; pose?: RoomPose }) => {
     const shardId = socket.data.roomId as string | undefined;
     const peer = peers.get(socket.id);
-    if (!shardId || !peer || !Number.isFinite(input?.x) || !Number.isFinite(input?.z) || !Number.isFinite(input?.yaw) ||
-      Math.abs(input.x!) > 100 || Math.abs(input.z!) > 100 ||
-      (input.y !== undefined && (!Number.isFinite(input.y) || input.y < 0 || input.y > 3)) ||
-      (input.pose !== undefined && !poses.has(input.pose))) return;
-
-    motionHub.receiveLegacy(socket, input as { x: number; y?: number; z: number; yaw: number; pose?: RoomPose });
-  });
-
-  socket.on('room:motion', (input: unknown) => {
-    if (socket.data.motionProtocol === 2) motionHub.receive(socket, input);
+    if (!shardId || !peer || !Number.isFinite(input?.x) || !Number.isFinite(input?.z)) return;
+    const x = input.x!;
+    const y = Number.isFinite(input.y) ? input.y! : 0;
+    const z = input.z!;
+    const r = Number.isFinite(input.yaw) ? input.yaw! : 0;
+    const pose = input.pose && poses.has(input.pose) ? input.pose : (peer.pose ?? 'idle');
+    peer.x = x;
+    peer.y = y;
+    peer.z = z;
+    peer.yaw = r;
+    peer.pose = pose;
+    socket.to(channel(shardId)).volatile.emit('room:snapshot', {
+      id: peer.userId,
+      x,
+      y,
+      z,
+      r,
+      pose,
+      time: Date.now(),
+    });
   });
 
   socket.on('room:message', (body: unknown, ack?: Ack<RoomMessage>) => {
@@ -560,7 +598,6 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
         if (sock && sock.data.userId === targetUserId) {
           sock.emit('room:kicked', { roomId: shardId, reason: 'You have been removed by the room host.' });
           sock.leave(channel(shardId));
-          motionHub.leave(shardId, sockId, peers.get(sockId)?.motionId);
           peers.delete(sockId);
           sock.data.roomId = undefined;
           sock.data.baseRoomId = undefined;
