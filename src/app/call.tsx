@@ -88,7 +88,7 @@ export default function CallScreen() {
   const ending = useRef(false);
   const relayStarted = useRef(false);
   const groupMedia = useRef<GroupMedia | null>(null);
-  const pendingPeer = useRef<string | null>(null);
+  const readyPeer = useRef<string | null>(null);
 
   const showRouteToast = (msg: string) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -322,11 +322,11 @@ export default function CallScreen() {
         await pc.current.setLocalDescription(offer);
         sendSignal(peerId, { type: 'offer', sdp: offer.sdp ?? '' });
         clearConnectionTimer();
-        connectionTimer = setTimeout(requestRelay, 6000);
+        connectionTimer = setTimeout(requestRelay, 12000);
       } catch (error) {
         offered.current = false;
         if (active) setStatus(error instanceof Error ? error.message : 'Could not start media.');
-        connectionTimer = setTimeout(requestRelay, 6000);
+        connectionTimer = setTimeout(requestRelay, 12000);
       }
     };
 
@@ -354,19 +354,20 @@ export default function CallScreen() {
 
     const onJoined = (event: { callId: string; userId: string }) => {
       if (event.callId === callId && role === 'caller' && !relayStarted.current) {
-        pendingPeer.current = event.userId;
-        if (pc.current) {
-          void startOffer(event.userId);
-        }
+        // Joining only means the call screen opened. Wait until the other
+        // phone has acquired media and created its peer connection.
+        if (pc.current) socket?.emit('call:ready', callId);
       }
     };
 
     const onReady = (event: { callId: string; from: string }) => {
-      if (event.callId === callId && role === 'caller' && !relayStarted.current) {
-        pendingPeer.current = event.from;
-        if (pc.current) {
-          void startOffer(event.from);
-        }
+      if (event.callId !== callId || relayStarted.current) return;
+      if (role !== 'caller') {
+        // Reply to a caller probe only when this phone can accept an offer.
+        if (pc.current) socket?.emit('call:ready', callId);
+      } else {
+        readyPeer.current = event.from;
+        if (pc.current) void startOffer(event.from);
       }
     };
 
@@ -438,14 +439,14 @@ export default function CallScreen() {
         });
 
         for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
-        if (role === 'caller' && (pendingPeer.current || joined.joined.length > 1)) {
-          void startOffer(pendingPeer.current || joined.joined.find(id => id !== joined.callerId)!);
+        if (role === 'caller' && readyPeer.current) {
+          void startOffer(readyPeer.current);
         } else {
           setStatus(role === 'caller' ? 'Calling…' : 'Connecting…');
+          socket.emit('call:ready', callId);
           if (role !== 'caller') {
-            socket.emit('call:ready', callId);
             clearConnectionTimer();
-            connectionTimer = setTimeout(requestRelay, 6000);
+            connectionTimer = setTimeout(requestRelay, 12000);
           }
         }
       } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Call failed.'); }
