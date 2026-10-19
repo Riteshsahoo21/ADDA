@@ -270,6 +270,34 @@ async function leaveMedia(socket: Socket) {
   }
 }
 
+export async function closeMediaSession(rawKey: string): Promise<void> {
+  const key = rawKey.startsWith('room:') ? rawKey : `room:${rawKey}`;
+  const pending = sessions.get(key) ?? sessions.get(rawKey);
+  if (!pending) return;
+  try {
+    const session = await pending;
+    if (session.audibleTimer) {
+      clearTimeout(session.audibleTimer);
+      session.audibleTimer = null;
+    }
+    for (const peer of session.peers.values()) {
+      for (const transport of peer.transports.values()) {
+        try { transport.close(); } catch {}
+      }
+      peer.consumers.clear();
+      peer.producers.clear();
+      peer.transports.clear();
+    }
+    session.peers.clear();
+    try { session.router.close(); } catch {}
+    sessions.delete(key);
+    sessions.delete(rawKey);
+    console.log(`[media] Forcibly closed media session and router for ${rawKey}`);
+  } catch (err) {
+    console.warn(`[media] Failed closing session for ${rawKey}:`, err);
+  }
+}
+
 export function attachMediaHandlers(io: Server, socket: Socket) {
   const selfId = socket.data.userId as string;
 

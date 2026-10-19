@@ -782,6 +782,34 @@ socialRoutes.get('/groups/:id/rooms/active', run(async (request, response) => {
   });
 }));
 
+socialRoutes.delete('/groups/:id/rooms/active', run(async (request, response) => {
+  const groupId = String(request.params.id);
+  const userId = response.locals.userId as string;
+
+  const roomRes = await pool.query<{ id: string; creatorId: string; roomKind: string }>(
+    'SELECT id, "creatorId", "roomKind" FROM "group_room" WHERE "groupId" = $1 AND "isActive" = true ORDER BY "createdAt" DESC LIMIT 1',
+    [groupId]
+  );
+  if (!roomRes.rows.length) {
+    response.status(404).json({ error: 'No active room found.' });
+    return;
+  }
+  const room = roomRes.rows[0];
+  if (room.creatorId !== userId) {
+    const adminCheck = await pool.query('SELECT 1 FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" = $2 AND role = \'admin\'', [groupId, userId]);
+    if (!adminCheck.rows.length) {
+      response.status(403).json({ error: 'Only the room host or group admin can delete this room.' });
+      return;
+    }
+  }
+
+  await pool.query('UPDATE "group_room" SET "isActive" = false, "updatedAt" = now() WHERE id = $1', [room.id]);
+  const membersRes = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1', [groupId]);
+  publishGroupRoomUpdate(membersRes.rows.map(r => r.userId), { groupId, active: false });
+
+  response.json({ ok: true, deleted: true });
+}));
+
 socialRoutes.get('/updates/hangouts', run(async (_request, response) => {
   const userId = response.locals.userId as string;
 
