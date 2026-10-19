@@ -50,20 +50,25 @@ function sessionKey(value: MediaKey) { return `${value.kind}:${value.id}`; }
 async function getWorker(): Promise<Worker> {
   if (!workerInitPromise) {
     workerInitPromise = (async () => {
-      // Create a pool of workers matching CPU core count (up to 8) to distribute SFU load across all cores
-      const coreCount = Math.min(Math.max(cpus().length, 1), 8);
+      // Cap at 2 workers (max 25% CPU) so 6 cores remain completely free and CPU never trips host email alerts
+      const maxWorkers = Number(process.env.MEDIASOUP_WORKERS) || 2;
+      const coreCount = Math.min(Math.max(cpus().length, 1), maxWorkers);
       const created: Worker[] = [];
+      const portsPerWorker = Math.floor(10000 / coreCount);
+
       for (let i = 0; i < coreCount; i++) {
+        const rtcMinPort = 40000 + (i * portsPerWorker);
+        const rtcMaxPort = rtcMinPort + portsPerWorker - 1;
         const worker = await mediasoup.createWorker({
           logLevel: 'warn',
-          rtcMinPort: 40000,
-          rtcMaxPort: 49999,
+          rtcMinPort,
+          rtcMaxPort,
         });
         worker.on('died', () => {
           console.error(`[mediasoup] Worker ${i} died. Re-initializing replacement worker...`);
           const idx = created.indexOf(worker);
           if (idx !== -1) {
-            mediasoup.createWorker({ logLevel: 'warn', rtcMinPort: 40000, rtcMaxPort: 49999 })
+            mediasoup.createWorker({ logLevel: 'warn', rtcMinPort, rtcMaxPort })
               .then(replacement => { created[idx] = replacement; })
               .catch(err => console.error('[mediasoup] Worker replacement failed', err));
           }
