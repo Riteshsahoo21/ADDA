@@ -1301,6 +1301,7 @@ export default function ConversationScreen() {
                       styles.bubble,
                       mine ? (isLight ? styles.myBubbleLight : styles.myBubble) : (isLight ? styles.theirBubbleLight : styles.theirBubble),
                       media && styles.mediaBubble,
+                      roomCard && styles.roomCardBubble,
                       isTagged && styles.taggedBubble,
                     ]}
                   >
@@ -1381,7 +1382,7 @@ export default function ConversationScreen() {
                       renderMessageBody(item.body, mine, item.id, isLight)
                     )}
 
-                    <View style={[styles.messageFooter, media && styles.mediaFooter]}>
+                    <View style={[styles.messageFooter, media && styles.mediaFooter, roomCard && styles.roomCardFooter]}>
                       <Text style={[styles.messageTime, !mine && styles.theirMessageTime, isLight && styles.messageTimeLight]}>
                         {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
                       </Text>
@@ -1966,7 +1967,10 @@ function RoomCardMessage({
 }) {
   const info = roomThemes.find(t => t.id === card.roomKind) || roomThemes[0];
   return (
-    <View style={styles.roomCardBox}>
+    <View style={[
+      styles.roomCardBox,
+      isLight ? (isMine ? styles.roomCardBoxLightMine : styles.roomCardBoxLightTheir) : (isMine ? styles.roomCardBoxDarkMine : styles.roomCardBoxDarkTheir)
+    ]}>
       <View style={styles.roomCardHeader}>
         <View style={styles.roomCardBadge}>
           <Text style={styles.roomCardBadgeText}>3D HANGOUT</Text>
@@ -1975,10 +1979,10 @@ function RoomCardMessage({
       </View>
       <Text style={[styles.roomCardTitle, isLight && styles.roomCardTitleLight]}>{card.roomName || info.name}</Text>
       <Text style={[styles.roomCardDesc, isLight && styles.roomCardDescLight]}>{info.desc}</Text>
-      <Text style={[styles.roomCardAuthor, isLight && styles.roomCardAuthorLight]}>
+      <Text style={[styles.roomCardAuthor, isLight ? styles.roomCardAuthorLight : styles.roomCardAuthorDark]}>
         {isMine ? `Hosted by you • ${card.isPrivate ? 'Private' : 'Public'} Server` : `Hosted by ${card.creatorName} • ${card.isPrivate ? 'Private' : 'Public'} Server`}
       </Text>
-      <Pressable onPress={onJoin} style={styles.roomCardJoinButton}>
+      <Pressable onPress={onJoin} style={({ pressed }) => [styles.roomCardJoinButton, pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] }]}>
         <DoorOpen size={18} color="#FFFFFF" />
         <Text style={styles.roomCardJoinButtonText}>Join Room</Text>
       </Pressable>
@@ -2034,7 +2038,7 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   messages: { padding: 16, gap: 10 },
   bubble: {
-    maxWidth: '82%',
+    maxWidth: '100%',
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 18,
@@ -2550,62 +2554,91 @@ const styles = StyleSheet.create({
   deletedTextLight: {
     color: '#667781',
   },
+  roomCardBubble: {
+    padding: 6,
+    borderRadius: 18,
+    width: 285,
+    maxWidth: '100%',
+  },
+  roomCardFooter: {
+    paddingHorizontal: 8,
+    paddingTop: 2,
+    paddingBottom: 4,
+  },
   roomCardBox: {
     padding: 12,
-    backgroundColor: 'rgba(0, 0, 0, 0.22)',
     borderRadius: 14,
-    minWidth: 240,
-    maxWidth: 290,
-    marginVertical: 4,
+    width: '100%',
+  },
+  roomCardBoxDarkMine: {
+    backgroundColor: 'rgba(0, 0, 0, 0.22)',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.12)',
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  roomCardBoxDarkTheir: {
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  roomCardBoxLightMine: {
+    backgroundColor: 'rgba(0, 0, 0, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.06)',
+  },
+  roomCardBoxLightTheir: {
+    backgroundColor: '#F5F7F8',
+    borderWidth: 1,
+    borderColor: '#E6E9EB',
   },
   roomCardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 6,
+    marginBottom: 8,
   },
   roomCardBadge: {
-    backgroundColor: '#277A55',
+    backgroundColor: '#25D366',
     paddingHorizontal: 8,
     paddingVertical: 3,
-    borderRadius: 8,
+    borderRadius: 6,
   },
   roomCardBadgeText: {
-    color: '#FFFFFF',
-    fontSize: 9,
+    color: '#073319',
+    fontSize: 10,
     fontWeight: '800',
     letterSpacing: 0.5,
   },
   roomCardEmoji: {
-    fontSize: 22,
+    fontSize: 24,
   },
   roomCardTitle: {
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '800',
-    marginBottom: 2,
+    marginBottom: 3,
   },
   roomCardTitleLight: {
     color: '#111B21',
   },
   roomCardDesc: {
     color: 'rgba(255, 255, 255, 0.75)',
-    fontSize: 12,
+    fontSize: 13,
+    lineHeight: 18,
     marginBottom: 6,
   },
   roomCardDescLight: {
-    color: 'rgba(17, 27, 33, 0.75)',
+    color: '#54656F',
   },
   roomCardAuthor: {
-    color: '#25D366',
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '600',
     marginBottom: 10,
   },
+  roomCardAuthorDark: {
+    color: '#25D366',
+  },
   roomCardAuthorLight: {
-    color: '#128C7E',
+    color: '#008069',
   },
   roomCardJoinButton: {
     flexDirection: 'row',
@@ -2613,12 +2646,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
     backgroundColor: '#25D366',
-    paddingVertical: 9,
+    paddingVertical: 10,
     borderRadius: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.15,
+    shadowRadius: 2,
+    elevation: 2,
   },
   roomCardJoinButtonText: {
     color: '#FFFFFF',
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
   },
   callActionActiveRoom: {
