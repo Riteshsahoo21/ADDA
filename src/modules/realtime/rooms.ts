@@ -268,8 +268,8 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     const targetGroupId = input?.groupId || parsed.groupId;
 
     if (targetRoomId) {
-      const roomRow = await pool.query<{ id: string; creatorId: string; roomKind: string; isPrivate: boolean; name: string }>(
-        'SELECT id, "creatorId", "roomKind", "isPrivate", name FROM "group_room" WHERE id = $1 AND "isActive" = true LIMIT 1',
+      const roomRow = await pool.query<{ id: string; creatorId: string; roomKind: string; isPrivate: boolean; name: string; maxPlayers?: number }>(
+        'SELECT id, "creatorId", "roomKind", "isPrivate", name, "maxPlayers" FROM "group_room" WHERE id = $1 AND "isActive" = true LIMIT 1',
         [targetRoomId]
       );
       if (!roomRow.rows.length) {
@@ -277,6 +277,13 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
         return;
       }
       const roomData = roomRow.rows[0];
+      const maxCap = Math.min(10, Math.max(2, roomData.maxPlayers || 10));
+      const currentPeersCount = getShardPeerCount(io, `room:${targetRoomId}`);
+      const isAlreadyInRoom = io.sockets.adapter.rooms.get(channel(`room:${targetRoomId}`))?.has(socket.id);
+      if (!isAlreadyInRoom && currentPeersCount >= maxCap) {
+        ack?.({ ok: false, error: `This server is full (${currentPeersCount}/${maxCap} players max).` });
+        return;
+      }
       if (roomData.isPrivate && roomData.creatorId !== userId) {
         const invCheck = await pool.query(
           `SELECT 1 FROM "room_invite" WHERE "roomId" = $1 AND "inviteeId" = $2 AND status != 'dismissed'

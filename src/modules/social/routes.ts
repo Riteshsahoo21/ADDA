@@ -3,12 +3,15 @@ import { Router, type RequestHandler } from 'express';
 import { auth } from '../auth/auth.js';
 import { pool } from '../../db/pool.js';
 import { ensureProfile, validUsername } from './profile.js';
+import { getCachedSocialBundle, setCachedSocialBundle, invalidateSocialBundleCache } from './cache.js';
 import { publishFriendUpdate, publishGroupUpdate, publishGroupRoomUpdate, getIO, publishPublicRoomsUpdate } from '../realtime/server.js';
 import { groupRoomOwners, getShardPeerCount, deleteGroupRoomInstance } from '../realtime/rooms.js';
 import { sendRoomInvitePush } from '../realtime/push.js';
 import { getCachedGroupMembers, invalidateGroupMembersCache } from '../realtime/cache.js';
 import { closeMediaSession } from '../realtime/media.js';
 import { env } from '../../config/env.js';
+import { deleteAccount } from './account-deletion.js';
+import { hasAcceptedPolicy, isBlockedPair, POLICY_VERSION } from './safety.js';
 
 export const socialRoutes = Router();
 
@@ -58,6 +61,12 @@ socialRoutes.use(authenticated);
 
 socialRoutes.get('/social/bundle', run(async (_request, response) => {
   const userId = response.locals.userId;
+  const cached = getCachedSocialBundle(userId);
+  if (cached) {
+    response.json(cached);
+    return;
+  }
+
   const [me, contacts, groups, friendRequests] = await Promise.all([
     ensureProfile(userId),
     pool.query(
@@ -87,13 +96,16 @@ socialRoutes.get('/social/bundle', run(async (_request, response) => {
 
   if (!me) { response.status(404).json({ error: 'User not found.' }); return; }
 
-  response.json({
+  const result = {
     me,
     contacts: contacts.rows,
     groups: groups.rows,
     people: [],
     friendRequests: friendRequests.rows,
-  });
+  };
+
+  setCachedSocialBundle(userId, result);
+  response.json(result);
 }));
 
 socialRoutes.get('/calls/ice', run(async (_request, response) => {
@@ -112,6 +124,96 @@ socialRoutes.get('/me', run(async (_request, response) => {
   const profile = await ensureProfile(response.locals.userId);
   if (!profile) { response.status(404).json({ error: 'User not found.' }); return; }
   response.json(profile);
+}));
+
+socialRoutes.delete('/me', run(async (request, response) => {
+  if (request.body?.confirm !== 'DELETE') {
+    response.status(400).json({ error: 'Confirm account deletion in the app.' }); return;
+  }
+  const deleted = await deleteAccount(response.locals.userId);
+  if (!deleted) { response.status(404).json({ error: 'Account no longer exists.' }); return; }
+  for (const [key, entry] of sessionCache) if (entry.userId === response.locals.userId) sessionCache.delete(key);
+  response.json({ deleted: true });
+}));
+
+socialRoutes.get('/safety/policy', (_request, response) => {
+  response.json({ version: POLICY_VERSION });
+});
+
+socialRoutes.post('/safety/accept', run(async (request, response) => {
+  if (request.body?.version !== POLICY_VERSION) {
+    response.status(400).json({ error: 'Review the latest ADDA rules before continuing.', version: POLICY_VERSION }); return;
+  }
+  await pool.query('UPDATE "user" SET "policyVersion" = $2, "policyAcceptedAt" = now() WHERE id = $1',
+    [response.locals.userId, POLICY_VERSION]);
+  response.json({ version: POLICY_VERSION });
+}));
+
+socialRoutes.get('/safety/blocks', run(async (_request, response) => {
+  const result = await pool.query(
+    `SELECT u.id, u.name, u.username FROM user_block b JOIN "user" u ON u.id = b."blockedId"
+     WHERE b."blockerId" = $1 ORDER BY b."createdAt" DESC`, [response.locals.userId]);
+  response.json(result.rows);
+}));
+
+socialRoutes.use(run(async (_request, response, next) => {
+  if (!(await hasAcceptedPolicy(response.locals.userId))) {
+    response.status(403).json({ error: 'Accept the ADDA Community Guidelines before continuing.', code: 'POLICY_REQUIRED' });
+    return;
+  }
+  next();
+}));
+
+socialRoutes.post('/safety/blocks', run(async (request, response) => {
+  const selfId = response.locals.userId as string;
+  const targetId = request.body?.userId;
+  if (typeof targetId !== 'string' || targetId.length > 100 || targetId === selfId) {
+    response.status(400).json({ error: 'Choose another user to block.' }); return;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const target = await client.query('SELECT 1 FROM "user" WHERE id = $1', [targetId]);
+    if (!target.rowCount) { await client.query('ROLLBACK'); response.status(404).json({ error: 'User not found.' }); return; }
+    await client.query('INSERT INTO user_block ("blockerId", "blockedId") VALUES ($1, $2) ON CONFLICT DO NOTHING', [selfId, targetId]);
+    const [a, b] = [selfId, targetId].sort();
+    await client.query('DELETE FROM contact WHERE "userA" = $1 AND "userB" = $2', [a, b]);
+    await client.query('DELETE FROM friend_request WHERE ("senderId" = $1 AND "recipientId" = $2) OR ("senderId" = $2 AND "recipientId" = $1)', [selfId, targetId]);
+    await client.query('DELETE FROM chat_spool WHERE ("senderId" = $1 AND "recipientId" = $2) OR ("senderId" = $2 AND "recipientId" = $1)', [selfId, targetId]);
+    await client.query('COMMIT');
+  } catch (error) { await client.query('ROLLBACK'); throw error; }
+  finally { client.release(); }
+  publishFriendUpdate([selfId, targetId]);
+  response.status(201).json({ blocked: true });
+}));
+
+socialRoutes.delete('/safety/blocks/:id', run(async (request, response) => {
+  await pool.query('DELETE FROM user_block WHERE "blockerId" = $1 AND "blockedId" = $2',
+    [response.locals.userId, request.params.id]);
+  response.json({ blocked: false });
+}));
+
+socialRoutes.post('/safety/reports', run(async (request, response) => {
+  const selfId = response.locals.userId as string;
+  const { userId, kind, reason, messageId, roomId, details, evidenceText } = request.body ?? {};
+  if (typeof userId !== 'string' || userId.length > 100 || userId === selfId ||
+    !['user', 'message', 'room'].includes(kind) ||
+    !['harassment', 'hate', 'sexual', 'child_safety', 'violence', 'spam', 'other'].includes(reason) ||
+    (details != null && (typeof details !== 'string' || details.length > 1000)) ||
+    (evidenceText != null && (typeof evidenceText !== 'string' || evidenceText.length > 2000))) {
+    response.status(400).json({ error: 'Invalid report.' }); return;
+  }
+  const target = await pool.query('SELECT 1 FROM "user" WHERE id = $1', [userId]);
+  if (!target.rowCount) { response.status(404).json({ error: 'User not found.' }); return; }
+  const count = await pool.query<{ count: string }>(
+    `SELECT COUNT(*) AS count FROM user_report WHERE "reporterId" = $1 AND "createdAt" > now() - interval '24 hours'`, [selfId]);
+  if (Number(count.rows[0]?.count ?? 0) >= 10) { response.status(429).json({ error: 'Report limit reached. Try again tomorrow.' }); return; }
+  await pool.query(
+    `INSERT INTO user_report ("reporterId", "reportedUserId", kind, reason, "messageId", "roomId", details, "evidenceText")
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [selfId, userId, kind, reason, typeof messageId === 'string' ? messageId.slice(0, 100) : null,
+      typeof roomId === 'string' ? roomId.slice(0, 100) : null, details?.trim() ?? '', evidenceText?.trim() ?? '']);
+  response.status(201).json({ reported: true });
 }));
 
 socialRoutes.patch('/me', run(async (request, response) => {
@@ -208,6 +310,7 @@ async function requestContact(
 ) {
   const targetId = targetUser.id;
   if (selfId === targetId) { response.status(400).json({ error: 'You cannot add yourself.' }); return; }
+  if (await isBlockedPair(selfId, targetId)) { response.status(403).json({ error: 'This user is unavailable.' }); return; }
   const [userA, userB] = [selfId, targetId].sort();
 
   const check = await pool.query<{
@@ -292,15 +395,29 @@ socialRoutes.post('/contacts/qr', run(async (request, response) => {
 
 socialRoutes.get('/friend-requests', run(async (_request, response) => {
   const result = await pool.query(
-    `SELECT r.id, r."senderId", r."recipientId", r."createdAt", r.status,
+    `SELECT r.id, r."senderId", r."recipientId", r."createdAt", r."updatedAt", r.status,
        sender.name AS "senderName", sender.username AS "senderUsername", sender.image AS "senderAvatarUrl",
        recipient.name AS "recipientName", recipient.username AS "recipientUsername", recipient.image AS "recipientAvatarUrl"
      FROM "friend_request" r JOIN "user" sender ON sender.id = r."senderId"
        JOIN "user" recipient ON recipient.id = r."recipientId"
-     WHERE (r."senderId" = $1 OR r."recipientId" = $1) AND r.status = 'pending'
-     ORDER BY r."createdAt" DESC LIMIT 100`, [response.locals.userId],
+     WHERE (
+       (r."recipientId" = $1 AND r.status = 'pending')
+       OR
+       (r."senderId" = $1 AND r.status = 'pending')
+       OR
+       (r."senderId" = $1 AND r.status = 'accepted' AND (r."dismissedBySender" IS NOT TRUE))
+     )
+     ORDER BY r."updatedAt" DESC, r."createdAt" DESC LIMIT 100`, [response.locals.userId],
   );
   response.json(result.rows);
+}));
+
+socialRoutes.post('/friend-requests/:id/dismiss', run(async (request, response) => {
+  await pool.query(
+    'UPDATE "friend_request" SET "dismissedBySender" = true, "updatedAt" = NOW() WHERE id = $1 AND "senderId" = $2',
+    [request.params.id, response.locals.userId],
+  );
+  response.json({ ok: true });
 }));
 
 socialRoutes.post('/friend-requests/:id/respond', run(async (request, response) => {
@@ -343,6 +460,19 @@ socialRoutes.post('/friend-requests/:id/respond', run(async (request, response) 
       type: 'request_responded',
       decision,
       requestId: request.params.id,
+      request: {
+        id: request.params.id,
+        senderId: item.senderId,
+        recipientId: item.recipientId,
+        senderName: item.senderName,
+        senderUsername: item.senderUsername,
+        senderAvatarUrl: item.senderImage,
+        recipientName: item.recipientName,
+        recipientUsername: item.recipientUsername,
+        recipientAvatarUrl: item.recipientImage,
+        status: decision === 'accept' ? 'accepted' : 'declined',
+        updatedAt: new Date().toISOString(),
+      },
       senderContact: decision === 'accept' ? {
         id: item.recipientId,
         name: item.recipientName,
@@ -398,6 +528,7 @@ socialRoutes.post('/groups', run(async (request, response) => {
     }
     await client.query('COMMIT');
     invalidateGroupMembersCache(id);
+    invalidateSocialBundleCache([response.locals.userId, ...ids]);
     response.status(201).json({ id, name, memberCount: ids.length + 1 });
   } catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
@@ -757,6 +888,20 @@ socialRoutes.post('/groups/:id/rooms', run(async (request, response) => {
 
   publishGroupRoomUpdate(memberIds, payload);
 
+  const otherMemberIds = memberIds.filter(id => id !== userId);
+  if (otherMemberIds.length) {
+    void sendRoomInvitePush(otherMemberIds, {
+      inviterName: creatorName,
+      groupName,
+      roomKind,
+      groupId,
+      roomId,
+      ownerId: userId,
+      roomName: `${groupName} Hangout`,
+      isPrivate: true,
+    }).catch(err => console.warn('[ADDA] Group room invite push error:', err));
+  }
+
   response.status(201).json({
     ok: true,
     room: payload,
@@ -836,11 +981,12 @@ socialRoutes.get('/rooms/public', run(async (_request, response) => {
     name: string;
     code: string;
     isPrivate: boolean;
+    maxPlayers: number;
     createdAt: string;
     creatorName: string;
     creatorAvatarUrl: string | null;
   }>(
-    `SELECT r.id, r."roomKind", r."creatorId", r.name, r.code, r."isPrivate", r."createdAt",
+    `SELECT r.id, r."roomKind", r."creatorId", r.name, r.code, r."isPrivate", r."createdAt", r."maxPlayers",
             u.name AS "creatorName", u.image AS "creatorAvatarUrl"
      FROM "group_room" r
      JOIN "user" u ON u.id = r."creatorId"
@@ -850,6 +996,7 @@ socialRoutes.get('/rooms/public', run(async (_request, response) => {
   const io = getIO();
   const rooms = result.rows.map(room => ({
     ...room,
+    maxPlayers: room.maxPlayers || 10,
     peerCount: io ? getShardPeerCount(io, `room:${room.id}`) : 0,
   }));
   response.json({ rooms });
@@ -860,6 +1007,8 @@ socialRoutes.post('/rooms', run(async (request, response) => {
   const rawKind = request.body?.roomKind;
   const roomKind = (typeof rawKind === 'string' && ['loft', 'roof', 'tea', 'beach'].includes(rawKind)) ? rawKind : 'loft';
   const isPrivate = Boolean(request.body?.isPrivate);
+  const rawMax = Number(request.body?.maxPlayers);
+  const maxPlayers = (!isNaN(rawMax) && rawMax >= 2 && rawMax <= 10) ? Math.floor(rawMax) : 10;
   const code = Math.floor(1000 + Math.random() * 9000).toString();
   const rawName = typeof request.body?.name === 'string' ? request.body.name.trim() : '';
 
@@ -874,9 +1023,9 @@ socialRoutes.post('/rooms', run(async (request, response) => {
 
   const roomId = randomUUID();
   await pool.query(
-    `INSERT INTO "group_room" (id, "roomKind", "creatorId", "isActive", name, "isPrivate", code, "lastActivityAt")
-     VALUES ($1, $2, $3, true, $4, $5, $6, now())`,
-    [roomId, roomKind, userId, name, isPrivate, code]
+    `INSERT INTO "group_room" (id, "roomKind", "creatorId", "isActive", name, "isPrivate", code, "maxPlayers", "lastActivityAt")
+     VALUES ($1, $2, $3, true, $4, $5, $6, $7, now())`,
+    [roomId, roomKind, userId, name, isPrivate, code, maxPlayers]
   );
 
   const shardId = `room:${roomId}`;
@@ -887,6 +1036,7 @@ socialRoutes.post('/rooms', run(async (request, response) => {
 
   const groupInvites = Array.isArray(request.body?.groupInvites) ? (request.body.groupInvites as string[]) : [];
   const userInvites = Array.isArray(request.body?.userInvites) ? (request.body.userInvites as string[]) : [];
+  const notifiedUserIds = new Set<string>();
 
   for (const gId of groupInvites) {
     if (typeof gId !== 'string') continue;
@@ -903,8 +1053,9 @@ socialRoutes.post('/rooms', run(async (request, response) => {
     );
 
     const memsRes = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" != $2', [gId, userId]);
-    const memIds = memsRes.rows.map(r => r.userId);
+    const memIds = memsRes.rows.map(r => r.userId).filter(id => !notifiedUserIds.has(id));
     if (memIds.length) {
+      memIds.forEach(id => notifiedUserIds.add(id));
       publishGroupRoomUpdate(memIds, { roomId, roomKind, name, isPrivate, creatorId: userId, creatorName, groupId: gId, groupName: gName });
       void sendRoomInvitePush(memIds, {
         inviterName: creatorName,
@@ -927,15 +1078,18 @@ socialRoutes.post('/rooms', run(async (request, response) => {
        ON CONFLICT ("roomId", "inviteeId") DO UPDATE SET status = 'pending', "updatedAt" = now()`,
       [randomUUID(), roomId, targetUserId, userId, roomKind, name, isPrivate]
     );
-    publishGroupRoomUpdate([targetUserId], { roomId, roomKind, name, isPrivate, creatorId: userId, creatorName });
-    void sendRoomInvitePush([targetUserId], {
-      inviterName: creatorName,
-      roomKind,
-      roomId,
-      ownerId: userId,
-      roomName: name,
-      isPrivate,
-    });
+    if (!notifiedUserIds.has(targetUserId)) {
+      notifiedUserIds.add(targetUserId);
+      publishGroupRoomUpdate([targetUserId], { roomId, roomKind, name, isPrivate, creatorId: userId, creatorName });
+      void sendRoomInvitePush([targetUserId], {
+        inviterName: creatorName,
+        roomKind,
+        roomId,
+        ownerId: userId,
+        roomName: name,
+        isPrivate,
+      });
+    }
   }
 
   if (!isPrivate) {
@@ -952,6 +1106,7 @@ socialRoutes.post('/rooms', run(async (request, response) => {
       name,
       isPrivate,
       code,
+      maxPlayers,
       createdAt: new Date().toISOString(),
     },
   });
@@ -980,6 +1135,7 @@ socialRoutes.post('/rooms/:id/invite', run(async (request, response) => {
 
   const groupInvites = Array.isArray(request.body?.groupInvites) ? (request.body.groupInvites as string[]) : [];
   const userInvites = Array.isArray(request.body?.userInvites) ? (request.body.userInvites as string[]) : [];
+  const notifiedUserIds = new Set<string>();
 
   for (const gId of groupInvites) {
     if (typeof gId !== 'string') continue;
@@ -996,8 +1152,9 @@ socialRoutes.post('/rooms/:id/invite', run(async (request, response) => {
     );
 
     const memsRes = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1 AND "userId" != $2', [gId, userId]);
-    const memIds = memsRes.rows.map(r => r.userId);
+    const memIds = memsRes.rows.map(r => r.userId).filter(id => !notifiedUserIds.has(id));
     if (memIds.length) {
+      memIds.forEach(id => notifiedUserIds.add(id));
       publishGroupRoomUpdate(memIds, { roomId, roomKind: room.roomKind, name: room.name, isPrivate: room.isPrivate, creatorId: userId, creatorName, groupId: gId, groupName: gName });
       void sendRoomInvitePush(memIds, {
         inviterName: creatorName,
@@ -1020,15 +1177,18 @@ socialRoutes.post('/rooms/:id/invite', run(async (request, response) => {
        ON CONFLICT ("roomId", "inviteeId") DO UPDATE SET status = 'pending', "updatedAt" = now()`,
       [randomUUID(), roomId, targetUserId, userId, room.roomKind, room.name, room.isPrivate]
     );
-    publishGroupRoomUpdate([targetUserId], { roomId, roomKind: room.roomKind, name: room.name, isPrivate: room.isPrivate, creatorId: userId, creatorName });
-    void sendRoomInvitePush([targetUserId], {
-      inviterName: creatorName,
-      roomKind: room.roomKind,
-      roomId,
-      ownerId: userId,
-      roomName: room.name,
-      isPrivate: room.isPrivate,
-    });
+    if (!notifiedUserIds.has(targetUserId)) {
+      notifiedUserIds.add(targetUserId);
+      publishGroupRoomUpdate([targetUserId], { roomId, roomKind: room.roomKind, name: room.name, isPrivate: room.isPrivate, creatorId: userId, creatorName });
+      void sendRoomInvitePush([targetUserId], {
+        inviterName: creatorName,
+        roomKind: room.roomKind,
+        roomId,
+        ownerId: userId,
+        roomName: room.name,
+        isPrivate: room.isPrivate,
+      });
+    }
   }
 
   response.json({ ok: true });
@@ -1086,8 +1246,7 @@ socialRoutes.get('/updates/hangouts', run(async (_request, response) => {
        JOIN "user" u ON u.id = r."creatorId"
        WHERE r."isActive" = true
          AND (
-           r."creatorId" = $1
-           OR (r."isPrivate" = false)
+           (r."isPrivate" = true AND r."creatorId" = $1)
            OR (r."groupId" IS NOT NULL AND EXISTS (SELECT 1 FROM "chat_group_member" m WHERE m."groupId" = r."groupId" AND m."userId" = $1))
            OR EXISTS (SELECT 1 FROM "room_invite" ri WHERE ri."roomId" = r.id AND (ri."inviteeId" = $1 OR (ri."groupId" IS NOT NULL AND EXISTS (SELECT 1 FROM "chat_group_member" m2 WHERE m2."groupId" = ri."groupId" AND m2."userId" = $1))))
          )

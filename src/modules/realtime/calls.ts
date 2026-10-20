@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Server, Socket } from 'socket.io';
 import { pool } from '../../db/pool.js';
 import { sendCallPush } from './push.js';
+import { isBlockedPair } from '../social/safety.js';
 
 export type CallTarget = { kind: 'direct' | 'group'; id: string };
 export type CallMedia = 'audio' | 'video';
@@ -21,6 +22,7 @@ const publicCall = ({ timer: _timer, ...call }: Call): CallInfo => call;
 
 async function getMembers(target: CallTarget, callerId: string): Promise<string[]> {
   if (target.kind === 'direct') {
+    if (await isBlockedPair(callerId, target.id)) throw new Error('This contact is unavailable.');
     const [a, b] = [callerId, target.id].sort();
     const result = await pool.query('SELECT 1 FROM "contact" WHERE "userA" = $1 AND "userB" = $2', [a, b]);
     if (result.rowCount !== 1) throw new Error('This contact is unavailable.');
@@ -35,13 +37,18 @@ async function getMembers(target: CallTarget, callerId: string): Promise<string[
 function closeCall(io: Server, call: Call, reason: string) {
   clearTimeout(call.timer);
   calls.delete(call.id);
-  io.to(call.members.map(userRoom)).emit('call:ended', { callId: call.id, reason });
+  io.to(call.members.map(userRoom)).emit('call:ended', { callId: call.id, target: call.target, reason });
 }
 
 export function attachCallHandlers(io: Server, socket: Socket) {
   const selfId = socket.data.userId as string;
   socket.on('call:pending', (ack?: Ack<CallInfo[]>) => {
-    ack?.({ ok: true, value: [...calls.values()].filter(call => call.members.includes(selfId) && !call.joined.includes(selfId) && call.expiresAt > Date.now()).map(publicCall) });
+    ack?.({
+      ok: true,
+      value: [...calls.values()]
+        .filter(call => call.members.includes(selfId) && !call.joined.includes(selfId) && (call.target.kind === 'group' ? call.joined.length > 0 : call.expiresAt > Date.now()))
+        .map(publicCall),
+    });
   });
   socket.on('call:start', async (input: unknown, ack?: Ack<CallInfo>) => {
     try {
@@ -49,20 +56,21 @@ export function attachCallHandlers(io: Server, socket: Socket) {
         !('media' in input) || (input.media !== 'audio' && input.media !== 'video')) throw new Error('Invalid call.');
       const target = input.target;
       const members = await getMembers(target, selfId);
-      const existing = [...calls.values()].find(call => call.target.kind === target.kind && call.target.id === target.id && call.members.includes(selfId));
+      const existing = [...calls.values()].find(call => call.target.kind === target.kind && call.target.id === target.id && call.members.includes(selfId) && call.joined.length > 0);
       if (existing) { ack?.({ ok: true, value: publicCall(existing) }); return; }
       const id = randomUUID();
-      const expiresAt = Date.now() + 45_000;
+      const expiresAt = target.kind === 'group' ? Date.now() + 86400_000 : Date.now() + 45_000;
       const call: Call = {
         id, target, media: input.media, callerId: selfId, callerName: socket.data.name as string,
         members, joined: [selfId], expiresAt, usingRelay: false,
         timer: setTimeout(() => {
           const current = calls.get(id);
-          if (current && current.joined.length === 1) closeCall(io, current, 'No answer');
+          if (current && current.target.kind === 'direct' && current.joined.length === 1) closeCall(io, current, 'No answer');
         }, 45_000),
       };
       calls.set(id, call);
       ack?.({ ok: true, value: publicCall(call) });
+      io.to(members.map(userRoom)).emit('call:active', publicCall(call));
       io.to(members.filter(id => id !== selfId).map(userRoom)).emit('call:invite', publicCall(call));
       void sendCallPush(members.filter(id => id !== selfId), call).catch(error => console.warn('[ADDA] Call push failed:', error));
     } catch (error) { ack?.({ ok: false, error: error instanceof Error ? error.message : 'Could not start call.' }); }
@@ -70,7 +78,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
   socket.on('call:current', async (target: unknown, ack?: Ack<CallInfo | null>) => {
     try {
       if (!safeTarget(target) || !(await getMembers(target, selfId)).includes(selfId)) throw new Error('Call unavailable.');
-      const call = [...calls.values()].find(item => item.target.kind === target.kind && item.target.id === target.id);
+      const call = [...calls.values()].find(item => item.target.kind === target.kind && item.target.id === target.id && item.joined.length > 0);
       ack?.({ ok: true, value: call ? publicCall(call) : null });
     } catch (error) { ack?.({ ok: false, error: error instanceof Error ? error.message : 'Could not find call.' }); }
   });
@@ -81,7 +89,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     if (newlyJoined) call.joined.push(selfId);
     if (call.joined.length > 1) clearTimeout(call.timer);
     ack?.({ ok: true, value: publicCall(call) });
-    io.to(call.joined.filter(id => id !== selfId).map(userRoom)).emit('call:participant-joined', { callId, userId: selfId });
+    io.to(call.members.map(userRoom)).emit('call:participant-joined', { callId, userId: selfId, joined: call.joined });
   });
   socket.on('call:ready', (callId: unknown) => {
     const call = typeof callId === 'string' ? calls.get(callId) : undefined;
@@ -107,7 +115,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     const call = typeof callId === 'string' ? calls.get(callId) : undefined;
     if (!call || !call.joined.includes(selfId)) return;
     call.joined = call.joined.filter(id => id !== selfId);
-    io.to(call.members.map(userRoom)).emit('call:participant-left', { callId, userId: selfId });
+    io.to(call.members.map(userRoom)).emit('call:participant-left', { callId, userId: selfId, joined: call.joined });
     if (call.target.kind === 'direct' || call.joined.length === 0) closeCall(io, call, 'Call ended');
   });
   socket.on('call:decline', (callId: unknown) => {
@@ -123,7 +131,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
         for (const call of [...calls.values()]) {
           if (!call.joined.includes(selfId)) continue;
           call.joined = call.joined.filter(id => id !== selfId);
-          io.to(call.members.map(userRoom)).emit('call:participant-left', { callId: call.id, userId: selfId });
+          io.to(call.members.map(userRoom)).emit('call:participant-left', { callId: call.id, userId: selfId, joined: call.joined });
           if (call.target.kind === 'direct' || call.joined.length === 0) closeCall(io, call, 'Disconnected');
         }
       });

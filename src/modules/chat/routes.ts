@@ -7,6 +7,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { env } from '../../config/env.js';
 import { invalidateUserDeviceCache } from '../realtime/cache.js';
 import { processDeliveryAck, processReadAck } from '../realtime/server.js';
+import { hasAcceptedPolicy, isBlockedPair } from '../social/safety.js';
 
 type Target = { kind: 'direct' | 'group'; id: string };
 const idPattern = /^[a-zA-Z0-9_-]{8,100}$/;
@@ -34,9 +35,16 @@ chatRoutes.use(run(async (request, response, next) => {
   response.locals.userId = session.user.id;
   next();
 }));
+chatRoutes.use(run(async (_request, response, next) => {
+  if (!(await hasAcceptedPolicy(response.locals.userId))) {
+    response.status(403).json({ error: 'Accept the ADDA Community Guidelines before continuing.', code: 'POLICY_REQUIRED' }); return;
+  }
+  next();
+}));
 
 async function memberIds(userId: string, target: Target): Promise<string[] | null> {
   if (target.kind === 'direct') {
+    if (await isBlockedPair(userId, target.id)) return null;
     const [a, b] = [userId, target.id].sort();
     const result = await pool.query('SELECT 1 FROM contact WHERE "userA" = $1 AND "userB" = $2', [a, b]);
     return result.rowCount ? [userId, target.id] : null;
@@ -174,6 +182,12 @@ chatRoutes.post('/read-ack', run(async (request, response) => {
 export async function retryDeliveredMediaCleanup(): Promise<void> {
   if (!r2) return;
   try {
+    const orphaned = await pool.query<{ objectKey: string }>(
+      'SELECT "objectKey" FROM media_object_deletion ORDER BY "createdAt" LIMIT 50');
+    for (const item of orphaned.rows) {
+      await r2.send(new DeleteObjectCommand({ Bucket: env.r2Bucket, Key: item.objectKey }));
+      await pool.query('DELETE FROM media_object_deletion WHERE "objectKey" = $1', [item.objectKey]);
+    }
     const stale = await pool.query<{ id: string; objectKey: string }>(
       `SELECT id, "objectKey" FROM chat_media 
        WHERE confirmed = false AND "createdAt" < now() - INTERVAL '24 hours' LIMIT 50`

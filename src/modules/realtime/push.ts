@@ -12,6 +12,7 @@ export function attachPushHandlers(socket: Socket) {
   socket.on('push:register', async (token: unknown, ack?: (reply: { ok: boolean; error?: string }) => void) => {
     if (typeof token !== 'string' || token.length < 32 || token.length > 4096) { ack?.({ ok: false, error: 'Invalid push token.' }); return; }
     try {
+      await pool.query('DELETE FROM push_device WHERE "userId" = $1 AND token != $2', [userId, token]);
       await pool.query('INSERT INTO push_device (token, "userId") VALUES ($1, $2) ON CONFLICT (token) DO UPDATE SET "userId" = $2, "updatedAt" = now()', [token, userId]);
       ack?.({ ok: true });
     } catch { ack?.({ ok: false, error: 'Could not register notifications.' }); }
@@ -21,17 +22,47 @@ export function attachPushHandlers(socket: Socket) {
   });
 }
 
-export async function sendCallPush(userIds: string[], call: { id: string; callerName: string; media: 'audio' | 'video'; target: { kind: string } }) {
+export async function sendCallPush(userIds: string[], call: { id: string; callerName: string; media: 'audio' | 'video'; target: { kind: string; id: string } }) {
   if (!enabled || userIds.length === 0) return;
-  const result = await pool.query<{ token: string }>('SELECT token FROM push_device WHERE "userId" = ANY($1::text[])', [userIds]);
+  const uniqueUserIds = [...new Set(userIds.filter(Boolean))];
+  if (!uniqueUserIds.length) return;
+  const result = await pool.query<{ token: string }>(
+    `SELECT DISTINCT ON ("userId") token
+     FROM push_device
+     WHERE "userId" = ANY($1::text[])
+     ORDER BY "userId", "updatedAt" DESC`,
+    [uniqueUserIds]
+  );
   const tokens = result.rows.map(row => row.token);
+  const isGroup = call.target.kind === 'group';
   for (let start = 0; start < tokens.length; start += 500) {
     const batch = tokens.slice(start, start + 500);
     const response = await getMessaging().sendEachForMulticast({
       tokens: batch,
-      notification: { title: `${call.callerName} is calling`, body: `Incoming ${call.target.kind === 'group' ? 'group ' : ''}${call.media} call` },
-      data: { kind: 'call', callId: call.id, callerName: call.callerName, media: call.media },
-      android: { priority: 'high', ttl: 45_000, notification: { channelId: 'adda_calls', priority: 'high', sound: 'default' } },
+      notification: {
+        title: isGroup ? `Group ${call.media} call` : `${call.callerName} is calling`,
+        body: isGroup ? `${call.callerName} started a group ${call.media} call` : `Incoming ${call.media} call`,
+      },
+      data: {
+        kind: 'call',
+        callId: call.id,
+        callerName: call.callerName,
+        media: call.media,
+        chatKind: call.target.kind,
+        chatId: call.target.id,
+        categoryId: 'incoming_call',
+      },
+      android: {
+        priority: 'high',
+        ttl: 45_000,
+        notification: {
+          channelId: 'adda_calls',
+          priority: 'max',
+          sound: 'default',
+          tag: call.id,
+          clickAction: 'incoming_call',
+        },
+      },
     });
     if (response.failureCount) {
       const codes = response.responses.filter(item => !item.success).map(item => item.error?.code ?? 'unknown');
@@ -53,7 +84,15 @@ export async function sendEncryptedChatPush(
   mentions?: string[]
 ) {
   if (!enabled || !userIds.length) return;
-  const result = await pool.query<{ token: string; userId: string }>('SELECT token, "userId" FROM push_device WHERE "userId" = ANY($1::text[])', [userIds]);
+  const uniqueUserIds = [...new Set(userIds.filter(Boolean))];
+  if (!uniqueUserIds.length) return;
+  const result = await pool.query<{ token: string; userId: string }>(
+    `SELECT DISTINCT ON ("userId") token, "userId"
+     FROM push_device
+     WHERE "userId" = ANY($1::text[])
+     ORDER BY "userId", "updatedAt" DESC`,
+    [uniqueUserIds]
+  );
   if (!result.rows.length) return;
 
   const chatName = target.name || (target.kind === 'group' ? (groupName || 'Group') : senderName);
@@ -124,9 +163,14 @@ export async function sendRoomInvitePush(
   }
 ) {
   if (!enabled || !userIds.length) return;
+  const uniqueUserIds = [...new Set(userIds.filter(Boolean))];
+  if (!uniqueUserIds.length) return;
   const result = await pool.query<{ token: string; userId: string }>(
-    'SELECT token, "userId" FROM push_device WHERE "userId" = ANY($1::text[])',
-    [userIds]
+    `SELECT DISTINCT ON ("userId") token, "userId"
+     FROM push_device
+     WHERE "userId" = ANY($1::text[])
+     ORDER BY "userId", "updatedAt" DESC`,
+    [uniqueUserIds]
   );
   if (!result.rows.length) return;
 

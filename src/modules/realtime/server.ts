@@ -8,6 +8,7 @@ import { attachMediaHandlers } from './media.js';
 import { attachRoomHandlers } from './rooms.js';
 import { attachPushHandlers, sendEncryptedChatPush } from './push.js';
 import { getCachedGroupMembers, getRecipientDevices, invalidateUserDeviceCache } from './cache.js';
+import { hasAcceptedPolicy, isBlockedPair } from '../social/safety.js';
 
 type ChatKind = 'direct' | 'group';
 type ChatTarget = { kind: ChatKind; id: string };
@@ -32,6 +33,20 @@ export type DirectEnvelope = {
 };
 
 let io: Server | undefined;
+const chatRateBuckets = new Map<string, { startedAt: number; count: number }>();
+function chatRateAllowed(userId: string): boolean {
+  const now = Date.now();
+  if (chatRateBuckets.size > 10_000) {
+    for (const [id, bucket] of chatRateBuckets) if (now - bucket.startedAt > 120_000) chatRateBuckets.delete(id);
+  }
+  const bucket = chatRateBuckets.get(userId);
+  if (!bucket || now - bucket.startedAt >= 60_000) {
+    chatRateBuckets.set(userId, { startedAt: now, count: 1 });
+    return true;
+  }
+  bucket.count += 1;
+  return bucket.count <= 60;
+}
 const userRoom = (id: string) => `user:${id}`;
 const chatRoom = ({ kind, id }: ChatTarget) => `chat:${kind}:${id}`;
 const validTarget = (value: unknown): value is ChatTarget =>
@@ -44,6 +59,7 @@ async function canAccess(userId: string, target: ChatTarget): Promise<boolean> {
     return result.rowCount === 1;
   }
   const [a, b] = [userId, target.id].sort();
+  if (await isBlockedPair(userId, target.id)) return false;
   const result = await pool.query('SELECT 1 FROM "contact" WHERE "userA" = $1 AND "userB" = $2', [a, b]);
   return result.rowCount === 1;
 }
@@ -64,7 +80,10 @@ export async function publishMessage(message: ChatMessage): Promise<void> {
   io?.to(ids.map(userRoom)).emit('chat:message', message);
 }
 
+import { invalidateSocialBundleCache } from '../social/cache.js';
+
 export function publishFriendUpdate(userIds: string[], payload?: unknown): void {
+  invalidateSocialBundleCache(userIds);
   io?.to(userIds.map(userRoom)).emit('friends:updated', payload);
 }
 
@@ -77,6 +96,7 @@ export function publishEncryptedEnvelope(userId: string, envelope: unknown): voi
 }
 
 export function publishGroupUpdate(groupId: string, userIds: string[]): void {
+  invalidateSocialBundleCache(userIds);
   if (userIds.length) io?.to([...new Set(userIds)].map(userRoom)).emit('group:updated', { groupId });
 }
 
@@ -158,6 +178,7 @@ export function attachRealtime(httpServer: HttpServer): Server {
       if (typeof token !== 'string' || !token) return next(new Error('Sign in to continue.'));
       const session = await auth.api.getSession({ headers: new Headers({ Authorization: `Bearer ${token}` }) });
       if (!session) return next(new Error('Sign in to continue.'));
+      if (!(await hasAcceptedPolicy(session.user.id))) return next(new Error('Accept the ADDA Community Guidelines.'));
       socket.data.userId = session.user.id;
       socket.data.name = session.user.name;
       const deviceId = socket.handshake.auth?.deviceId;
@@ -194,6 +215,7 @@ export function attachRealtime(httpServer: HttpServer): Server {
     const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
     const typingRevision = new Map<string, number>();
     const emitTyping = async (target: ChatTarget, typing: boolean, revision: number) => {
+      if (!(await canAccess(selfId, target))) return;
       const ids = (await listeners(target, selfId)).filter(id => id !== selfId);
       if (typingRevision.get(chatRoom(target)) !== revision) return;
       if (ids.length) io!.to(ids.map(userRoom)).emit('chat:typing', { ...target, id: target.kind === 'direct' ? selfId : target.id, userId: selfId, name: socket.data.name, typing });
@@ -251,24 +273,47 @@ export function attachRealtime(httpServer: HttpServer): Server {
         nonce: string;
         keys: Array<{ deviceId: string; wrappedKey: string; wrapNonce: string }>;
         mediaId?: string;
-        previewText?: string;
         mentions?: string[];
       },
       ack?: (res: { ok: boolean; timestamp?: string; error?: string }) => void
     ) => {
       try {
-        const { messageId, senderDeviceId, target, ciphertext, nonce, keys, mediaId, previewText, mentions } = payload;
-        if (!messageId || !senderDeviceId || !validTarget(target) || !ciphertext || !nonce || !Array.isArray(keys)) {
+        const { messageId, senderDeviceId, target, ciphertext, nonce, keys, mediaId, mentions } = payload;
+        if (typeof messageId !== 'string' || messageId.length > 100 || !messageId ||
+          typeof senderDeviceId !== 'string' || senderDeviceId.length > 100 || !senderDeviceId ||
+          !validTarget(target) || typeof ciphertext !== 'string' || !ciphertext ||
+          typeof nonce !== 'string' || nonce.length > 256 || !nonce || !Array.isArray(keys) ||
+          (mediaId != null && (typeof mediaId !== 'string' || mediaId.length > 100)) ||
+          (mentions != null && (!Array.isArray(mentions) || mentions.length > 50 ||
+            !mentions.every(id => typeof id === 'string' && id.length <= 100))) ||
+          !keys.every(key => typeof key?.deviceId === 'string' && key.deviceId.length <= 100 &&
+            typeof key.wrappedKey === 'string' && key.wrappedKey.length <= 1024 &&
+            typeof key.wrapNonce === 'string' && key.wrapNonce.length <= 256)) {
           ack?.({ ok: false, error: 'Invalid message structure.' });
           return;
         }
 
+        if (ciphertext.length > 32_768 || keys.length > 100) {
+          ack?.({ ok: false, error: 'Chat unavailable.' });
+          return;
+        }
+        if (!chatRateAllowed(selfId)) {
+          ack?.({ ok: false, error: 'Too many messages. Please wait a moment.' });
+          return;
+        }
+        if (!(await canAccess(selfId, target))) {
+          ack?.({ ok: false, error: 'Chat unavailable.' });
+          return;
+        }
+
+        const senderDevice = await pool.query<{ publicKey: string }>(
+          'SELECT "publicKey" FROM chat_device WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL',
+          [senderDeviceId, selfId]);
+        if (!senderDevice.rows[0]) { ack?.({ ok: false, error: 'Register this device before sending.' }); return; }
+
         const createdAt = new Date().toISOString();
 
-        // 1. Return immediate ACK to sender (Single Gray Tick ✓ achieved in < 25ms!)
-        ack?.({ ok: true, timestamp: createdAt });
-
-        // 2. Resolve recipient IDs via VPS RAM in-memory cache
+        // Resolve recipients and their encrypted device envelopes before persistence.
         const recipientUserIds: string[] = [];
         if (target.kind === 'direct') {
           recipientUserIds.push(target.id);
@@ -277,36 +322,15 @@ export function attachRealtime(httpServer: HttpServer): Server {
           recipientUserIds.push(...allMembers.filter(uid => uid !== selfId));
         }
 
-        if (recipientUserIds.length === 0) return;
+        // Resolve device public keys using the cache.
+        const devices = await getRecipientDevices(recipientUserIds);
+        const senderPublicKey = senderDevice.rows[0].publicKey;
 
-        // 3. Resolve device public keys using in-memory cache
-        const [devices, senderDevices] = await Promise.all([
-          getRecipientDevices(recipientUserIds),
-          getRecipientDevices([selfId])
-        ]);
-
-        const senderDevice = senderDevices.find(d => d.deviceId === senderDeviceId);
-        let senderPublicKey = (payload as any).senderPublicKey || senderDevice?.publicKey || '';
-        if (!senderPublicKey) {
-          const freshDev = await pool.query<{ publicKey: string }>(
-            'SELECT "publicKey" FROM chat_device WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL',
-            [senderDeviceId, selfId]
-          );
-          if (freshDev.rows.length > 0) {
-            senderPublicKey = freshDev.rows[0].publicKey;
-            invalidateUserDeviceCache(selfId);
-          }
-        }
-
-        // Link media to message if attached
-        if (mediaId) {
-          void pool.query('UPDATE chat_media SET "messageId" = $1 WHERE id = $2 AND "ownerId" = $3', [messageId, mediaId, selfId]).catch(() => {});
-        }
-
-        // 4. Memory-first dispatch: Synchronous O(1) check which recipient devices are online
+        // Track online recipients for dispatch after the transaction commits.
         const spoolRows: any[] = [];
         const pushUserIds = new Set<string>();
         const offlineEnvelopesByUser = new Map<string, DirectEnvelope>();
+        const onlineEnvelopes: Array<{ userId: string; envelope: DirectEnvelope }> = [];
 
         for (const dev of devices) {
           const keyEntry = keys.find(k => k.deviceId === dev.deviceId);
@@ -328,12 +352,12 @@ export function attachRealtime(httpServer: HttpServer): Server {
             createdAt,
           };
 
-          // Synchronous O(1) in-memory room check (0.001ms)
+          // Current socket room membership is an optimization for push selection.
           const isOnline = io!.sockets.adapter.rooms.has(userRoom(dev.userId));
 
           if (isOnline) {
-            // RECIPIENT ONLINE: Forward directly down recipient's open socket in 0ms!
-            io!.to(userRoom(dev.userId)).emit('chat:envelope', envelope);
+            // Forward only after the spool is durable.
+            onlineEnvelopes.push({ userId: dev.userId, envelope });
 
             // Also spool in case socket connection drops before write to SQLite
             spoolRows.push([
@@ -355,9 +379,37 @@ export function attachRealtime(httpServer: HttpServer): Server {
           }
         }
 
-        // Asynchronously persist spool batch
-        if (spoolRows.length > 0) {
-          void pool.query(`
+        if (target.kind === 'direct' && spoolRows.length === 0) {
+          ack?.({ ok: false, error: 'Recipient device keys are unavailable.' });
+          return;
+        }
+
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          const claimed = await client.query(
+            `INSERT INTO chat_sent_id ("messageId", "senderId", kind, "targetId")
+             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING RETURNING "messageId"`,
+            [messageId, selfId, target.kind, target.id]);
+          if (!claimed.rowCount) {
+            const existing = await client.query<{ senderId: string; kind: string; targetId: string }>(
+              'SELECT "senderId", kind, "targetId" FROM chat_sent_id WHERE "messageId" = $1', [messageId]);
+            await client.query('ROLLBACK');
+            if (existing.rows[0]?.senderId === selfId && existing.rows[0]?.kind === target.kind && existing.rows[0]?.targetId === target.id) {
+              ack?.({ ok: true, timestamp: createdAt });
+            } else {
+              ack?.({ ok: false, error: 'Message ID already used.' });
+            }
+            return;
+          }
+          if (mediaId) {
+            const media = await client.query(
+              'UPDATE chat_media SET "messageId" = $1 WHERE id = $2 AND "ownerId" = $3 AND kind = $4 AND "targetId" = $5 RETURNING id',
+              [messageId, mediaId, selfId, target.kind, target.id]);
+            if (!media.rowCount) throw new Error('Media attachment unavailable.');
+          }
+          if (spoolRows.length > 0) {
+            await client.query(`
             INSERT INTO chat_spool (
               "messageId", "senderId", "senderDeviceId", "recipientId", "recipientDeviceId",
               kind, "targetId", ciphertext, nonce, "wrappedKey", "wrapNonce",
@@ -374,17 +426,30 @@ export function attachRealtime(httpServer: HttpServer): Server {
             spoolRows.map(r => r[6]), spoolRows.map(r => r[7]), spoolRows.map(r => r[8]),
             spoolRows.map(r => r[9]), spoolRows.map(r => r[10]), spoolRows.map(r => r[11]),
             spoolRows.map(r => r[12]), spoolRows.map(r => r[13]),
-          ]).catch(e => console.warn('[ADDA] Spool insert warning:', e));
+          ]);
+          }
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
         }
 
+        for (const { userId, envelope } of onlineEnvelopes) {
+          io!.to(userRoom(userId)).emit('chat:envelope', envelope);
+        }
+        ack?.({ ok: true, timestamp: createdAt });
+
         // Send high-priority FCM push with complete envelope payload for instant background SQLite ingestion
+        // The push contains no plaintext message preview.
         if (pushUserIds.size > 0) {
           void sendEncryptedChatPush(
             [...pushUserIds],
             target,
             socket.data.name || 'ADDA',
             selfId,
-            previewText,
+            undefined,
             undefined,
             offlineEnvelopesByUser,
             mentions
@@ -417,6 +482,11 @@ export function attachRealtime(httpServer: HttpServer): Server {
     socket.on('chat:delete_for_everyone', async (data: { messageId: string; target: ChatTarget }) => {
       if (!data?.messageId || !validTarget(data?.target)) return;
       try {
+        if (!(await canAccess(selfId, data.target))) return;
+        const owned = await pool.query(
+          'SELECT 1 FROM chat_sent_id WHERE "messageId" = $1 AND "senderId" = $2 AND kind = $3 AND "targetId" = $4',
+          [data.messageId, selfId, data.target.kind, data.target.id]);
+        if (!owned.rowCount) return;
         await pool.query('DELETE FROM chat_spool WHERE "messageId" = $1', [data.messageId]).catch(() => {});
         const targetIds = await listeners(data.target, selfId);
         io?.to(targetIds.map(userRoom)).emit('chat:message_deleted', {
@@ -435,6 +505,7 @@ export function attachRealtime(httpServer: HttpServer): Server {
     socket.on('chat:reaction', async (data: { messageId: string; target: ChatTarget; emoji: string; action?: 'set' | 'remove' }) => {
       if (!data?.messageId || !validTarget(data?.target) || typeof data.emoji !== 'string') return;
       try {
+        if (!(await canAccess(selfId, data.target))) return;
         const targetIds = await listeners(data.target, selfId);
         io?.to(targetIds.map(userRoom)).emit('chat:reaction_updated', {
           messageId: data.messageId,
