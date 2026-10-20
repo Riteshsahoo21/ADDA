@@ -146,6 +146,7 @@ socialRoutes.post('/safety/accept', run(async (request, response) => {
   }
   await pool.query('UPDATE "user" SET "policyVersion" = $2, "policyAcceptedAt" = now() WHERE id = $1',
     [response.locals.userId, POLICY_VERSION]);
+  invalidateSocialBundleCache(response.locals.userId);
   response.json({ version: POLICY_VERSION });
 }));
 
