@@ -68,6 +68,7 @@ export async function createRoomServer(payload: {
   roomKind: string;
   isPrivate: boolean;
   name?: string;
+  maxPlayers?: number;
   groupInvites?: string[];
   userInvites?: string[];
 }): Promise<import('./social-api').PublicServerInfo> {

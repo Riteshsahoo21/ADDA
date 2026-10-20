@@ -46,6 +46,7 @@ import {
   X,
 } from 'lucide-react-native';
 import { colors } from '@/constants/theme';
+import { ReportUser } from '@/components/safety/ReportUser';
 import { socialApi, type ActiveGroupRoom, type ChatGroup, type GroupDetails, type GroupMember, type OwnProfile, type PublicProfile } from '@/lib/social-api';
 import { getRealtimeSocket, type ChatTarget, type TypingEvent } from '@/lib/realtime';
 import {
@@ -215,6 +216,7 @@ export default function ConversationScreen() {
 
   // WhatsApp selection mode & Reactions & In-chat Search & Emoji Picker
   const [selectedMessage, setSelectedMessage] = useState<LocalMessage | null>(null);
+  const [reportTarget, setReportTarget] = useState<{ userId: string; userName: string; kind: 'user' | 'message'; messageId?: string; evidenceText?: string } | null>(null);
   const [isSearching, setIsSearching] = useState(search === '1');
   const [searchQuery, setSearchQuery] = useState('');
   const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
@@ -234,6 +236,9 @@ export default function ConversationScreen() {
   } | null>(null);
   const [selectedRoomTheme, setSelectedRoomTheme] = useState<'beach' | 'tea' | 'loft' | 'roof'>('beach');
   const [creatingRoom, setCreatingRoom] = useState(false);
+
+  // Active Group Video/Audio Call
+  const [activeGroupCall, setActiveGroupCall] = useState<CallInfo | null>(null);
 
   const flatListRef = useRef<FlatList<LocalMessage>>(null);
 
@@ -351,6 +356,98 @@ export default function ConversationScreen() {
       live?.off('room:public_closed', onPublicClosed);
     };
   }, [kind, target?.id, checkActiveRoom]);
+
+  const checkActiveGroupCall = useCallback(async () => {
+    if (kind !== 'group' || !target?.id) return;
+    try {
+      const socket = await getRealtimeSocket();
+      socket.timeout(5000).emit('call:current', target, (err: Error | null, res?: { ok: boolean; value?: CallInfo | null }) => {
+        if (!err && res?.ok && res.value && res.value.joined.length > 0) {
+          setActiveGroupCall(res.value);
+        } else if (res?.ok && !res.value) {
+          setActiveGroupCall(null);
+        }
+      });
+    } catch {}
+  }, [kind, target?.id]);
+
+  useEffect(() => {
+    void checkActiveGroupCall();
+  }, [checkActiveGroupCall]);
+
+  useEffect(() => {
+    if (kind !== 'group' || !target?.id) return;
+    let live: any = null;
+
+    const onCallActive = (call: CallInfo) => {
+      if (call?.target?.kind === 'group' && call?.target?.id === target.id) {
+        setActiveGroupCall(call);
+      }
+    };
+
+    const onParticipantJoined = (data: { callId: string; userId: string; joined?: string[] }) => {
+      setActiveGroupCall(prev => {
+        if (!prev) return prev;
+        const newJoined = data.joined || [...new Set([...prev.joined, data.userId])];
+        return { ...prev, joined: newJoined };
+      });
+    };
+
+    const onParticipantLeft = (data: { callId: string; userId: string; joined?: string[] }) => {
+      setActiveGroupCall(prev => {
+        if (!prev) return null;
+        const newJoined = data.joined || prev.joined.filter(id => id !== data.userId);
+        if (newJoined.length === 0) return null;
+        return { ...prev, joined: newJoined };
+      });
+    };
+
+    const onCallEnded = (data: { callId: string; target?: { kind: string; id: string }; reason?: string }) => {
+      setActiveGroupCall(prev => {
+        if (!prev) return null;
+        if (prev.id === data.callId || (data.target && data.target.kind === 'group' && data.target.id === target.id)) {
+          return null;
+        }
+        return prev;
+      });
+    };
+
+    void getRealtimeSocket().then(sock => {
+      live = sock;
+      sock.on('call:active', onCallActive);
+      sock.on('call:invite', onCallActive);
+      sock.on('call:participant-joined', onParticipantJoined);
+      sock.on('call:participant-left', onParticipantLeft);
+      sock.on('call:ended', onCallEnded);
+    });
+
+    return () => {
+      live?.off('call:active', onCallActive);
+      live?.off('call:invite', onCallActive);
+      live?.off('call:participant-joined', onParticipantJoined);
+      live?.off('call:participant-left', onParticipantLeft);
+      live?.off('call:ended', onCallEnded);
+    };
+  }, [kind, target?.id]);
+
+  const formatGroupCallParticipants = useCallback((joinedIds: string[], callerId: string, callerName: string) => {
+    if (!joinedIds || joinedIds.length === 0) return '';
+    const getParticipantName = (id: string) => {
+      if (id === selfId) return 'You';
+      if (id === callerId && callerName) return callerName;
+      const found = groupMembers.find(m => m.id === id);
+      return found?.name || found?.username || 'Member';
+    };
+
+    const names = joinedIds.map(getParticipantName);
+    if (names.length === 1) {
+      return `${names[0]} is in the call`;
+    }
+    if (names.length === 2) {
+      return `${names[0]} and ${names[1]} are in the call`;
+    }
+    return `${names[0]}, ${names[1]} and ${names.length - 2} other${names.length - 2 > 1 ? 's' : ''} in call`;
+  }, [selfId, groupMembers]);
 
   const handleCreateGroupRoom = async (theme: 'beach' | 'tea' | 'loft' | 'roof') => {
     if (!target?.id || creatingRoom) return;
@@ -508,11 +605,12 @@ export default function ConversationScreen() {
 
   useFocusEffect(useCallback(() => {
     void load();
+    void checkActiveGroupCall();
     if (target) {
       void markChatRead(target);
       void getRealtimeSocket().then(live => live.emit('chat:drain_spool')).catch(() => {});
     }
-  }, [load, target]));
+  }, [load, target, checkActiveGroupCall]));
 
   useEffect(() => onChatChanged(() => {
     if (target) void localMessages(target).then(setMessages).catch(() => {});
@@ -742,6 +840,34 @@ export default function ConversationScreen() {
       return;
     }
     setSelectedMessage(item);
+  };
+
+  const blockUser = (userId: string, userName: string) => {
+    Alert.alert(`Block ${userName}?`, 'They will not be able to add, message, or call you directly. You can unblock them from Profile.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Block', style: 'destructive', onPress: async () => {
+        try {
+          await socialApi('/safety/blocks', 'POST', { userId });
+          setSelectedMessage(null); setShowMenu(false);
+          if (kind === 'direct') router.replace('/home');
+          else Alert.alert('User blocked', 'Direct contact from this user is now blocked.');
+        } catch (error) { Alert.alert('Could not block user', error instanceof Error ? error.message : 'Please try again.'); }
+      } },
+    ]);
+  };
+
+  const showSelectedSafety = () => {
+    const selected = selectedMessage;
+    if (!selected || selected.senderId === selfId) return;
+    Alert.alert(selected.senderName, 'Choose an action for this message.', [
+      { text: 'Report message', onPress: () => {
+        setReportTarget({ userId: selected.senderId, userName: selected.senderName, kind: 'message',
+          messageId: selected.id, evidenceText: selected.body.startsWith('__adda_') ? undefined : selected.body });
+        setSelectedMessage(null);
+      } },
+      { text: 'Block user', style: 'destructive', onPress: () => blockUser(selected.senderId, selected.senderName) },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   };
 
   const handleReact = async (msg: LocalMessage, emoji: string) => {
@@ -1050,7 +1176,7 @@ export default function ConversationScreen() {
             <Pressable onPress={handleDeleteSelected} style={styles.selectionBtn} accessibilityLabel="Delete">
               <Trash2 size={22} color="#FFFFFF" />
             </Pressable>
-            <Pressable onPress={() => setSelectedMessage(null)} style={styles.selectionBtn} accessibilityLabel="More options">
+            <Pressable onPress={showSelectedSafety} style={styles.selectionBtn} accessibilityLabel="Report or block sender">
               <MoreVertical size={22} color="#FFFFFF" />
             </Pressable>
           </View>
@@ -1153,11 +1279,19 @@ export default function ConversationScreen() {
             >
               <DoorOpen size={21} color={(activeGroupRoom || directRoomInvite) ? '#25D366' : colors.primary} />
             </Pressable>
-            <Pressable accessibilityLabel="Video call" onPress={() => void startCall('video')} style={styles.callAction}>
-              <Video size={22} color={colors.primary} />
+            <Pressable
+              accessibilityLabel="Video call"
+              onPress={() => void startCall('video')}
+              style={[styles.callAction, (kind === 'group' && activeGroupCall && activeGroupCall.joined.length > 0) && styles.callActionActiveRoom]}
+            >
+              <Video size={22} color={(kind === 'group' && activeGroupCall && activeGroupCall.joined.length > 0) ? '#25D366' : colors.primary} />
             </Pressable>
-            <Pressable accessibilityLabel="Voice call" onPress={() => void startCall('audio')} style={styles.callAction}>
-              <Phone size={20} color={colors.primary} />
+            <Pressable
+              accessibilityLabel="Voice call"
+              onPress={() => void startCall('audio')}
+              style={[styles.callAction, (kind === 'group' && activeGroupCall && activeGroupCall.joined.length > 0) && styles.callActionActiveRoom]}
+            >
+              <Phone size={20} color={(kind === 'group' && activeGroupCall && activeGroupCall.joined.length > 0) ? '#25D366' : colors.primary} />
             </Pressable>
             <Pressable
               accessibilityLabel="More options"
@@ -1167,6 +1301,51 @@ export default function ConversationScreen() {
               <MoreVertical size={20} color={colors.text} />
             </Pressable>
           </View>
+        </View>
+      )}
+
+      {/* Active Group Call Banner (WhatsApp Style) */}
+      {kind === 'group' && activeGroupCall && activeGroupCall.joined?.length > 0 && (
+        <View style={styles.activeCallBanner}>
+          <View style={styles.activeCallBannerLeft}>
+            <View style={styles.activeCallIconCircle}>
+              {activeGroupCall.media === 'video' ? (
+                <Video size={18} color="#25D366" />
+              ) : (
+                <Phone size={17} color="#25D366" />
+              )}
+            </View>
+            <View style={styles.activeCallTextContainer}>
+              <View style={styles.activeCallTitleRow}>
+                <View style={styles.activeCallPulseDot} />
+                <Text style={styles.activeCallTitle}>
+                  {activeGroupCall.media === 'video' ? 'Group Video Call' : 'Group Voice Call'}
+                </Text>
+              </View>
+              <Text style={styles.activeCallParticipants} numberOfLines={1}>
+                {formatGroupCallParticipants(activeGroupCall.joined, activeGroupCall.callerId, activeGroupCall.callerName)}
+              </Text>
+            </View>
+          </View>
+          <Pressable
+            accessibilityLabel="Join group call"
+            onPress={() => {
+              router.push({
+                pathname: '/call',
+                params: {
+                  callId: activeGroupCall.id,
+                  role: activeGroupCall.callerId === selfId ? 'caller' : 'callee',
+                  name: activeTitle,
+                  media: activeGroupCall.media,
+                },
+              } as unknown as Href);
+            }}
+            style={styles.activeCallJoinBtn}
+          >
+            <Text style={styles.activeCallJoinBtnText}>
+              {activeGroupCall.joined.includes(selfId) ? 'In Call' : 'Join'}
+            </Text>
+          </Pressable>
         </View>
       )}
 
@@ -1688,6 +1867,16 @@ export default function ConversationScreen() {
               </Pressable>
             )}
 
+            {kind === 'direct' && target && <>
+              <Pressable style={styles.menuItem} onPress={() => {
+                setShowMenu(false);
+                setReportTarget({ userId: target.id, userName: activeTitle, kind: 'user' });
+              }}><Text style={[styles.menuItemText, wallpaperTheme === 'dark' && styles.menuItemTextDark]}>Report contact</Text></Pressable>
+              <Pressable style={styles.menuItem} onPress={() => { setShowMenu(false); blockUser(target.id, activeTitle); }}>
+                <Text style={[styles.menuItemText, styles.menuItemTextDanger]}>Block contact</Text>
+              </Pressable>
+            </>}
+
             <Pressable
               style={styles.menuItem}
               onPress={() => {
@@ -1752,6 +1941,10 @@ export default function ConversationScreen() {
           </View>
         </Pressable>
       </Modal>
+
+      <ReportUser visible={!!reportTarget} userId={reportTarget?.userId || ''} userName={reportTarget?.userName || ''}
+        kind={reportTarget?.kind || 'user'} messageId={reportTarget?.messageId} evidenceText={reportTarget?.evidenceText}
+        onClose={() => setReportTarget(null)} />
 
       {viewerMedia && (
         <Modal visible={!!viewerMedia} transparent={false} animationType="fade" onRequestClose={() => { setViewerMedia(null); setShowMenu(false); }}>
@@ -1827,7 +2020,7 @@ function MediaMessage({
   onLongPress?: () => void;
 }) {
   const [uri, setUri] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const loadMedia = useCallback(() => {
@@ -1851,10 +2044,6 @@ function MediaMessage({
 
     return () => { active = false; };
   }, [media]);
-
-  useEffect(() => {
-    return loadMedia();
-  }, [loadMedia]);
 
   if (loading) {
     return (
@@ -2663,6 +2852,78 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: '#25D366',
     borderRadius: 18,
+  },
+  activeCallBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#0E291C',
+    borderBottomWidth: 1,
+    borderBottomColor: '#25D36630',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  activeCallBannerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 12,
+  },
+  activeCallIconCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#1B4732',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+    borderWidth: 1,
+    borderColor: '#25D36650',
+  },
+  activeCallTextContainer: {
+    flex: 1,
+  },
+  activeCallTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  activeCallPulseDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#25D366',
+  },
+  activeCallTitle: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  activeCallParticipants: {
+    color: '#86EFAC',
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  activeCallJoinBtn: {
+    backgroundColor: '#25D366',
+    paddingHorizontal: 18,
+    paddingVertical: 7,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#25D366',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  activeCallJoinBtnText: {
+    color: '#051B11',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.3,
   },
   scrim: {
     ...StyleSheet.absoluteFill,

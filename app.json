@@ -1,16 +1,23 @@
 {
   "expo": {
-    "name": "ADDA — Apna Virtual Hangout",
+    "name": "ADDA",
     "slug": "adda",
     "scheme": "adda",
     "version": "0.1.0",
+    "icon": "./assets/images/icon.png",
     "orientation": "default",
     "android": {
       "package": "com.adda.virtualhangout",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
       "versionCode": 1,
+      "usesCleartextTraffic": false,
       "predictiveBackGestureEnabled": false,
-      "usesCleartextTraffic": true,
       "permissions": [
+        "android.permission.POST_NOTIFICATIONS",
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.BLUETOOTH",
@@ -19,7 +26,16 @@
       ]
     },
     "plugins": [
+      "./plugins/with-play-signing",
       "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#F7FAF8",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 1
+        }
+      ],
       "expo-screen-orientation",
       "expo-secure-store",
       "expo-sqlite",

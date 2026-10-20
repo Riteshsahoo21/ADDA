@@ -2,14 +2,15 @@ import { BottomNav, type HubTab } from '@/components/ui/BottomNav';
 import { FriendQr } from '@/components/ui/FriendQr';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
-import { getCachedProfile, setCachedProfile } from '@/lib/encrypted-chat';
+import { deleteEncryptedChatAccountData, getCachedProfile, setCachedProfile } from '@/lib/encrypted-chat';
+import { API_BASE_URL } from '@/lib/auth-client';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
 import { getCachedSocialBundle, updateCachedProfile } from '@/lib/social-cache';
 import * as ImagePicker from 'expo-image-picker';
 import { router, useFocusEffect, type Href } from 'expo-router';
 import { Camera, Lock, QrCode, ScanLine } from 'lucide-react-native';
 import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 function getUsernameCooldown(changedAt?: string | null): { canChange: boolean; remainingDays: number; unlockDate: string | null } {
@@ -29,7 +30,7 @@ function getUsernameCooldown(changedAt?: string | null): { canChange: boolean; r
 }
 
 export default function ProfileScreen() {
-  const { username, login } = useSession();
+  const { username, login, logout } = useSession();
   const cachedBundle = getCachedSocialBundle(username);
   const isMatch = Boolean(
     cachedBundle?.me &&
@@ -53,6 +54,7 @@ export default function ProfileScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
+  const [blockedUsers, setBlockedUsers] = useState<{ id: string; name: string; username: string }[]>([]);
 
   // Track if user has modified input fields so background re-fetches never overwrite typed input
   const isDirtyRef = useRef(false);
@@ -77,6 +79,9 @@ export default function ProfileScreen() {
       if (!active) return;
       if (!initial) setError(cause instanceof Error ? cause.message : 'Could not load profile.');
     });
+    void socialApi<typeof blockedUsers>('/safety/blocks').then(value => {
+      if (active) setBlockedUsers(value);
+    }).catch(() => {});
 
     return () => { active = false; };
   }, [username]));
@@ -214,6 +219,26 @@ export default function ProfileScreen() {
   };
 
   const selectTab = (tab: HubTab) => { if (tab !== 'you') router.replace({ pathname: '/home', params: { tab } }); };
+  const deleteMyAccount = () => {
+    if (!profile || busy) return;
+    Alert.alert('Delete your ADDA account?',
+      'This permanently deletes your account, contacts, server data, and chat stored on this phone. Other people may still have messages you sent to them.', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete account', style: 'destructive', onPress: async () => {
+          const userId = profile.id;
+          setBusy(true);
+          try {
+            await socialApi('/me', 'DELETE', { confirm: 'DELETE' });
+            try { await deleteEncryptedChatAccountData(userId); }
+            catch (error) { console.warn('Could not clear local account files:', error); }
+            await logout();
+            router.replace('/login');
+          } catch (error) {
+            Alert.alert('Deletion failed', error instanceof Error ? error.message : 'Please try again.');
+          } finally { setBusy(false); }
+        } },
+      ]);
+  };
   if (!username) return null;
 
   return (
@@ -334,6 +359,24 @@ export default function ProfileScreen() {
             <Text style={styles.scanText}>Scan a friend’s QR</Text>
           </Pressable>
         </View>
+
+        <View style={styles.safetySection}>
+          <Text style={styles.qrTitle}>Safety and privacy</Text>
+          <Pressable onPress={() => void Linking.openURL(`${API_BASE_URL}/community-guidelines`)}><Text style={styles.safetyLink}>Community Guidelines</Text></Pressable>
+          <Pressable onPress={() => void Linking.openURL(`${API_BASE_URL}/terms`)}><Text style={styles.safetyLink}>Terms of Use</Text></Pressable>
+          <Pressable onPress={() => void Linking.openURL(`${API_BASE_URL}/privacy`)}><Text style={styles.safetyLink}>Privacy Policy</Text></Pressable>
+          <Text style={styles.safetyCaption}>Blocked users cannot add, message, or call you directly.</Text>
+          {blockedUsers.map(item => <View key={item.id} style={styles.blockRow}>
+            <Text style={styles.blockName}>@{item.username}</Text>
+            <Pressable onPress={() => {
+              void socialApi(`/safety/blocks/${encodeURIComponent(item.id)}`, 'DELETE').then(() =>
+                setBlockedUsers(current => current.filter(value => value.id !== item.id)));
+            }}><Text style={styles.safetyLink}>Unblock</Text></Pressable>
+          </View>)}
+          <Pressable accessibilityRole="button" onPress={deleteMyAccount} disabled={busy || !profile} style={styles.deleteButton}>
+            <Text style={styles.deleteText}>Delete account</Text>
+          </Pressable>
+        </View>
       </ScrollView>
       <BottomNav active="you" onSelect={selectTab} />
     </SafeAreaView>
@@ -377,4 +420,11 @@ const styles = StyleSheet.create({
   qrUsername: { color: colors.text, fontWeight: '700', marginTop: 12 },
   scanButton: { flexDirection: 'row', gap: 9, alignItems: 'center', marginTop: 21, backgroundColor: colors.primarySoft, paddingHorizontal: 17, paddingVertical: 13, borderRadius: 14 },
   scanText: { color: colors.primaryDark, fontWeight: '800' },
+  safetySection: { marginTop: 26, padding: 20, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, gap: 10 },
+  safetyLink: { color: colors.primaryDark, fontSize: 15, fontWeight: '700', paddingVertical: 3 },
+  safetyCaption: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 8 },
+  blockRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  blockName: { color: colors.text, fontSize: 14, fontWeight: '600' },
+  deleteButton: { paddingVertical: 15, marginTop: 16, borderRadius: 12, backgroundColor: colors.errorSoft, alignItems: 'center' },
+  deleteText: { color: colors.error, fontSize: 15, fontWeight: '800' },
 });

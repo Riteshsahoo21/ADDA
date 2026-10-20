@@ -10,9 +10,10 @@ import { router, type Href } from 'expo-router';
 import { AppState, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors } from '@/constants/theme';
 import * as Notifications from 'expo-notifications';
+import InCallManager from 'react-native-incall-manager';
 import { hasCallPushToken, registerCallNotifications, showSocketCallNotification, unregisterCallNotifications } from '@/lib/push-notifications';
-import { closeEncryptedChat, initEncryptedChat, receiveDirectEnvelope, handleMessageStatusUpdate, setCachedProfile, syncEncryptedChat, clearKeyCache, type Envelope } from '@/lib/encrypted-chat';
-import { clearSocialCache } from '@/lib/social-cache';
+import { closeEncryptedChat, initEncryptedChat, receiveDirectEnvelope, handleMessageStatusUpdate, setCachedProfile, getCachedProfile, syncEncryptedChat, clearKeyCache, type Envelope } from '@/lib/encrypted-chat';
+import { clearSocialCache, initSocialCache } from '@/lib/social-cache';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
 
 type Session = {
@@ -20,12 +21,13 @@ type Session = {
   isRestoring: boolean;
   avatarStyle: AvatarStyle;
   setAvatarStyle: (style: AvatarStyle) => void;
-  login: (username: string) => void;
+  login: (username: string, userId?: string) => void;
   logout: () => Promise<void>;
 };
 const SessionContext = createContext<Session | null>(null);
 
 const SAVED_USER_KEY = 'adda_current_username';
+const SAVED_USER_ID_KEY = 'adda_current_user_id';
 export let notificationNavigationOccurred = false;
 
 export function SessionProvider({ children }: PropsWithChildren) {
@@ -40,8 +42,14 @@ export function SessionProvider({ children }: PropsWithChildren) {
     void (async () => {
       try {
         const savedName = await SecureStore.getItemAsync(SAVED_USER_KEY);
+        const savedId = await SecureStore.getItemAsync(SAVED_USER_ID_KEY);
         const token = await authStorage.getAccessToken();
         if (savedName && token) {
+          // Immediately load user's disk cache into memory during boot!
+          const preloaded = await initSocialCache(savedId || savedName);
+          if (preloaded?.me) {
+            setCachedProfile(preloaded.me);
+          }
           setUsername(savedName);
         }
       } catch (e) {
@@ -66,9 +74,19 @@ export function SessionProvider({ children }: PropsWithChildren) {
     let onGroupUpdate: ((data: any) => void) | null = null;
     let onConnect: (() => void) | null = null;
     const sync = () => { void syncEncryptedChat().catch(error => console.warn('Encrypted chat sync unavailable:', error)); };
+
+    // Use cached profile if already loaded to init encrypted chat immediately!
+    const cachedMe = getCachedProfile();
+    if (cachedMe?.id) {
+      void initEncryptedChat(cachedMe.id).then(() => {
+        if (active) sync();
+      }).catch(() => {});
+    }
+
     void socialApi<OwnProfile>('/me').then(async me => {
       if (!active) return;
       setCachedProfile(me);
+      void SecureStore.setItemAsync(SAVED_USER_ID_KEY, me.id);
       await initEncryptedChat(me.id);
       if (!active) return;
       sync();
@@ -113,7 +131,15 @@ export function SessionProvider({ children }: PropsWithChildren) {
       setIncomingCall(call);
       void showSocketCallNotification(call).catch(error => console.warn('Call alert unavailable:', error));
     };
-    const onEnded = ({ callId }: { callId: string }) => setIncomingCall(current => current?.id === callId ? null : current);
+    const onEnded = ({ callId }: { callId: string }) => {
+      setIncomingCall(current => {
+        if (current?.id === callId) {
+          try { InCallManager.stopRingtone(); } catch {}
+          return null;
+        }
+        return current;
+      });
+    };
     const checkPending = () => {
       live?.timeout(5000).emit('call:pending', (error: Error | null, result?: { ok: boolean; value?: CallInfo[] }) => {
         if (!error && result?.ok && result.value?.length) {
@@ -133,6 +159,25 @@ export function SessionProvider({ children }: PropsWithChildren) {
     }).catch(() => {});
     return () => { active = false; live?.off('call:invite', onInvite); live?.off('call:ended', onEnded); live?.off('connect', checkPending); };
   }, [username]);
+
+  useEffect(() => {
+    if (incomingCall) {
+      try {
+        InCallManager.startRingtone('_DEFAULT_', [0, 500, 200, 500], 'default', 45);
+      } catch (err) {
+        console.warn('Could not start ringtone:', err);
+      }
+    } else {
+      try {
+        InCallManager.stopRingtone();
+      } catch {}
+    }
+    return () => {
+      try {
+        InCallManager.stopRingtone();
+      } catch {}
+    };
+  }, [incomingCall]);
 
   useEffect(() => {
     if (!username) return;
@@ -177,6 +222,14 @@ export function SessionProvider({ children }: PropsWithChildren) {
         return;
       }
       if (data?.kind !== 'call' || typeof data.callId !== 'string') return;
+      try { InCallManager.stopRingtone(); } catch {}
+      const actionIdentifier = response.actionIdentifier;
+      if (actionIdentifier === 'decline') {
+        void getRealtimeSocket().then(live => live.emit('call:decline', data.callId));
+        setIncomingCall(null);
+        void Notifications.clearLastNotificationResponseAsync();
+        return;
+      }
       if (data?.isOngoing) {
         void Notifications.clearLastNotificationResponseAsync();
         void Notifications.dismissNotificationAsync('adda_active_call_notification').catch(() => {});
@@ -224,18 +277,24 @@ export function SessionProvider({ children }: PropsWithChildren) {
   const answerCall = () => {
     const call = incomingCall;
     if (!call) return;
+    try { InCallManager.stopRingtone(); } catch {}
     openedNotificationCall.current = call.id;
     setIncomingCall(null);
     router.push({ pathname: '/call', params: { callId: call.id, role: 'callee', name: call.callerName, media: call.media } } as unknown as Href);
   };
   const declineCall = () => {
+    try { InCallManager.stopRingtone(); } catch {}
     if (incomingCall) void getRealtimeSocket().then(live => live.emit('call:decline', incomingCall.id));
     setIncomingCall(null);
   };
 
-  const login = (name: string) => {
+  const login = (name: string, userId?: string) => {
     setUsername(name);
     void SecureStore.setItemAsync(SAVED_USER_KEY, name);
+    if (userId) {
+      void SecureStore.setItemAsync(SAVED_USER_ID_KEY, userId);
+      void initSocialCache(userId);
+    }
   };
 
   const logout = async () => {
@@ -254,7 +313,8 @@ export function SessionProvider({ children }: PropsWithChildren) {
     } finally {
       await authStorage.clearTokens();
       await SecureStore.deleteItemAsync(SAVED_USER_KEY);
-      await clearSocialCache();
+      await SecureStore.deleteItemAsync(SAVED_USER_ID_KEY);
+      clearSocialCache();
       await closeEncryptedChat();
       disconnectRealtime();
       setUsername(null);

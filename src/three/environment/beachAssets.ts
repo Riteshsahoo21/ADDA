@@ -2,8 +2,8 @@ import { NativeTextureImage } from '../loaders/loadBundledGlb';
 
 export interface BeachAssetItem {
   id: number;
-  model: number;
-  texture: number;
+  model: string;
+  texture: string;
   images: NativeTextureImage[];
   name: string;
   size: number;
@@ -24,10 +24,10 @@ export const BEACH_ASSETS: BeachAssetItem[] = [
   // 1. Goa Beach Shack (Central Beachfront Bar & Restaurant)
   {
     id: 1,
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    model: require('../../../assets/runtime_models/beach-shack.glb'),
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    texture: require('../../../assets/textures/beach-shack.rgba'),
+
+    model: 'models/beach-shack.glb',
+
+    texture: 'textures/beach-shack.rgba',
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     images: require('../../../assets/textures/beach-shack.json'),
     name: 'Goa Beach Shack',
@@ -43,10 +43,10 @@ export const BEACH_ASSETS: BeachAssetItem[] = [
   // Real-life dock alignment: deck elevated above water at Y=0.42m, sturdy stilts planted 2.5m into seabed, 3.2m wide walkway.
   {
     id: 2,
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    model: require('../../../assets/runtime_models/beach-wooden-pier.glb'),
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    texture: require('../../../assets/textures/beach-wooden-pier.rgba'),
+
+    model: 'models/beach-wooden-pier.glb',
+
+    texture: 'textures/beach-wooden-pier.rgba',
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     images: require('../../../assets/textures/beach-wooden-pier.json'),
     name: 'Wooden Ocean Pier',
@@ -66,10 +66,10 @@ export const BEACH_ASSETS: BeachAssetItem[] = [
   // 3. Goan Fishing Boat (Moored in water beside the pier)
   {
     id: 3,
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    model: require('../../../assets/runtime_models/beach-fishing-boat.glb'),
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    texture: require('../../../assets/textures/beach-fishing-boat.rgba'),
+
+    model: 'models/beach-fishing-boat.glb',
+
+    texture: 'textures/beach-fishing-boat.rgba',
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     images: require('../../../assets/textures/beach-fishing-boat.json'),
     name: 'Goan Fishing Boat',
@@ -85,10 +85,10 @@ export const BEACH_ASSETS: BeachAssetItem[] = [
   // 4. Lifeguard Lookout Tower (East beach viewpoint)
   {
     id: 4,
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    model: require('../../../assets/runtime_models/beach-lifeguard-tower.glb'),
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    texture: require('../../../assets/textures/beach-lifeguard-tower.rgba'),
+
+    model: 'models/beach-lifeguard-tower.glb',
+
+    texture: 'textures/beach-lifeguard-tower.rgba',
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     images: require('../../../assets/textures/beach-lifeguard-tower.json'),
     name: 'Lifeguard Tower',
@@ -103,10 +103,10 @@ export const BEACH_ASSETS: BeachAssetItem[] = [
   // 5. Cutting Chai Tapri (Food Lane West)
   {
     id: 5,
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    model: require('../../../assets/runtime_models/beach-chai-tapri.glb'),
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    texture: require('../../../assets/textures/beach-chai-tapri.rgba'),
+
+    model: 'models/beach-chai-tapri.glb',
+
+    texture: 'textures/beach-chai-tapri.rgba',
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     images: require('../../../assets/textures/beach-chai-tapri.json'),
     name: 'Cutting Chai Tapri',
@@ -121,10 +121,10 @@ export const BEACH_ASSETS: BeachAssetItem[] = [
   // 6. Beach Maggi Stall (Food Lane East)
   {
     id: 6,
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    model: require('../../../assets/runtime_models/beach-maggi-stall.glb'),
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    texture: require('../../../assets/textures/beach-maggi-stall.rgba'),
+
+    model: 'models/beach-maggi-stall.glb',
+
+    texture: 'textures/beach-maggi-stall.rgba',
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     images: require('../../../assets/textures/beach-maggi-stall.json'),
     name: 'Beach Maggi Stall',
@@ -139,10 +139,10 @@ export const BEACH_ASSETS: BeachAssetItem[] = [
   // 7. Sunset Bonfire / Campfire (Beachfront seating ring)
   {
     id: 7,
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    model: require('../../../assets/runtime_models/beach-campfire.glb'),
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    texture: require('../../../assets/textures/beach-campfire.rgba'),
+
+    model: 'models/beach-campfire.glb',
+
+    texture: 'textures/beach-campfire.rgba',
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     images: require('../../../assets/textures/beach-campfire.json'),
     name: 'Sunset Campfire',
@@ -157,10 +157,10 @@ export const BEACH_ASSETS: BeachAssetItem[] = [
   // 8. Coastal Trail Signpost (Spawn orientation point)
   {
     id: 8,
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    model: require('../../../assets/runtime_models/beach-signpost.glb'),
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    texture: require('../../../assets/textures/beach-signpost.rgba'),
+
+    model: 'models/beach-signpost.glb',
+
+    texture: 'textures/beach-signpost.rgba',
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     images: require('../../../assets/textures/beach-signpost.json'),
     name: 'Coastal Signpost',
@@ -175,10 +175,10 @@ export const BEACH_ASSETS: BeachAssetItem[] = [
   // 9. Beach Sun Loungers (Ocean-facing relaxation)
   {
     id: 9,
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    model: require('../../../assets/runtime_models/beach-sun-lounger.glb'),
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    texture: require('../../../assets/textures/beach-sun-lounger.rgba'),
+
+    model: 'models/beach-sun-lounger.glb',
+
+    texture: 'textures/beach-sun-lounger.rgba',
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     images: require('../../../assets/textures/beach-sun-lounger.json'),
     name: 'Beach Sun Lounger',
@@ -198,10 +198,10 @@ export const BEACH_ASSETS: BeachAssetItem[] = [
   // 10. Striped Shade Umbrellas
   {
     id: 10,
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    model: require('../../../assets/runtime_models/beach-umbrella.glb'),
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    texture: require('../../../assets/textures/beach-umbrella.rgba'),
+
+    model: 'models/beach-umbrella.glb',
+
+    texture: 'textures/beach-umbrella.rgba',
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     images: require('../../../assets/textures/beach-umbrella.json'),
     name: 'Beach Umbrella',
@@ -221,10 +221,10 @@ export const BEACH_ASSETS: BeachAssetItem[] = [
   // 11. Coconut Palm Trees (Lush tropical backdrop along the back ridge)
   {
     id: 11,
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    model: require('../../../assets/runtime_models/beach-palm-tree.glb'),
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    texture: require('../../../assets/textures/beach-palm-tree.rgba'),
+
+    model: 'models/beach-palm-tree.glb',
+
+    texture: 'textures/beach-palm-tree.rgba',
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     images: require('../../../assets/textures/beach-palm-tree.json'),
     name: 'Coconut Palm Tree',

@@ -18,13 +18,25 @@ Notifications.setNotificationHandler({
 
 export function hasCallPushToken() { return !!currentToken; }
 
-export async function showSocketCallNotification(call: { id: string; callerName: string; media: string; target: { kind: string } }) {
+export async function showSocketCallNotification(call: { id: string; callerName: string; media: string; target: { kind: string; id?: string } }) {
   if (AppState.currentState === 'active' || hasCallPushToken()) return;
+  const isGroup = call.target.kind === 'group';
   await Notifications.scheduleNotificationAsync({
     content: {
-      title: `${call.callerName} is calling`,
-      body: `Incoming ${call.target.kind === 'group' ? 'group ' : ''}${call.media} call`,
-      data: { kind: 'call', callId: call.id, callerName: call.callerName, media: call.media, source: 'socket' },
+      title: isGroup ? `Group ${call.media} call` : `${call.callerName} is calling`,
+      body: isGroup ? `${call.callerName} started a group ${call.media} call` : `Incoming ${call.media} call`,
+      categoryIdentifier: 'incoming_call',
+      sound: 'default',
+      data: {
+        kind: 'call',
+        callId: call.id,
+        callerName: call.callerName,
+        media: call.media,
+        chatKind: call.target.kind,
+        chatId: call.target.id,
+        source: 'socket',
+        categoryId: 'incoming_call',
+      },
     },
     trigger: null,
   });
@@ -37,7 +49,32 @@ async function submitToken(token: string) {
   currentToken = token;
 }
 
+export async function setupCallNotificationCategories() {
+  try {
+    await Notifications.setNotificationCategoryAsync('incoming_call', [
+      {
+        identifier: 'answer',
+        buttonTitle: 'Answer',
+        options: {
+          opensAppToForeground: true,
+        },
+      },
+      {
+        identifier: 'decline',
+        buttonTitle: 'Decline',
+        options: {
+          isDestructive: true,
+          opensAppToForeground: false,
+        },
+      },
+    ]);
+  } catch (err) {
+    console.warn('[Push] Could not register call notification category:', err);
+  }
+}
+
 export async function registerCallNotifications() {
+  await setupCallNotificationCategories();
   if (Platform.OS !== 'android') return;
   await Notifications.setNotificationChannelAsync('adda_messages', {
     name: 'Messages', importance: Notifications.AndroidImportance.HIGH, sound: 'default',
@@ -51,8 +88,18 @@ export async function registerCallNotifications() {
   await Notifications.setNotificationChannelAsync('adda_calls', {
     name: 'Incoming calls',
     importance: Notifications.AndroidImportance.MAX,
-    vibrationPattern: [0, 300, 150, 300],
+    vibrationPattern: [0, 500, 200, 500, 200, 500],
     sound: 'default',
+    enableVibrate: true,
+    enableLights: true,
+    lightColor: '#25D366',
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+    bypassDnd: true,
+    audioAttributes: {
+      usage: Notifications.AndroidAudioUsage.NOTIFICATION_RINGTONE,
+      contentType: Notifications.AndroidAudioContentType.SONIFICATION,
+      flags: { enforceAudibility: true, requestHardwareAudioVideoSynchronization: false },
+    },
   });
   const permission = await Notifications.getPermissionsAsync();
   const status = permission.granted ? permission : await Notifications.requestPermissionsAsync();

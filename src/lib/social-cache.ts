@@ -9,19 +9,22 @@ function sanitizeId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
-function getCacheFilePath(userId: string): string {
-  return `${FileSystem.documentDirectory || ''}adda_social_bundle_${sanitizeId(userId)}.json`;
+function getCacheFilePath(key: string): string {
+  return `${FileSystem.documentDirectory || ''}adda_social_bundle_${sanitizeId(key)}.json`;
 }
 
 const LEGACY_CACHE_FILE = `${FileSystem.documentDirectory || ''}adda_social_bundle_v1.json`;
 
+/**
+ * Strict identity check: matches ONLY against unique userId or unique username.
+ * Never matches against display name to ensure 100% multi-account isolation.
+ */
 function userMatches(bundle: SocialBundle, expectedUser: string): boolean {
-  if (!bundle.me) return false;
+  if (!bundle?.me) return false;
   const exp = expectedUser.toLowerCase().trim();
   const id = bundle.me.id?.toLowerCase().trim();
   const username = bundle.me.username?.toLowerCase().trim();
-  const name = bundle.me.name?.toLowerCase().trim();
-  return id === exp || username === exp || name === exp;
+  return Boolean((id && id === exp) || (username && username === exp));
 }
 
 export function getCachedSocialBundle(expectedUser?: string | null): SocialBundle | null {
@@ -60,6 +63,7 @@ export async function initSocialCache(expectedUser?: string | null): Promise<Soc
 
       if (!expectedUser) return null;
 
+      // Check user-scoped cache file on disk
       const cacheFile = getCacheFilePath(expectedUser);
       const info = await FileSystem.getInfoAsync(cacheFile);
       if (!info.exists) return null;
@@ -90,7 +94,7 @@ export function setCachedSocialBundle(bundle: SocialBundle): void {
   memoryCache = bundle;
   setCachedProfile(bundle.me);
 
-  // Write asynchronously to user-scoped cache file on disk
+  // Write asynchronously to user-scoped cache files on disk (both unique ID and unique username)
   if (FileSystem.documentDirectory && bundle.me?.id) {
     const userFile = getCacheFilePath(bundle.me.id);
     void FileSystem.writeAsStringAsync(userFile, JSON.stringify(bundle)).catch(() => {});
@@ -152,22 +156,12 @@ function persistCurrentMemoryCache(): void {
   }
 }
 
-export async function clearSocialCache(): Promise<void> {
-  const previousId = memoryCache?.me?.id;
-  const previousUsername = memoryCache?.me?.username;
+/**
+ * Clear in-memory caches upon logout so another account on the same phone
+ * cannot see the logged-out user's profile, chats, or groups.
+ */
+export function clearSocialCache(): void {
   memoryCache = null;
   loadPromise = null;
   clearCachedProfile();
-
-  try {
-    if (FileSystem.documentDirectory) {
-      if (previousId) {
-        await FileSystem.deleteAsync(getCacheFilePath(previousId), { idempotent: true }).catch(() => {});
-      }
-      if (previousUsername) {
-        await FileSystem.deleteAsync(getCacheFilePath(previousUsername), { idempotent: true }).catch(() => {});
-      }
-      await FileSystem.deleteAsync(LEGACY_CACHE_FILE, { idempotent: true }).catch(() => {});
-    }
-  } catch {}
 }

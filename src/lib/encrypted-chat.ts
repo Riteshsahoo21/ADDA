@@ -135,6 +135,7 @@ export type ChatPreview = {
   senderName: string;
   body: string;
   createdAt: string;
+  unreadCount?: number;
 };
 
 export function formatChatPreview(
@@ -337,6 +338,29 @@ export async function closeEncryptedChat() {
   active = null;
 }
 
+export async function deleteEncryptedChatAccountData(userId: string): Promise<void> {
+  if (initializing) await initializing.catch(() => {});
+  const dbName = `adda-v2-${userId}.db`;
+  const database = active?.userId === userId ? active.db : await SQLite.openDatabaseAsync(dbName);
+  try {
+    const rows = await database.getAllAsync<{ body: string }>('SELECT body FROM message');
+    for (const row of rows) {
+      const media = mediaFromBody(row.body);
+      if (!media) continue;
+      const file = new File(Paths.document, `adda-media-${media.mediaId}.enc`);
+      if (file.exists) file.delete();
+    }
+  } catch { /* A fresh account may not have a local message table. */ }
+  await database.closeAsync();
+  if (active?.userId === userId) active = null;
+  clearDecryptedMediaCache();
+  await SQLite.deleteDatabaseAsync(dbName);
+  await Promise.all([
+    SecureStore.deleteItemAsync(`adda_chat_secret_${userId}`),
+    SecureStore.deleteItemAsync(`adda_chat_device_${userId}`),
+  ]);
+}
+
 function identity(): Identity {
   if (!active) throw new Error('Encrypted chat is not ready.');
   return active;
@@ -384,17 +408,31 @@ export async function localMessages(target: ChatTarget): Promise<LocalMessage[]>
 
 export async function localPreviews(): Promise<ChatPreview[]> {
   if (!active || !active.db) return [];
+  const me = active;
   try {
-    return await active.db.getAllAsync<ChatPreview>(
-      `SELECT m.kind, m.targetId, m.senderId, m.senderName, m.body, m.createdAt
+    const rows = await active.db.getAllAsync<any>(
+      `SELECT m.kind, m.targetId, m.senderId, m.senderName, m.body, m.createdAt,
+              COALESCE((
+                SELECT COUNT(*) FROM message u
+                WHERE u.kind = m.kind
+                  AND u.targetId = m.targetId
+                  AND u.senderId <> ?
+                  AND u.status <> 'read'
+                  AND u.body <> '__adda_deleted__'
+              ), 0) AS unreadCount
        FROM message m
        WHERE m.id = (
          COALESCE(
            (SELECT m2.id FROM message m2 WHERE m2.kind = m.kind AND m2.targetId = m.targetId AND m2.body <> '__adda_deleted__' ORDER BY m2.createdAt DESC, m2.id DESC LIMIT 1),
            (SELECT m3.id FROM message m3 WHERE m3.kind = m.kind AND m3.targetId = m.targetId ORDER BY m3.createdAt DESC, m3.id DESC LIMIT 1)
          )
-       )`
+       )`,
+      me.userId
     );
+    return rows.map(r => ({
+      ...r,
+      unreadCount: Number(r.unreadCount || 0)
+    }));
   } catch {
     return [];
   }
@@ -526,7 +564,6 @@ async function sendEncryptedContent(
       nonce: bytesToBase64(nonce),
       keys,
       mediaId: attachedMediaId,
-      previewText,
       mentions: effectiveMentions && effectiveMentions.length > 0 ? effectiveMentions : undefined
     }, async (ack: any) => {
       if (ack?.ok) {
@@ -568,12 +605,8 @@ export async function sendEncryptedMedia(
     socialApi<KeyList>(`/chat/keys/${target.kind}/${encodeURIComponent(target.id)}`)
   ]);
 
-  encryptedMediaFile(upload.mediaId).write(encrypted);
-
-  // Cache decrypted file immediately so sender sees preview with zero delay
-  const decryptedCache = new File(Paths.cache, `adda-media-${upload.mediaId}.${mediaKind === 'image' ? 'jpg' : 'mp4'}`);
-  decryptedCache.write(sourceBytes);
-
+  // The original picker file is already local; the server holds the encrypted
+  // copy. Avoid keeping two more 25 MB copies after the upload finishes.
   const encryptedFile = new File(Paths.cache, `adda-encrypted-upload-${upload.mediaId}`);
   encryptedFile.write(encrypted);
   try {
@@ -619,7 +652,12 @@ export async function openEncryptedMedia(media: EncryptedMedia): Promise<string>
 function encryptedMediaFile(mediaId: string) { return new File(Paths.document, `adda-media-${mediaId}.enc`); }
 export function releaseDecryptedMedia(_uri: string) {}
 
-function clearDecryptedMediaCache() {
+export function decryptedMediaCacheBytes(): number {
+  return Paths.cache.list().reduce((total, item) =>
+    item instanceof File && item.name.startsWith('adda-media-') ? total + item.size : total, 0);
+}
+
+export function clearDecryptedMediaCache() {
   for (const item of Paths.cache.list()) {
     if (item instanceof File && item.name.startsWith('adda-media-') && item.exists) item.delete();
   }
@@ -627,20 +665,15 @@ function clearDecryptedMediaCache() {
 
 async function saveEncryptedMedia(media: EncryptedMedia) {
   const destination = encryptedMediaFile(media.mediaId);
-  const decryptedCache = new File(Paths.cache, `adda-media-${media.mediaId}.${media.mediaKind === 'image' ? 'jpg' : 'mp4'}`);
   if (destination.exists) {
     const existing = nacl.secretbox.open(await destination.bytes(), base64ToBytes(media.nonce), base64ToBytes(media.key));
-    if (existing) {
-      if (!decryptedCache.exists || decryptedCache.size === 0) decryptedCache.write(existing);
-      return;
-    }
+    if (existing) return;
     destination.delete();
   }
   const { url } = await socialApi<{ url: string }>(`/chat/media/${encodeURIComponent(media.mediaId)}/download`);
   await File.downloadFileAsync(url, destination, { idempotent: true });
   const verified = nacl.secretbox.open(await destination.bytes(), base64ToBytes(media.nonce), base64ToBytes(media.key));
   if (!verified) { destination.delete(); throw new Error('Could not verify encrypted media.'); }
-  decryptedCache.write(verified);
 }
 
 // ========================================================

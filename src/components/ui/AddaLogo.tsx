@@ -1,19 +1,29 @@
 import { StyleSheet, Text, View } from 'react-native';
+import Svg, { Path } from 'react-native-svg';
 import { colors } from '@/constants/theme';
+import {
+  LETTERS_PATH,
+  RAYS_PATH,
+  WORDMARK_HEIGHT,
+  WORDMARK_VIEWBOX,
+  WORDMARK_WIDTH,
+} from './wordmark-paths';
 
-type Props = { compact?: boolean; centered?: boolean };
+type Props = { compact?: boolean; centered?: boolean; header?: boolean; showTagline?: boolean };
 
-export function AddaLogo({ compact = false, centered = false }: Props) {
-  const size = compact ? 66 : 104;
+export function AddaLogo({ compact = false, centered = false, header = false, showTagline = false }: Props) {
+  const width = header ? 122 : compact ? 220 : 284;
+  const height = (width * WORDMARK_HEIGHT) / WORDMARK_WIDTH;
   return (
-    <View accessible accessibilityLabel="ADDA" style={[styles.lockup, centered && styles.centered]}>
-      <View style={[styles.mark, { width: size, height: size, borderRadius: size * 0.3 }]}>
-        <Text style={[styles.markLetter, { fontSize: size * 0.57, lineHeight: size * 0.76 }]}>अ</Text>
-        <View style={styles.markDot} />
-      </View>
-      <Text style={[styles.wordmark, compact && styles.compactWordmark]}>
-        ADDA<Text style={styles.wordmarkDot}>.</Text>
-      </Text>
+    <View accessible accessibilityLabel={showTagline ? 'ADDA. Milte hain ADDA pe.' : 'ADDA'}
+      style={[styles.lockup, centered && styles.centered]}>
+      <Svg width={width} height={height} viewBox={WORDMARK_VIEWBOX} fill="none" accessibilityElementsHidden>
+        {/* Radiating Spark Rays (Warm Golden Amber) */}
+        <Path d={RAYS_PATH} fill={colors.amber} fillRule="evenodd" />
+        {/* Stylized ADDA Wordmark (Deep Forest Pine Green) */}
+        <Path d={LETTERS_PATH} fill={colors.primaryDark} fillRule="evenodd" />
+      </Svg>
+      {showTagline && <Text style={styles.tagline}>Milte hain ADDA pe.</Text>}
     </View>
   );
 }
@@ -21,14 +31,5 @@ export function AddaLogo({ compact = false, centered = false }: Props) {
 const styles = StyleSheet.create({
   lockup: { alignItems: 'flex-start' },
   centered: { alignItems: 'center' },
-  mark: {
-    alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primary,
-    shadowColor: colors.primaryDark, shadowOpacity: 0.14, shadowRadius: 18,
-    shadowOffset: { width: 0, height: 7 }, elevation: 5,
-  },
-  markLetter: { color: '#FFFFFF', fontWeight: '900', textAlign: 'center', includeFontPadding: false },
-  markDot: { position: 'absolute', width: 9, height: 9, borderRadius: 5, backgroundColor: colors.amber, right: 13, top: 13 },
-  wordmark: { color: colors.text, fontSize: 64, fontWeight: '900', letterSpacing: -3.5, marginTop: 20 },
-  compactWordmark: { fontSize: 51, letterSpacing: -3, marginTop: 20 },
-  wordmarkDot: { color: colors.amber },
+  tagline: { color: colors.primaryDark, fontSize: 14, fontWeight: '700', letterSpacing: 0.2, marginTop: 7 },
 });

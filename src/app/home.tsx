@@ -3,9 +3,10 @@ import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform,
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
-import { Check, CirclePlus, Compass, DoorOpen, EllipsisVertical, Globe, Lock, MessageCircle, Phone, Plus, QrCode, RefreshCw, Search, Shield, Sparkles, UserPlus, UsersRound, Video, X } from 'lucide-react-native';
+import { Check, CirclePlus, Compass, DoorOpen, EllipsisVertical, Globe, Lock, MessageCircle, MessageSquare, Minus, Phone, Plus, QrCode, RefreshCw, Search, Shield, Sparkles, UserPlus, Users, UsersRound, Video, X } from 'lucide-react-native';
 import { BottomNav, type HubTab } from '@/components/ui/BottomNav';
 import { colors } from '@/constants/theme';
+import { AddaLogo } from '@/components/ui/AddaLogo';
 import { useSession } from '@/context/session';
 import { socialApi, type ActiveGroupRoom, type ChatGroup, type FriendRequest, type HangoutUpdatesResponse, type OwnProfile, type PublicProfile, type PublicServerInfo, type RoomInvitation, type SocialBundle } from '@/lib/social-api';
 import { getRealtimeSocket, type TypingEvent } from '@/lib/realtime';
@@ -15,6 +16,7 @@ import { type AvatarBody, AVATAR_NAMES, AVATAR_TAGLINES } from '@/three/player/a
 import { initEncryptedChat, localPreviews, onChatChanged, previewBody, formatChatPreview, setCachedProfile, getCachedProfile, sendEncryptedMessage, type RoomCardPayload } from '@/lib/encrypted-chat';
 import { getCachedSocialBundle, initSocialCache, setCachedSocialBundle, updateCachedContacts, updateCachedGroups, updateCachedFriendRequests } from '@/lib/social-cache';
 import { createRoomServer, fetchPublicRooms } from '@/lib/rooms';
+import * as SecureStore from 'expo-secure-store';
 
 const avatars: { body: AvatarBody; label: string; tagline: string }[] = [
   { body: 'man', label: AVATAR_NAMES.man, tagline: AVATAR_TAGLINES.man },
@@ -41,17 +43,19 @@ export default function HomeScreen() {
   const params = useLocalSearchParams<{ tab?: string }>();
   const [tab, setTab] = useState<HubTab>(params.tab === 'rooms' || params.tab === 'updates' || params.tab === 'calls' ? params.tab : 'chats');
   
-  // 1. INSTANT FRAME 0 INITIALIZATION FROM IN-MEMORY / DISK CACHE (STRICTLY VALIDATED AGAINST USERNAME)
+  // 1. INSTANT FRAME 0 INITIALIZATION FROM IN-MEMORY / DISK CACHE (STRICTLY VALIDATED AGAINST USER)
   const rawCache = getCachedSocialBundle(username);
   const isMatch = Boolean(rawCache?.me && username && (
     rawCache.me.username?.toLowerCase().trim() === username.toLowerCase().trim() ||
-    rawCache.me.name?.toLowerCase().trim() === username.toLowerCase().trim()
+    rawCache.me.name?.toLowerCase().trim() === username.toLowerCase().trim() ||
+    rawCache.me.id === username
   ));
   const initialCache = isMatch ? rawCache : null;
   const rawProfile = getCachedProfile();
   const profileMatches = Boolean(rawProfile && username && (
     rawProfile.username?.toLowerCase().trim() === username.toLowerCase().trim() ||
-    rawProfile.name?.toLowerCase().trim() === username.toLowerCase().trim()
+    rawProfile.name?.toLowerCase().trim() === username.toLowerCase().trim() ||
+    rawProfile.id === username
   ));
   const initialProfile = isMatch ? rawCache?.me : (profileMatches ? rawProfile : null);
 
@@ -72,10 +76,18 @@ export default function HomeScreen() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [isPrivateServer, setIsPrivateServer] = useState(false);
   const [customServerName, setCustomServerName] = useState('');
+  const [serverMaxPlayers, setServerMaxPlayers] = useState<number>(10);
   const [selectedGroupInvites, setSelectedGroupInvites] = useState<string[]>([]);
   const [selectedContactInvites, setSelectedContactInvites] = useState<string[]>([]);
   const [creatingServer, setCreatingServer] = useState(false);
   const [sheet, setSheet] = useState<Sheet>(null);
+  const [avatarPreview, setAvatarPreview] = useState<{
+    kind: 'direct' | 'group';
+    id: string;
+    name: string;
+    avatarUrl?: string | null;
+    detail?: string;
+  } | null>(null);
   const [newUsername, setNewUsername] = useState('');
   const [groupName, setGroupName] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -94,20 +106,25 @@ export default function HomeScreen() {
         const preview = byChat.get(`direct:${item.id}`);
         return {
           ...item,
-          lastMessage: preview ? formatChatPreview(preview, profile?.id) : null,
-          lastAt: preview?.createdAt ?? null,
+          lastMessage: preview ? formatChatPreview(preview, profile?.id) : item.lastMessage,
+          lastAt: preview?.createdAt ?? item.lastAt,
+          unreadCount: preview?.unreadCount ?? item.unreadCount ?? 0,
         };
       }));
       setGroups(current => current.map(item => {
         const preview = byChat.get(`group:${item.id}`);
         return {
           ...item,
-          lastMessage: preview ? formatChatPreview(preview, profile?.id) : null,
-          lastAt: preview?.createdAt ?? null,
+          lastMessage: preview ? formatChatPreview(preview, profile?.id) : item.lastMessage,
+          lastAt: preview?.createdAt ?? item.lastAt,
+          unreadCount: preview?.unreadCount ?? item.unreadCount ?? 0,
         };
       }));
     } catch { /* Chat storage may still be starting. */ }
   }, [profile?.id]);
+  useEffect(() => {
+    void updateLocalPreviews();
+  }, [updateLocalPreviews]);
   useEffect(() => onChatChanged(() => { void updateLocalPreviews(); }), [updateLocalPreviews]);
 
   useEffect(() => { void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP); }, []);
@@ -118,7 +135,8 @@ export default function HomeScreen() {
     void initSocialCache(username).then(disk => {
       if (disk && username && (
         disk.me.username?.toLowerCase().trim() === username.toLowerCase().trim() ||
-        disk.me.name?.toLowerCase().trim() === username.toLowerCase().trim()
+        disk.me.name?.toLowerCase().trim() === username.toLowerCase().trim() ||
+        disk.me.id?.toLowerCase().trim() === username.toLowerCase().trim()
       )) {
         setProfile(curr => curr || disk.me);
         setContacts(curr => curr.length ? curr : disk.contacts);
@@ -126,9 +144,10 @@ export default function HomeScreen() {
         setPeople(curr => curr.length ? curr : disk.people);
         setFriendRequests(curr => curr.length ? curr : disk.friendRequests);
         setLoading(false);
+        void updateLocalPreviews();
       }
     });
-  }, [username]);
+  }, [username, updateLocalPreviews]);
 
   const refresh = useCallback(async () => {
     if (!username || refreshingRef.current) return;
@@ -147,6 +166,11 @@ export default function HomeScreen() {
         bundle = { me, contacts: friends, people: [], groups: joined, friendRequests: requests };
       }
 
+      if (bundle.me.requiredPolicyVersion && bundle.me.policyVersion !== bundle.me.requiredPolicyVersion) {
+        router.replace('/policies' as Href);
+        return;
+      }
+
       void initEncryptedChat(bundle.me.id);
       const previews = await localPreviews().catch(() => []);
       const byChat = new Map(previews.map(item => [`${item.kind}:${item.targetId}`, item]));
@@ -157,6 +181,7 @@ export default function HomeScreen() {
           ...item,
           lastMessage: preview ? formatChatPreview(preview, bundle.me.id) : null,
           lastAt: preview?.createdAt ?? null,
+          unreadCount: preview?.unreadCount ?? 0,
         };
       });
 
@@ -166,6 +191,7 @@ export default function HomeScreen() {
           ...item,
           lastMessage: preview ? formatChatPreview(preview, bundle.me.id) : null,
           lastAt: preview?.createdAt ?? null,
+          unreadCount: preview?.unreadCount ?? 0,
         };
       });
 
@@ -176,6 +202,10 @@ export default function HomeScreen() {
       setGroups(enrichedGroups);
       setFriendRequests(bundle.friendRequests);
       setError('');
+
+      if (bundle.me?.id) {
+        void SecureStore.setItemAsync('adda_current_user_id', bundle.me.id);
+      }
 
       setCachedSocialBundle({
         me: bundle.me,
@@ -244,9 +274,10 @@ export default function HomeScreen() {
       setProfile(raw);
     }
     void refresh();
+    void updateLocalPreviews();
     void refreshHangouts();
     void loadPublicRooms();
-  }, [refresh, refreshHangouts, loadPublicRooms, username]));
+  }, [refresh, updateLocalPreviews, refreshHangouts, loadPublicRooms, username]));
 
   const refreshSocial = useCallback(async () => {
     try {
@@ -309,7 +340,21 @@ export default function HomeScreen() {
       }
 
       if (payload?.type === 'request_responded' && payload.requestId) {
-        setFriendRequests(curr => curr.filter(r => r.id !== payload.requestId));
+        const isUserSender = payload.request?.senderId === profile?.id || payload.senderContact?.id === profile?.id;
+        if (payload.decision === 'accept' && isUserSender && payload.request) {
+          const acceptedReq: FriendRequest = {
+            ...payload.request,
+            status: 'accepted',
+          };
+          setFriendRequests(curr => {
+            const exists = curr.some(r => r.id === acceptedReq.id);
+            if (exists) return curr.map(r => r.id === acceptedReq.id ? acceptedReq : r);
+            return [acceptedReq, ...curr];
+          });
+        } else {
+          setFriendRequests(curr => curr.filter(r => r.id !== payload.requestId));
+        }
+
         const newContact = payload.decision === 'accept'
           ? (payload.senderContact?.id === profile?.id ? payload.recipientContact : payload.senderContact)
           : null;
@@ -509,13 +554,41 @@ export default function HomeScreen() {
       setError(cause instanceof Error ? cause.message : 'Could not respond to request.');
     }
   };
+  const dismissAcceptedRequest = async (id: string) => {
+    const target = friendRequests.find(item => item.id === id);
+    setFriendRequests(curr => curr.filter(item => item.id !== id));
+    try {
+      await socialApi(`/friend-requests/${encodeURIComponent(id)}/dismiss`, 'POST');
+    } catch {
+      if (target) setFriendRequests(curr => [target, ...curr]);
+    }
+  };
+
   const handleLogout = async () => { setSheet(null); await logout(); router.replace('/login'); };
   const selectTab = (next: HubTab) => { if (next === 'you') router.push('/profile' as Href); else setTab(next); };
+
+  const handleOpenAvatarModal = (item: {
+    kind: 'direct' | 'group';
+    id: string;
+    name: string;
+    avatarUrl?: string | null;
+    detail?: string;
+  }) => {
+    setAvatarPreview(item);
+  };
+
+  const totalChatUnread = useMemo(() => {
+    let sum = 0;
+    for (const c of contacts) sum += (c.unreadCount || 0);
+    for (const g of groups) sum += (g.unreadCount || 0);
+    return sum;
+  }, [contacts, groups]);
 
   const handleOpenCreateModal = (theme?: RoomKind) => {
     if (theme) setSelectedTheme(theme);
     setIsPrivateServer(false);
     setCustomServerName('');
+    setServerMaxPlayers(10);
     setSelectedGroupInvites([]);
     setSelectedContactInvites([]);
     setCreateModalOpen(true);
@@ -529,6 +602,7 @@ export default function HomeScreen() {
         roomKind: selectedTheme,
         isPrivate: isPrivateServer,
         name: customServerName.trim() || undefined,
+        maxPlayers: serverMaxPlayers,
         groupInvites: selectedGroupInvites.length > 0 ? selectedGroupInvites : undefined,
         userInvites: selectedContactInvites.length > 0 ? selectedContactInvites : undefined,
       });
@@ -642,8 +716,8 @@ export default function HomeScreen() {
         )}
       </Pressable>
       <View style={styles.brandContainer}>
-        <Text style={styles.brand}>ADDA<Text style={styles.brandDot}>.</Text></Text>
-        <Text style={styles.subBrand}>{profile ? `@${profile.username}` : 'APNA VIRTUAL HANGOUT'}</Text>
+        <AddaLogo header />
+        <Text style={styles.subBrand}>{profile ? `@${profile.username}` : 'Milte hain ADDA pe.'}</Text>
       </View>
       <Pressable accessibilityLabel="More options" onPress={() => openSheet('menu')} style={styles.iconButton}><EllipsisVertical size={25} color={colors.text} /></Pressable>
     </View>
@@ -655,8 +729,45 @@ export default function HomeScreen() {
         {loading && <ActivityIndicator color={colors.primary} style={styles.loader} />}
         {!!error && <View style={styles.errorBox}><Text style={styles.errorText}>{error}</Text><Pressable onPress={() => { if (error.toLowerCase().includes('sign in')) void handleLogout(); else { setLoading(true); void refresh(); } }}><Text style={styles.retry}>{error.toLowerCase().includes('sign in') ? 'Sign in again' : 'Retry'}</Text></Pressable></View>}
         {!loading && !error && <>
-          {visibleGroups.length > 0 && <><Text style={styles.section}>Groups</Text>{visibleGroups.map((item) => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={item.lastMessage || `${item.memberCount} members`} time={item.lastAt} typingNames={Object.values(typing[`group:${item.id}`] ?? {})} group onPress={() => openConversation('group', item.id, item.name, item.avatarUrl)} />)}</>}
-          {visibleContacts.length > 0 && <><Text style={styles.section}>Contacts</Text>{visibleContacts.map((item) => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={item.lastMessage || `@${item.username}`} time={item.lastAt} typingNames={Object.values(typing[`direct:${item.id}`] ?? {})} onPress={() => openConversation('direct', item.id, item.name, item.avatarUrl)} />)}</>}
+          {visibleGroups.length > 0 && <><Text style={styles.section}>Groups</Text>{visibleGroups.map((item) => (
+            <PersonRow
+              key={item.id}
+              name={item.name}
+              avatarUrl={item.avatarUrl}
+              detail={item.lastMessage || `${item.memberCount} members`}
+              time={item.lastAt}
+              typingNames={Object.values(typing[`group:${item.id}`] ?? {})}
+              group
+              unreadCount={item.unreadCount || 0}
+              onPress={() => openConversation('group', item.id, item.name, item.avatarUrl)}
+              onAvatarPress={() => handleOpenAvatarModal({
+                kind: 'group',
+                id: item.id,
+                name: item.name,
+                avatarUrl: item.avatarUrl,
+                detail: `${item.memberCount} members`,
+              })}
+            />
+          ))}</>}
+          {visibleContacts.length > 0 && <><Text style={styles.section}>Contacts</Text>{visibleContacts.map((item) => (
+            <PersonRow
+              key={item.id}
+              name={item.name}
+              avatarUrl={item.avatarUrl}
+              detail={item.lastMessage || `@${item.username}`}
+              time={item.lastAt}
+              typingNames={Object.values(typing[`direct:${item.id}`] ?? {})}
+              unreadCount={item.unreadCount || 0}
+              onPress={() => openConversation('direct', item.id, item.name, item.avatarUrl)}
+              onAvatarPress={() => handleOpenAvatarModal({
+                kind: 'direct',
+                id: item.id,
+                name: item.name,
+                avatarUrl: item.avatarUrl,
+                detail: `@${item.username}`,
+              })}
+            />
+          ))}</>}
           {visibleGroups.length === 0 && visibleContacts.length === 0 && <View style={styles.empty}><MessageCircle size={34} color={colors.primary} /><Text style={styles.emptyTitle}>{search ? 'No matches' : 'Your chats start here'}</Text><Text style={styles.emptyCopy}>{search ? 'Try another name or username.' : 'Add a friend or create a group to get started.'}</Text></View>}
         </>}
       </>}
@@ -765,6 +876,8 @@ export default function HomeScreen() {
               <View style={{ gap: 12, marginBottom: 20 }}>
                 {publicRooms.map(server => {
                   const theme = THEMES.find(t => t.id === server.roomKind) || THEMES[0];
+                  const maxCap = server.maxPlayers || 10;
+                  const isFull = server.peerCount >= maxCap;
                   return (
                     <View key={server.id} style={styles.serverCard}>
                       <View style={styles.serverCardHeader}>
@@ -775,17 +888,20 @@ export default function HomeScreen() {
                           <Text style={styles.serverCardTitle} numberOfLines={1}>{server.name}</Text>
                           <Text style={styles.serverCardHost}>Hosted by {server.creatorName}</Text>
                         </View>
-                        <View style={styles.peerCountBadge}>
-                          <View style={styles.onlineDot} />
-                          <Text style={styles.peerCountText}>{server.peerCount} online</Text>
+                        <View style={[styles.peerCountBadge, isFull && { backgroundColor: '#FEE2E2' }]}>
+                          <View style={[styles.onlineDot, isFull && { backgroundColor: '#EF4444' }]} />
+                          <Text style={[styles.peerCountText, isFull && { color: '#B91C1C', fontWeight: '800' }]}>
+                            {server.peerCount}/{maxCap} {isFull ? 'FULL' : 'online'}
+                          </Text>
                         </View>
                       </View>
                       <Pressable
+                        disabled={isFull}
                         onPress={() => handleJoinServer(server)}
-                        style={styles.serverJoinButton}
+                        style={[styles.serverJoinButton, isFull && { backgroundColor: '#94A3B8', opacity: 0.85 }]}
                       >
                         <DoorOpen size={17} color="#FFFFFF" />
-                        <Text style={styles.serverJoinButtonText}>JOIN SERVER</Text>
+                        <Text style={styles.serverJoinButtonText}>{isFull ? 'SERVER FULL' : 'JOIN SERVER'}</Text>
                       </Pressable>
                     </View>
                   );
@@ -894,11 +1010,60 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* 3. FRIEND REQUESTS */}
-        {friendRequests.filter(item => item.recipientId === profile?.id).length > 0 && (
+        {/* 3. ACCEPTED FRIEND REQUESTS (NOTIFICATIONS FOR SENDER) */}
+        {friendRequests.filter(item => item.senderId === profile?.id && item.status === 'accepted').length > 0 && (
+          <View style={{ marginBottom: 16 }}>
+            <Text style={styles.section}>Friend Requests Accepted</Text>
+            {friendRequests.filter(item => item.senderId === profile?.id && item.status === 'accepted').map(item => (
+              <View key={item.id} style={[styles.requestCard, { borderColor: '#86EFAC', borderWidth: 1 }]}>
+                <View style={styles.requestHeaderRow}>
+                  {item.recipientAvatarUrl ? (
+                    <Image source={{ uri: item.recipientAvatarUrl }} style={styles.requestAvatarImg} />
+                  ) : (
+                    <View style={[styles.requestAvatarPlaceholder, { backgroundColor: '#DCFCE7' }]}>
+                      <Text style={[styles.requestAvatarInitial, { color: '#16A34A' }]}>{item.recipientName[0]?.toUpperCase()}</Text>
+                    </View>
+                  )}
+                  <View style={{ flex: 1 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Text style={styles.personName}>{item.recipientName}</Text>
+                      <View style={{ backgroundColor: '#DCFCE7', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+                        <Text style={{ fontSize: 10, fontWeight: '800', color: '#16A34A' }}>ACCEPTED</Text>
+                      </View>
+                    </View>
+                    <Text style={styles.personDetail}>@{item.recipientUsername} accepted your friend request</Text>
+                  </View>
+                </View>
+                <View style={styles.requestActions}>
+                  <Pressable
+                    onPress={() => {
+                      router.push({
+                        pathname: '/conversation',
+                        params: { kind: 'direct', id: item.recipientId, name: item.recipientName },
+                      } as unknown as Href);
+                    }}
+                    style={[styles.acceptButton, { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }]}
+                  >
+                    <MessageSquare size={16} color="#FFFFFF" />
+                    <Text style={styles.acceptText}>Say Hi</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => void dismissAcceptedRequest(item.id)}
+                    style={[styles.declineButton, { flex: 1, alignItems: 'center', justifyContent: 'center' }]}
+                  >
+                    <Text style={styles.declineText}>Dismiss</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ))}
+          </View>
+        )}
+
+        {/* 4. INCOMING FRIEND REQUESTS */}
+        {friendRequests.filter(item => item.recipientId === profile?.id && item.status !== 'accepted').length > 0 && (
           <View style={{ marginBottom: 16 }}>
             <Text style={styles.section}>Friend Requests</Text>
-            {friendRequests.filter(item => item.recipientId === profile?.id).map(item => (
+            {friendRequests.filter(item => item.recipientId === profile?.id && item.status !== 'accepted').map(item => (
               <View key={item.id} style={styles.requestCard}>
                 <View style={styles.requestHeaderRow}>
                   {item.senderAvatarUrl ? (
@@ -920,7 +1085,30 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {friendRequests.filter(item => item.senderId === profile?.id).map(item => <View key={item.id} style={styles.requestCard}><Text style={styles.personName}>{item.recipientName}</Text><Text style={styles.personDetail}>Request sent to @{item.recipientUsername}</Text></View>)}
+        {/* 5. SENT PENDING REQUESTS */}
+        {friendRequests.filter(item => item.senderId === profile?.id && item.status !== 'accepted').length > 0 && (
+          <View style={{ marginBottom: 16 }}>
+            <Text style={styles.section}>Sent Requests</Text>
+            {friendRequests.filter(item => item.senderId === profile?.id && item.status !== 'accepted').map(item => (
+              <View key={item.id} style={styles.requestCard}>
+                <View style={styles.requestHeaderRow}>
+                  {item.recipientAvatarUrl ? (
+                    <Image source={{ uri: item.recipientAvatarUrl }} style={styles.requestAvatarImg} />
+                  ) : (
+                    <View style={styles.requestAvatarPlaceholder}>
+                      <Text style={styles.requestAvatarInitial}>{item.recipientName[0]?.toUpperCase()}</Text>
+                    </View>
+                  )}
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.personName}>{item.recipientName}</Text>
+                    <Text style={styles.personDetail}>Request sent to @{item.recipientUsername} • Pending</Text>
+                  </View>
+                </View>
+              </View>
+            ))}
+          </View>
+        )}
+
         {friendRequests.length === 0 && activeHangouts.length === 0 && roomInvites.length === 0 && (
           <View style={styles.empty}>
             <Text style={styles.emptyTitle}>No updates right now</Text>
@@ -931,14 +1119,131 @@ export default function HomeScreen() {
       {tab === 'calls' && <>
         <Text style={styles.pageTitle}>Calls</Text><Text style={styles.pageCopy}>Start a voice or video call with your contacts or groups.</Text>
         {!!error && <Text style={styles.errorText}>{error}</Text>}
-        {groups.map(item => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={`${item.memberCount} members`} group action={<View style={styles.callActions}><Pressable disabled={busy} accessibilityLabel={`Voice call ${item.name}`} onPress={() => void startCall('group', item.id, item.name, 'audio')} style={styles.callSmall}><Phone size={19} color={colors.primary} /></Pressable><Pressable disabled={busy} accessibilityLabel={`Video call ${item.name}`} onPress={() => void startCall('group', item.id, item.name, 'video')} style={styles.callSmall}><Video size={20} color={colors.primary} /></Pressable></View>} />)}
-        {contacts.map(item => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={`@${item.username}`} action={<View style={styles.callActions}><Pressable disabled={busy} accessibilityLabel={`Voice call ${item.name}`} onPress={() => void startCall('direct', item.id, item.name, 'audio')} style={styles.callSmall}><Phone size={19} color={colors.primary} /></Pressable><Pressable disabled={busy} accessibilityLabel={`Video call ${item.name}`} onPress={() => void startCall('direct', item.id, item.name, 'video')} style={styles.callSmall}><Video size={20} color={colors.primary} /></Pressable></View>} />)}
+        {groups.map(item => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={`${item.memberCount} members`} group onAvatarPress={() => handleOpenAvatarModal({ kind: 'group', id: item.id, name: item.name, avatarUrl: item.avatarUrl, detail: `${item.memberCount} members` })} action={<View style={styles.callActions}><Pressable disabled={busy} accessibilityLabel={`Voice call ${item.name}`} onPress={() => void startCall('group', item.id, item.name, 'audio')} style={styles.callSmall}><Phone size={19} color={colors.primary} /></Pressable><Pressable disabled={busy} accessibilityLabel={`Video call ${item.name}`} onPress={() => void startCall('group', item.id, item.name, 'video')} style={styles.callSmall}><Video size={20} color={colors.primary} /></Pressable></View>} />)}
+        {contacts.map(item => <PersonRow key={item.id} name={item.name} avatarUrl={item.avatarUrl} detail={`@${item.username}`} onAvatarPress={() => handleOpenAvatarModal({ kind: 'direct', id: item.id, name: item.name, avatarUrl: item.avatarUrl, detail: `@${item.username}` })} action={<View style={styles.callActions}><Pressable disabled={busy} accessibilityLabel={`Voice call ${item.name}`} onPress={() => void startCall('direct', item.id, item.name, 'audio')} style={styles.callSmall}><Phone size={19} color={colors.primary} /></Pressable><Pressable disabled={busy} accessibilityLabel={`Video call ${item.name}`} onPress={() => void startCall('direct', item.id, item.name, 'video')} style={styles.callSmall}><Video size={20} color={colors.primary} /></Pressable></View>} />)}
         {groups.length === 0 && contacts.length === 0 && <View style={styles.empty}><Text style={styles.emptyTitle}>No one to call yet</Text><Text style={styles.emptyCopy}>Add a contact or create a group in Chats.</Text></View>}
       </>}
     </ScrollView>
 
     {tab === 'chats' && <Pressable accessibilityLabel="Add contact or group" onPress={() => openSheet('add')} style={styles.fab}><Plus size={30} strokeWidth={2.4} color="#FFFFFF" /></Pressable>}
-    <BottomNav active={tab} onSelect={selectTab} updateCount={friendRequests.filter(item => item.recipientId === profile?.id).length + roomInvites.length + activeHangouts.length} />
+    <BottomNav
+      active={tab}
+      onSelect={selectTab}
+      updateCount={
+        friendRequests.filter(item =>
+          (item.recipientId === profile?.id && item.status !== 'accepted') ||
+          (item.senderId === profile?.id && item.status === 'accepted')
+        ).length + roomInvites.length + activeHangouts.length
+      }
+      chatUnreadCount={totalChatUnread}
+    />
+
+    {/* WHATSAPP-STYLE AVATAR PREVIEW MODAL */}
+    <Modal
+      visible={avatarPreview !== null}
+      transparent
+      animationType="fade"
+      onRequestClose={() => setAvatarPreview(null)}
+    >
+      <Pressable style={styles.avatarModalOverlay} onPress={() => setAvatarPreview(null)}>
+        <Pressable style={styles.avatarModalCard} onPress={(e) => e.stopPropagation()}>
+          <View style={styles.avatarModalHeader}>
+            <View style={{ flex: 1, paddingRight: 8 }}>
+              <Text style={styles.avatarModalTitle} numberOfLines={1}>
+                {avatarPreview?.name}
+              </Text>
+              {!!avatarPreview?.detail && (
+                <Text style={styles.avatarModalSubtitle} numberOfLines={1}>
+                  {avatarPreview.detail}
+                </Text>
+              )}
+            </View>
+            <Pressable
+              onPress={() => setAvatarPreview(null)}
+              style={styles.avatarModalCloseBtn}
+              hitSlop={8}
+              accessibilityLabel="Close"
+            >
+              <X size={20} color={colors.text} />
+            </Pressable>
+          </View>
+
+          <View style={styles.avatarModalImageWrap}>
+            {avatarPreview?.avatarUrl ? (
+              <Image
+                source={{ uri: avatarPreview.avatarUrl }}
+                style={styles.avatarModalImage}
+                resizeMode="cover"
+              />
+            ) : avatarPreview?.kind === 'group' ? (
+              <View style={styles.avatarModalPlaceholder}>
+                <UsersRound size={88} color={colors.primaryDark} />
+              </View>
+            ) : (
+              <View style={styles.avatarModalPlaceholder}>
+                <Text style={styles.avatarModalInitial}>
+                  {avatarPreview?.name?.[0]?.toUpperCase() || 'U'}
+                </Text>
+              </View>
+            )}
+          </View>
+
+          <View style={styles.avatarModalActions}>
+            <Pressable
+              style={styles.avatarModalActionBtn}
+              onPress={() => {
+                if (!avatarPreview) return;
+                const p = avatarPreview;
+                setAvatarPreview(null);
+                openConversation(p.kind, p.id, p.name, p.avatarUrl);
+              }}
+              accessibilityLabel="Message"
+            >
+              <MessageCircle size={22} color="#25D366" />
+            </Pressable>
+
+            <Pressable
+              style={styles.avatarModalActionBtn}
+              onPress={() => {
+                if (!avatarPreview) return;
+                const p = avatarPreview;
+                setAvatarPreview(null);
+                void startCall(p.kind, p.id, p.name, 'audio');
+              }}
+              accessibilityLabel="Audio call"
+            >
+              <Phone size={21} color="#25D366" />
+            </Pressable>
+
+            <Pressable
+              style={styles.avatarModalActionBtn}
+              onPress={() => {
+                if (!avatarPreview) return;
+                const p = avatarPreview;
+                setAvatarPreview(null);
+                void startCall(p.kind, p.id, p.name, 'video');
+              }}
+              accessibilityLabel="Video call"
+            >
+              <Video size={22} color="#25D366" />
+            </Pressable>
+
+            <Pressable
+              style={styles.avatarModalActionBtn}
+              onPress={() => {
+                if (!avatarPreview) return;
+                const p = avatarPreview;
+                setAvatarPreview(null);
+                openConversation(p.kind, p.id, p.name, p.avatarUrl);
+              }}
+              accessibilityLabel="View chat"
+            >
+              <DoorOpen size={22} color="#25D366" />
+            </Pressable>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
 
     <Modal visible={sheet !== null} transparent animationType="fade" onRequestClose={() => setSheet(null)}>
       <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -1027,6 +1332,70 @@ export default function HomeScreen() {
               onChangeText={setCustomServerName}
               maxLength={50}
             />
+
+            {/* Player Capacity Selector (Max 10 cap) */}
+            <View style={{ marginBottom: 18 }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <Text style={styles.fieldLabel}>PLAYER CAPACITY</Text>
+                <Text style={styles.capacityCapText}>Max 10 Players</Text>
+              </View>
+
+              {/* Stepper Row */}
+              <View style={styles.capacityStepperRow}>
+                <Pressable
+                  disabled={serverMaxPlayers <= 2}
+                  onPress={() => setServerMaxPlayers(prev => Math.max(2, prev - 1))}
+                  style={[styles.stepperButton, serverMaxPlayers <= 2 && styles.stepperButtonDisabled]}
+                  accessibilityLabel="Decrease player capacity"
+                >
+                  <Minus size={18} color={serverMaxPlayers <= 2 ? colors.muted : colors.text} />
+                </Pressable>
+
+                <View style={styles.stepperDisplay}>
+                  <Users size={18} color={colors.primary} />
+                  <Text style={styles.stepperCountText}>{serverMaxPlayers}</Text>
+                  <Text style={styles.stepperUnitText}>Players</Text>
+                </View>
+
+                <Pressable
+                  disabled={serverMaxPlayers >= 10}
+                  onPress={() => setServerMaxPlayers(prev => Math.min(10, prev + 1))}
+                  style={[styles.stepperButton, serverMaxPlayers >= 10 && styles.stepperButtonDisabled]}
+                  accessibilityLabel="Increase player capacity"
+                >
+                  <Plus size={18} color={serverMaxPlayers >= 10 ? colors.muted : colors.text} />
+                </Pressable>
+              </View>
+
+              {/* Quick Presets */}
+              <View style={styles.presetsRow}>
+                {[
+                  { count: 2, label: '2 Duos' },
+                  { count: 4, label: '4 Squad' },
+                  { count: 6, label: '6 Party' },
+                  { count: 8, label: '8 Large' },
+                  { count: 10, label: '10 Max' },
+                ].map(preset => (
+                  <Pressable
+                    key={preset.count}
+                    onPress={() => setServerMaxPlayers(preset.count)}
+                    style={[
+                      styles.presetChip,
+                      serverMaxPlayers === preset.count && styles.presetChipActive,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.presetChipText,
+                        serverMaxPlayers === preset.count && styles.presetChipTextActive,
+                      ]}
+                    >
+                      {preset.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
 
             {/* Invite Groups & Contacts multi-selectors (Available for both public and private servers) */}
             <Text style={styles.fieldLabel}>INVITE GROUPS ({selectedGroupInvites.length} SELECTED)</Text>
@@ -1117,7 +1486,9 @@ function PersonRow({
   group,
   action,
   onPress,
-  typingNames = []
+  onAvatarPress,
+  typingNames = [],
+  unreadCount = 0,
 }: {
   name: string;
   detail: string;
@@ -1126,21 +1497,41 @@ function PersonRow({
   group?: boolean;
   action?: React.ReactNode;
   onPress?: () => void;
-  typingNames?: string[]
+  onAvatarPress?: () => void;
+  typingNames?: string[];
+  unreadCount?: number;
 }) {
+  const hasUnread = (unreadCount || 0) > 0;
+
+  const avatar = (
+    <View style={[styles.personAvatar, group && styles.groupAvatar]}>
+      {avatarUrl ? (
+        <Image source={{ uri: avatarUrl }} style={styles.rowAvatarImg} />
+      ) : group ? (
+        <UsersRound size={23} color={colors.primaryDark} />
+      ) : (
+        <Text style={styles.personInitial}>{name[0]?.toUpperCase()}</Text>
+      )}
+    </View>
+  );
+
   const content = (
     <>
-      <View style={[styles.personAvatar, group && styles.groupAvatar]}>
-        {avatarUrl ? (
-          <Image source={{ uri: avatarUrl }} style={styles.rowAvatarImg} />
-        ) : group ? (
-          <UsersRound size={23} color={colors.primaryDark} />
-        ) : (
-          <Text style={styles.personInitial}>{name[0]?.toUpperCase()}</Text>
-        )}
-      </View>
+      {onAvatarPress ? (
+        <Pressable
+          onPress={(e) => {
+            e.stopPropagation();
+            onAvatarPress();
+          }}
+          hitSlop={6}
+        >
+          {avatar}
+        </Pressable>
+      ) : (
+        avatar
+      )}
       <View style={styles.personText}>
-        <Text style={styles.personName}>{name}</Text>
+        <Text style={styles.personName} numberOfLines={1}>{name}</Text>
         {typingNames.length ? (
           <View style={styles.typingRow}>
             <Text numberOfLines={1} style={styles.typingText}>
@@ -1149,12 +1540,25 @@ function PersonRow({
             <TypingDots />
           </View>
         ) : (
-          <Text numberOfLines={1} style={styles.personDetail}>{detail}</Text>
+          <Text numberOfLines={1} style={[styles.personDetail, hasUnread && styles.personDetailUnread]}>
+            {detail}
+          </Text>
         )}
       </View>
-      {!typingNames.length && time ? (
-        <Text style={styles.time}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>
-      ) : action}
+      <View style={styles.rowRightCol}>
+        {!typingNames.length && time ? (
+          <Text style={[styles.time, hasUnread && styles.timeUnread]}>
+            {new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+          </Text>
+        ) : null}
+        {hasUnread ? (
+          <View style={styles.unreadBadge}>
+            <Text style={styles.unreadBadgeText}>
+              {unreadCount > 99 ? '99+' : unreadCount}
+            </Text>
+          </View>
+        ) : action}
+      </View>
     </>
   );
   return onPress ? <Pressable onPress={onPress} style={styles.personRow}>{content}</Pressable> : <View style={styles.personRow}>{content}</View>;
@@ -1171,8 +1575,7 @@ const styles = StyleSheet.create({
   headerAvatarPlaceholder: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center' },
   headerAvatarInitial: { color: colors.primaryDark, fontSize: 18, fontWeight: '800' },
   brandContainer: { flex: 1, marginLeft: 12 },
-  brand: { color: colors.text, fontSize: 31, fontWeight: '900', letterSpacing: -1.5 }, brandDot: { color: colors.amber },
-  subBrand: { color: colors.primary, fontSize: 9, letterSpacing: 1.5, fontWeight: '800' }, iconButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  subBrand: { color: colors.primary, fontSize: 11, letterSpacing: 0.1, fontWeight: '600', marginTop: 1 }, iconButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   searchBox: { marginHorizontal: 20, marginBottom: 10, height: 52, borderRadius: 25, backgroundColor: colors.surfaceRaised, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 17, gap: 11 },
   searchInput: { flex: 1, color: colors.text, fontSize: 15 },
   content: { paddingHorizontal: 20, paddingBottom: 120, flexGrow: 1 }, loader: { marginTop: 40 },
@@ -1183,7 +1586,12 @@ const styles = StyleSheet.create({
   personInitial: { color: colors.primaryDark, fontSize: 22, fontWeight: '800' }, personText: { flex: 1, marginLeft: 14 },
   personName: { color: colors.text, fontSize: 16, fontWeight: '700' }, personDetail: { color: colors.muted, fontSize: 13, marginTop: 4 },
   typingRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 }, typingText: { color: colors.primary, fontSize: 13, fontWeight: '700', flexShrink: 1 },
-  time: { color: colors.muted, fontSize: 11, alignSelf: 'flex-start', marginTop: 18 },
+  time: { color: colors.muted, fontSize: 11, alignSelf: 'flex-end', marginBottom: 4 },
+  timeUnread: { color: '#25D366', fontWeight: '700' },
+  rowRightCol: { alignItems: 'flex-end', justifyContent: 'center', marginLeft: 8, minWidth: 50 },
+  unreadBadge: { backgroundColor: '#25D366', minWidth: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
+  unreadBadgeText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
+  personDetailUnread: { color: colors.text, fontWeight: '600' },
   addSmall: { padding: 10, borderRadius: 22, backgroundColor: colors.primarySoft },
   callActions: { flexDirection: 'row', gap: 5 }, callSmall: { padding: 10, borderRadius: 22, backgroundColor: colors.primarySoft },
   requestCard: { backgroundColor: colors.surface, borderRadius: 16, padding: 16, marginBottom: 12 },
@@ -1259,4 +1667,163 @@ const styles = StyleSheet.create({
   privacyOptionTitleSelected: { color: colors.primaryDark },
   privacyOptionDesc: { fontSize: 10, color: colors.muted, textAlign: 'center', marginTop: 2 },
   inviteListContainer: { maxHeight: 180, borderWidth: 1, borderColor: colors.border, borderRadius: 14, paddingHorizontal: 12, marginBottom: 12 },
+  capacityCapText: { fontSize: 12, fontWeight: '700', color: colors.primaryDark },
+  capacityStepperRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: 16,
+    padding: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  stepperButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  stepperButtonDisabled: {
+    opacity: 0.35,
+    backgroundColor: 'transparent',
+  },
+  stepperDisplay: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  stepperCountText: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: colors.text,
+  },
+  stepperUnitText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.muted,
+  },
+  presetsRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 10,
+    justifyContent: 'space-between',
+  },
+  presetChip: {
+    flex: 1,
+    paddingVertical: 7,
+    borderRadius: 10,
+    backgroundColor: colors.surfaceRaised,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  presetChipActive: {
+    backgroundColor: colors.primarySoft,
+    borderColor: colors.primary,
+  },
+  presetChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.muted,
+  },
+  presetChipTextActive: {
+    color: colors.primaryDark,
+    fontWeight: '800',
+  },
+
+  // WhatsApp-style Avatar Preview Modal
+  avatarModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  avatarModalCard: {
+    width: '100%',
+    maxWidth: 290,
+    backgroundColor: colors.surface,
+    borderRadius: 18,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.border,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+  },
+  avatarModalHeader: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.surfaceRaised,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+  },
+  avatarModalTitle: {
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  avatarModalSubtitle: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 1,
+  },
+  avatarModalCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarModalImageWrap: {
+    width: '100%',
+    height: 270,
+    backgroundColor: colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarModalImage: {
+    width: '100%',
+    height: '100%',
+  },
+  avatarModalPlaceholder: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primarySoft,
+  },
+  avatarModalInitial: {
+    fontSize: 72,
+    fontWeight: '800',
+    color: colors.primaryDark,
+  },
+  avatarModalActions: {
+    height: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    backgroundColor: colors.surfaceRaised,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    paddingHorizontal: 12,
+  },
+  avatarModalActionBtn: {
+    padding: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 20,
+  },
 });

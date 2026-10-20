@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -8,6 +8,7 @@ import { AvatarPreview } from '@/components/room/AvatarPreview';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
 import { AvatarBody, AVATAR_NAMES, AVATAR_TAGLINES } from '@/three/player/avatarStyle';
+import { ensureRoomAssets, roomDownloadSize, roomIsDownloaded, type DownloadableRoom } from '@/three/roomAssets';
 
 const avatarLabels: Record<AvatarBody, string> = AVATAR_NAMES;
 const avatarList: AvatarBody[] = ['photo_boy', 'uncle', 'man', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman'];
@@ -33,6 +34,10 @@ export default function LobbyScreen() {
   }>();
 
   const [selectedBody, setSelectedBody] = useState<AvatarBody>(avatarStyle.body || 'man');
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState('');
+  const [downloaded, setDownloaded] = useState(false);
 
   useEffect(() => {
     void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
@@ -42,7 +47,7 @@ export default function LobbyScreen() {
     if (!username) router.replace('/login');
   }, [username]);
 
-  const roomKind = (params.room && ['tea', 'beach', 'loft', 'roof'].includes(params.room)) ? params.room : 'loft';
+  const roomKind = ((params.room && ['tea', 'beach', 'loft', 'roof'].includes(params.room)) ? params.room : 'loft') as DownloadableRoom;
   const theme = THEME_NAMES[roomKind] || THEME_NAMES.loft;
   const isPrivate = params.isPrivate === 'true' || Boolean(params.groupId);
   const serverName = params.roomName || (isPrivate ? 'Private Hangout' : `ADDA Server ${theme.label}`);
@@ -52,7 +57,21 @@ export default function LobbyScreen() {
     setAvatarStyle({ body });
   };
 
-  const handleEnterHangout = () => {
+  useEffect(() => { setDownloaded(roomIsDownloaded(roomKind)); setDownloadProgress(0); setDownloadError(''); }, [roomKind]);
+
+  const handleEnterHangout = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    setDownloadError('');
+    try {
+      await ensureRoomAssets(roomKind, (done, total) => setDownloadProgress(total ? done / total : 0));
+      setDownloaded(true);
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : 'Room download failed. Please retry.');
+      setDownloading(false);
+      return;
+    }
+    setDownloading(false);
     router.replace({
       pathname: '/hangout',
       params: {
@@ -140,9 +159,14 @@ export default function LobbyScreen() {
         </View>
 
         {/* Enter Server CTA */}
-        <Pressable onPress={handleEnterHangout} style={styles.enterButton}>
-          <DoorOpen size={20} color="#FFFFFF" />
-          <Text style={styles.enterButtonText}>ENTER HANGOUT</Text>
+        {!downloaded && <Text style={styles.downloadHint}>
+          This room downloads once ({(roomDownloadSize(roomKind) / 1048576).toFixed(1)} MB). ADDA keeps your two most recently used rooms on this phone.
+        </Text>}
+        {!!downloadError && <Text style={styles.downloadError}>{downloadError}</Text>}
+        {downloading && <View style={styles.downloadTrack}><View style={[styles.downloadFill, { width: `${Math.round(downloadProgress * 100)}%` }]} /></View>}
+        <Pressable onPress={() => void handleEnterHangout()} disabled={downloading} style={[styles.enterButton, downloading && { opacity: 0.7 }]}>
+          {downloading ? <ActivityIndicator color="#FFFFFF" /> : <DoorOpen size={20} color="#FFFFFF" />}
+          <Text style={styles.enterButtonText}>{downloading ? `DOWNLOADING ${Math.round(downloadProgress * 100)}%` : downloaded ? 'ENTER HANGOUT' : 'DOWNLOAD & ENTER'}</Text>
         </Pressable>
       </ScrollView>
     </SafeAreaView>
@@ -150,6 +174,10 @@ export default function LobbyScreen() {
 }
 
 const styles = StyleSheet.create({
+  downloadHint: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 15, marginBottom: 8 },
+  downloadError: { color: colors.error, fontSize: 13, marginTop: 10 },
+  downloadTrack: { height: 8, borderRadius: 4, backgroundColor: colors.border, overflow: 'hidden', marginVertical: 8 },
+  downloadFill: { height: '100%', backgroundColor: colors.primary },
   safe: {
     flex: 1,
     backgroundColor: colors.background,

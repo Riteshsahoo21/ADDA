@@ -35,6 +35,8 @@ __pycache__/
 # local env files
 .env
 .env*.local
+.play-signing.properties
+/release/
 
 # typescript
 *.tsbuildinfo

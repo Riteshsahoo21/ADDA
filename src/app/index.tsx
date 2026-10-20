@@ -35,10 +35,11 @@ export default function WelcomeScreen() {
     if (isRestoring || handledNotification || notificationNavigationOccurred) return;
 
     let navigationTimer: ReturnType<typeof setTimeout> | undefined;
+    const animDuration = username ? 600 : 1800;
     const animation = Animated.timing(progress, {
       toValue: 100,
-      duration: 2200,
-      easing: Easing.linear,
+      duration: animDuration,
+      easing: Easing.out(Easing.quad),
       useNativeDriver: false,
     });
 
@@ -66,7 +67,7 @@ export default function WelcomeScreen() {
   return (
     <SafeAreaView style={styles.screen}>
       <View style={styles.content}>
-        <AddaLogo centered />
+        <AddaLogo centered showTagline />
         <View style={styles.progressArea}>
           <Text style={styles.percent}>{percent}%</Text>
           <View style={styles.track}>

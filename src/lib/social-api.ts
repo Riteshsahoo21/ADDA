@@ -8,8 +8,9 @@ export type PublicProfile = {
   about?: string | null;
   lastMessage?: string | null;
   lastAt?: string | null;
+  unreadCount?: number;
 };
-export type OwnProfile = PublicProfile & { friendCode: string; usernameChangedAt?: string | null };
+export type OwnProfile = PublicProfile & { friendCode: string; usernameChangedAt?: string | null; policyVersion?: string | null; policyAcceptedAt?: string | null; requiredPolicyVersion?: string };
 export type ChatGroup = {
   id: string;
   name: string;
@@ -19,6 +20,7 @@ export type ChatGroup = {
   createdAt: string;
   lastMessage?: string | null;
   lastAt?: string | null;
+  unreadCount?: number;
 };
 export type GroupMember = {
   id: string;
@@ -59,7 +61,9 @@ export type FriendRequest = {
   recipientUsername: string;
   recipientAvatarUrl?: string | null;
   createdAt: string;
-  status: 'pending';
+  updatedAt?: string | null;
+  status: 'pending' | 'accepted' | 'declined';
+  dismissedBySender?: boolean;
 };
 export type SocialBundle = {
   me: OwnProfile;
@@ -79,6 +83,7 @@ export type PublicServerInfo = {
   code: string;
   isPrivate: boolean;
   peerCount: number;
+  maxPlayers?: number;
   createdAt: string;
 };
 

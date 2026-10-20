@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -20,6 +21,7 @@ import {
   statusCodes,
 } from '@react-native-google-signin/google-signin';
 import { colors } from '@/constants/theme';
+import { AddaLogo } from '@/components/ui/AddaLogo';
 import { useSession } from '@/context/session';
 import { API_BASE_URL, authClient, authStorage } from '@/lib/auth-client';
 import { configureGoogleSignIn } from '@/lib/google-sign-in';
@@ -42,15 +44,54 @@ export default function LoginScreen() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  // Keyboard navigation & scroll refs
+  const scrollViewRef = useRef<ScrollView>(null);
+  const nameInputRef = useRef<TextInput>(null);
+  const emailInputRef = useRef<TextInput>(null);
+  const passwordInputRef = useRef<TextInput>(null);
+  const confirmPasswordInputRef = useRef<TextInput>(null);
+  const formYRef = useRef(0);
+  const fieldRelY = useRef<Record<string, number>>({});
 
   useEffect(() => {
     void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
     configureGoogleSignIn();
+
+    const showSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => setKeyboardVisible(true)
+    );
+    const hideSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setKeyboardVisible(false)
+    );
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
   }, []);
+
+  const scrollToField = (fieldKey: string) => {
+    const delay = keyboardVisible ? 50 : Platform.OS === 'android' ? 120 : 40;
+    setTimeout(() => {
+      const relY = fieldRelY.current[fieldKey] ?? 0;
+      const targetY = formYRef.current + relY;
+      scrollViewRef.current?.scrollTo({
+        y: Math.max(0, targetY - 20),
+        animated: true,
+      });
+    }, delay);
+  };
 
   const handleModeChange = (newMode: AuthMode) => {
     setMode(newMode);
     setError('');
+    fieldRelY.current = {};
+    setTimeout(() => {
+      scrollViewRef.current?.scrollTo({ y: 0, animated: true });
+    }, 50);
   };
 
   const handleEmailAuth = async () => {
@@ -86,6 +127,7 @@ export default function LoginScreen() {
       const email = identifier.trim().toLowerCase();
 
       let authenticatedName: string;
+      let authenticatedId: string | undefined = undefined;
       if (mode === 'register') {
         const result = await authClient.signUp.email({
           email,
@@ -96,6 +138,7 @@ export default function LoginScreen() {
           throw new Error(result.error.message || 'Registration failed');
         }
         authenticatedName = displayName.trim();
+        authenticatedId = (result as any)?.data?.user?.id;
       } else {
         const result = await authClient.signIn.email({
           email,
@@ -105,11 +148,12 @@ export default function LoginScreen() {
           throw new Error(result.error.message || 'Sign in failed');
         }
         authenticatedName = result.data?.user?.name || identifier.trim();
+        authenticatedId = (result as any)?.data?.user?.id;
       }
       if (!(await authStorage.getAccessToken())) throw new Error('Could not start your ADDA session. Please try again.');
-      await clearSocialCache();
+      clearSocialCache();
       await closeEncryptedChat();
-      login(authenticatedName);
+      login(authenticatedName, authenticatedId);
       router.replace('/home');
     } catch (err: unknown) {
       const message =
@@ -185,13 +229,15 @@ export default function LoginScreen() {
         }
 
         let authenticatedName = displayNameFromGoogle;
-        if (result.data && 'user' in result.data && result.data.user?.name) {
-          authenticatedName = result.data.user.name;
+        let authenticatedId: string | undefined = undefined;
+        if (result.data && 'user' in result.data && result.data.user) {
+          if (result.data.user.name) authenticatedName = result.data.user.name;
+          if (result.data.user.id) authenticatedId = result.data.user.id;
         }
         if (!(await authStorage.getAccessToken())) throw new Error('Could not start your ADDA session. Please try again.');
-        await clearSocialCache();
+        clearSocialCache();
         await closeEncryptedChat();
-        login(authenticatedName);
+        login(authenticatedName, authenticatedId);
         router.replace('/home');
       } catch (serverErr: unknown) {
         const serverMessage =
@@ -233,21 +279,25 @@ export default function LoginScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView
-          contentContainerStyle={styles.content}
+          ref={scrollViewRef}
+          contentContainerStyle={[
+            styles.content,
+            keyboardVisible && styles.contentKeyboardActive,
+          ]}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
           showsVerticalScrollIndicator={false}
+          automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
         >
           {/* Brand Header */}
-          <View style={styles.header}>
-            <View style={styles.logoBadge}>
-              <Text style={styles.logoChar}>अ</Text>
-              <View style={styles.logoDot} />
-            </View>
-            <Text style={styles.brandTitle}>
-              ADDA<Text style={styles.brandDot}>.</Text>
-            </Text>
-            <Text style={styles.tagline}>APNA VIRTUAL HANGOUT</Text>
-            <Text style={styles.introHeading}>
+          <View style={[styles.header, keyboardVisible && styles.headerCompact]}>
+            <AddaLogo
+              header={keyboardVisible}
+              compact={!keyboardVisible}
+              centered
+              showTagline={!keyboardVisible}
+            />
+            <Text style={[styles.introHeading, keyboardVisible && styles.introHeadingCompact]}>
               {mode === 'login'
                 ? 'Welcome back to your spot'
                 : 'Create your account'}
@@ -255,7 +305,7 @@ export default function LoginScreen() {
           </View>
 
           {/* Mode Segmented Tab Switcher */}
-          <View style={styles.tabContainer}>
+          <View style={[styles.tabContainer, keyboardVisible && styles.tabContainerCompact]}>
             <Pressable
               accessibilityRole="tab"
               accessibilityState={{ selected: mode === 'login' }}
@@ -320,18 +370,29 @@ export default function LoginScreen() {
           </Pressable>
 
           {/* Divider */}
-          <View style={styles.dividerRow}>
+          <View style={[styles.dividerRow, keyboardVisible && styles.dividerRowCompact]}>
             <View style={styles.dividerLine} />
             <Text style={styles.dividerText}>OR WITH EMAIL</Text>
             <View style={styles.dividerLine} />
           </View>
 
           {/* Form */}
-          <View style={styles.form}>
+          <View
+            style={styles.form}
+            onLayout={(e) => {
+              formYRef.current = e.nativeEvent.layout.y;
+            }}
+          >
             {mode === 'register' && (
-              <View style={styles.fieldGroup}>
+              <View
+                style={styles.fieldGroup}
+                onLayout={(e) => {
+                  fieldRelY.current.name = e.nativeEvent.layout.y;
+                }}
+              >
                 <Text style={styles.fieldLabel}>FULL NAME / NICKNAME</Text>
                 <TextInput
+                  ref={nameInputRef}
                   style={styles.input}
                   placeholder="e.g. Kabir, Diya, Aarav"
                   placeholderTextColor={colors.muted}
@@ -340,16 +401,24 @@ export default function LoginScreen() {
                   value={displayName}
                   onChangeText={setDisplayName}
                   returnKeyType="next"
+                  onFocus={() => scrollToField('name')}
+                  onSubmitEditing={() => emailInputRef.current?.focus()}
                   accessibilityLabel="Full name"
                 />
               </View>
             )}
 
-            <View style={styles.fieldGroup}>
+            <View
+              style={styles.fieldGroup}
+              onLayout={(e) => {
+                fieldRelY.current.email = e.nativeEvent.layout.y;
+              }}
+            >
               <Text style={styles.fieldLabel}>
                 EMAIL ADDRESS
               </Text>
               <TextInput
+                ref={emailInputRef}
                 style={styles.input}
                 placeholder="name@example.com"
                 placeholderTextColor={colors.muted}
@@ -359,13 +428,21 @@ export default function LoginScreen() {
                 value={identifier}
                 onChangeText={setIdentifier}
                 returnKeyType="next"
+                onFocus={() => scrollToField('email')}
+                onSubmitEditing={() => passwordInputRef.current?.focus()}
                 accessibilityLabel="Email address"
               />
             </View>
 
-            <View style={styles.fieldGroup}>
+            <View
+              style={styles.fieldGroup}
+              onLayout={(e) => {
+                fieldRelY.current.password = e.nativeEvent.layout.y;
+              }}
+            >
               <Text style={styles.fieldLabel}>PASSWORD</Text>
               <TextInput
+                ref={passwordInputRef}
                 style={styles.input}
                 placeholder={
                   mode === 'register'
@@ -377,15 +454,26 @@ export default function LoginScreen() {
                 value={password}
                 onChangeText={setPassword}
                 returnKeyType={mode === 'register' ? 'next' : 'go'}
-                onSubmitEditing={mode === 'login' ? handleEmailAuth : undefined}
+                onFocus={() => scrollToField('password')}
+                onSubmitEditing={
+                  mode === 'register'
+                    ? () => confirmPasswordInputRef.current?.focus()
+                    : handleEmailAuth
+                }
                 accessibilityLabel="Password"
               />
             </View>
 
             {mode === 'register' && (
-              <View style={styles.fieldGroup}>
+              <View
+                style={styles.fieldGroup}
+                onLayout={(e) => {
+                  fieldRelY.current.confirmPassword = e.nativeEvent.layout.y;
+                }}
+              >
                 <Text style={styles.fieldLabel}>CONFIRM PASSWORD</Text>
                 <TextInput
+                  ref={confirmPasswordInputRef}
                   style={styles.input}
                   placeholder="Re-enter your password"
                   placeholderTextColor={colors.muted}
@@ -393,6 +481,7 @@ export default function LoginScreen() {
                   value={confirmPassword}
                   onChangeText={setConfirmPassword}
                   returnKeyType="go"
+                  onFocus={() => scrollToField('confirmPassword')}
                   onSubmitEditing={handleEmailAuth}
                   accessibilityLabel="Confirm password"
                 />
@@ -447,59 +536,20 @@ const styles = StyleSheet.create({
     paddingBottom: 32,
     justifyContent: 'center',
   },
+  contentKeyboardActive: {
+    justifyContent: 'flex-start',
+    paddingTop: 16,
+    paddingBottom: Platform.OS === 'android' ? 280 : 140,
+  },
 
   // Header lockup
   header: {
     alignItems: 'center',
     marginBottom: 24,
   },
-  logoBadge: {
-    width: 60,
-    height: 60,
-    borderRadius: 20,
-    backgroundColor: colors.primary,
-    borderWidth: 1.5,
-    borderColor: colors.primaryDark,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.14,
-    shadowRadius: 14,
-    elevation: 4,
-  },
-  logoChar: {
-    color: '#FFFFFF',
-    fontSize: 34,
-    fontWeight: '900',
-    includeFontPadding: false,
-    lineHeight: 44,
-  },
-  logoDot: {
-    position: 'absolute',
-    top: 7,
-    right: 7,
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-    backgroundColor: colors.amber,
-  },
-  brandTitle: {
-    color: colors.text,
-    fontSize: 36,
-    fontWeight: '900',
-    letterSpacing: -1.8,
-    marginTop: 10,
-  },
-  brandDot: {
-    color: colors.amber,
-  },
-  tagline: {
-    color: colors.primary,
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 2.2,
-    marginTop: 2,
+  headerCompact: {
+    marginBottom: 8,
+    marginTop: 0,
   },
   introHeading: {
     color: colors.text,
@@ -508,6 +558,10 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
     marginTop: 18,
     textAlign: 'center',
+  },
+  introHeadingCompact: {
+    fontSize: 16,
+    marginTop: 6,
   },
   // Segmented Mode Switcher
   tabContainer: {
@@ -518,6 +572,9 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     padding: 4,
     marginBottom: 20,
+  },
+  tabContainerCompact: {
+    marginBottom: 12,
   },
   tab: {
     flex: 1,
@@ -577,6 +634,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginVertical: 20,
     gap: 12,
+  },
+  dividerRowCompact: {
+    marginVertical: 12,
   },
   dividerLine: {
     flex: 1,

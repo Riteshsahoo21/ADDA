@@ -1,6 +1,5 @@
 import * as THREE from 'three';
-import { Asset } from 'expo-asset';
-import { File } from 'expo-file-system';
+import { readRoomAssetBytes, roomAssetUri } from '../roomAssets';
 import { BEACH_ASSETS } from './beachAssets';
 import { BeachSeat, createWoodenBeachBench, WoodenBenchConfig } from './beachInteractions';
 
@@ -176,16 +175,16 @@ export function createBeachEnvironment(scene: THREE.Scene): BeachEnvironment {
   void (async () => {
     try {
       const [colorAsset, normalAsset, waterNormalAsset] = await Promise.all([
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        Asset.fromModule(require('../../../assets/textures/beach-sand.rgba')).downloadAsync(),
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        Asset.fromModule(require('../../../assets/textures/beach-sand-normal.rgba')).downloadAsync(),
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        Asset.fromModule(require('../../../assets/textures/beach-water-normal.rgba')).downloadAsync(),
+
+        readRoomAssetBytes(roomAssetUri('beach', 'textures/beach-sand.rgba')),
+
+        readRoomAssetBytes(roomAssetUri('beach', 'textures/beach-sand-normal.rgba')),
+
+        readRoomAssetBytes(roomAssetUri('beach', 'textures/beach-water-normal.rgba')),
       ]);
 
-      if (colorAsset.localUri) {
-        const colorBytes = await new File(colorAsset.localUri).arrayBuffer();
+      if (colorAsset.byteLength) {
+        const colorBytes = colorAsset;
         loadedColorTex = new THREE.DataTexture(new Uint8Array(colorBytes), 1024, 1024, THREE.RGBAFormat);
         loadedColorTex.wrapS = THREE.RepeatWrapping;
         loadedColorTex.wrapT = THREE.RepeatWrapping;
@@ -198,8 +197,8 @@ export function createBeachEnvironment(scene: THREE.Scene): BeachEnvironment {
         sandMaterial.map = loadedColorTex;
       }
 
-      if (normalAsset.localUri) {
-        const normalBytes = await new File(normalAsset.localUri).arrayBuffer();
+      if (normalAsset.byteLength) {
+        const normalBytes = normalAsset;
         loadedNormalTex = new THREE.DataTexture(new Uint8Array(normalBytes), 1024, 1024, THREE.RGBAFormat);
         loadedNormalTex.wrapS = THREE.RepeatWrapping;
         loadedNormalTex.wrapT = THREE.RepeatWrapping;
@@ -213,8 +212,8 @@ export function createBeachEnvironment(scene: THREE.Scene): BeachEnvironment {
         sandMaterial.normalScale.set(1.0, 1.0);
       }
 
-      if (waterNormalAsset.localUri) {
-        const waterBytes = await new File(waterNormalAsset.localUri).arrayBuffer();
+      if (waterNormalAsset.byteLength) {
+        const waterBytes = waterNormalAsset;
         waterNormalTex = new THREE.DataTexture(new Uint8Array(waterBytes), 512, 512, THREE.RGBAFormat);
         waterNormalTex.wrapS = THREE.RepeatWrapping;
         waterNormalTex.wrapT = THREE.RepeatWrapping;

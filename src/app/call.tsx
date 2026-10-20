@@ -122,6 +122,7 @@ export default function CallScreen() {
   useEffect(() => {
     // Release any background music completely so Android audio focus belongs solely to the call (no dual volume sliders!)
     MusicService.stopAll();
+    try { InCallManager.stopRingtone(); } catch {}
 
     // 1. Request Bluetooth permission on Android 12+ so InCallManager can start Bluetooth SCO
     if (Platform.OS === 'android' && Number(Platform.Version) >= 31) {

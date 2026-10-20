@@ -1,5 +1,6 @@
 """Build and install an arm64 release APK only after checking bundled GLBs."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,15 @@ APK = ANDROID / "app/build/outputs/apk/release/app-release.apk"
 GRADLE = str(ANDROID / "gradlew.bat")
 ABI = "-PreactNativeArchitectures=arm64-v8a"
 GENERATED_RAW = ROOT / "android/app/build/generated/res/react/release/raw"
+
+# Load release signing configuration
+secrets_file = ROOT / ".play-signing.properties"
+if secrets_file.exists():
+    for line in secrets_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            os.environ[k.strip()] = v.strip()
 
 
 def run(*command, cwd=ROOT):

@@ -7,6 +7,7 @@ import { router, useIsFocused, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Check, Crown, Headphones, House, MessageCircle, Mic, MicOff, Music, Send, Trash2, UserPlus, Users, UserX, Volume1, Volume2, VolumeX, X } from 'lucide-react-native';
 import { GameRoom } from '@/components/room/GameRoom';
+import { ReportUser } from '@/components/safety/ReportUser';
 import InCallManager from 'react-native-incall-manager';
 import { RoomKind } from '@/three/environment/createGameScene';
 import { colors } from '@/constants/theme';
@@ -58,6 +59,8 @@ export default function HangoutScreen() {
   const [chatError, setChatError] = useState('');
   const [messages, setMessages] = useState<RoomMessage[]>([]);
   const [peers, setPeers] = useState<RoomPeer[]>([]);
+  const [reportPeer, setReportPeer] = useState<{ userId: string; name: string; kind: 'user' | 'room'; evidenceText?: string; messageId?: string } | null>(null);
+  const blockedPeersRef = useRef(new Set<string>());
   const peerSnapshots = useRef(new Map<string, PlayerSnapshot[]>());
   const [shardId, setShardId] = useState<string>('');
   const [shardIndex, setShardIndex] = useState<number>(1);
@@ -90,11 +93,20 @@ export default function HangoutScreen() {
   const presenceRef = useRef<Awaited<ReturnType<typeof getRealtimeSocket>> | null>(null);
   const positionRef = useRef<RoomMotionSnapshot>({ x: 0, y: 0, z: 0, yaw: 0, vx: 0, vz: 0, pose: 'idle' });
   const onSnapshot = useCallback((snapshot: PlayerSnapshot) => {
+    if (blockedPeersRef.current.has(snapshot.id)) return;
     const queues = peerSnapshots.current;
     let queue = queues.get(snapshot.id);
     if (!queue) { queue = []; queues.set(snapshot.id, queue); }
     queue.push(snapshot);
     if (queue.length > 25) queue.shift();
+  }, []);
+  useEffect(() => {
+    void socialApi<{ id: string }[]>('/safety/blocks').then(blocks => {
+      blockedPeersRef.current = new Set(blocks.map(block => block.id));
+      setPeers(current => current.filter(peer => !blockedPeersRef.current.has(peer.userId)));
+      setMessages(current => current.filter(message => !blockedPeersRef.current.has(message.userId)));
+      for (const id of blockedPeersRef.current) mediaRef.current?.setUserMuted(id, true);
+    }).catch(() => {});
   }, []);
   const onPosition = useCallback((snapshot: RoomMotionSnapshot) => {
     positionRef.current = snapshot;
@@ -289,6 +301,7 @@ export default function HangoutScreen() {
     let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
     const queues = peerSnapshots.current;
     const onPeer = (peer: RoomPeer) => {
+      if (blockedPeersRef.current.has(peer.userId)) return;
       let q = queues.get(peer.userId);
       if (!q) { q = []; queues.set(peer.userId, q); }
       q.push({
@@ -322,7 +335,9 @@ export default function HangoutScreen() {
         return next;
       });
     };
-    const onMessage = (message: RoomMessage) => setMessages(current => [...current, message].slice(-50));
+    const onMessage = (message: RoomMessage) => {
+      if (!blockedPeersRef.current.has(message.userId)) setMessages(current => [...current, message].slice(-50));
+    };
     const onRadioSync = (radio: { enabled?: boolean; trackIndex?: number }) => {
       if (typeof radio?.enabled === 'boolean' && radio.enabled !== MusicService.state.radioEnabled) {
         MusicService.setRadioEnabled(radio.enabled);
@@ -358,8 +373,8 @@ export default function HangoutScreen() {
         if (error || !result?.ok || !result.value) {
           const errMsg = result?.error || 'Could not join room chat.';
           setChatError(errMsg);
-          if (errMsg.includes('Only members')) {
-            Alert.alert('Access Denied', errMsg, [
+          if (errMsg.includes('Only members') || errMsg.includes('full')) {
+            Alert.alert(errMsg.includes('full') ? 'Server Full' : 'Access Denied', errMsg, [
               { text: 'OK', onPress: () => router.replace('/home') }
             ]);
           }
@@ -377,8 +392,8 @@ export default function HangoutScreen() {
             time: Date.now(),
           }]);
         }
-        setPeers(result.value.peers);
-        setMessages(result.value.messages);
+        setPeers(result.value.peers.filter(peer => !blockedPeersRef.current.has(peer.userId)));
+          setMessages(result.value.messages.filter(message => !blockedPeersRef.current.has(message.userId)));
         if (result.value.shardId) setShardId(result.value.shardId);
         if (result.value.ownerId) setRoomOwnerId(result.value.ownerId);
         if (result.value.shardIndex) {
@@ -560,6 +575,22 @@ export default function HangoutScreen() {
     setMutedPeers(next);
   };
 
+  const blockPeer = (peer: RoomPeer) => {
+    Alert.alert(`Block ${peer.name}?`, 'Their avatar, room chat, and voice will be hidden for you. Direct contact will stop.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Block', style: 'destructive', onPress: async () => {
+        try {
+          await socialApi('/safety/blocks', 'POST', { userId: peer.userId });
+          blockedPeersRef.current.add(peer.userId);
+          mediaRef.current?.setUserMuted(peer.userId, true);
+          peerSnapshots.current.delete(peer.userId);
+          setPeers(current => current.filter(item => item.userId !== peer.userId));
+          setMessages(current => current.filter(message => message.userId !== peer.userId));
+        } catch (error) { Alert.alert('Could not block user', error instanceof Error ? error.message : 'Please try again.'); }
+      } },
+    ]);
+  };
+
   const sendMessage = async () => {
     const body = chatText.trim();
     if (!body) return;
@@ -676,6 +707,12 @@ export default function HangoutScreen() {
                 >
                   {mutedPeers.has(peer.userId) ? <VolumeX size={17} color={colors.amber} /> : <Volume2 size={17} color="#F7FAF8" />}
                 </Pressable>
+                <Pressable accessibilityRole="button" accessibilityLabel={`Report ${peer.name}`} onPress={() => setReportPeer({ userId: peer.userId, name: peer.name, kind: 'room' })} style={styles.peerKick}>
+                  <Text style={styles.reportLabel}>Report</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" accessibilityLabel={`Block ${peer.name}`} onPress={() => blockPeer(peer)} style={styles.peerKick}>
+                  <Text style={styles.reportLabel}>Block</Text>
+                </Pressable>
                 {isOwner && (
                   <Pressable
                     accessibilityRole="button"
@@ -706,7 +743,9 @@ export default function HangoutScreen() {
     </View>}
     {chatOpen && <KeyboardAvoidingView style={[styles.chatPanel, { right: Math.max(16, insets.right + 8), bottom: Math.max(14, insets.bottom + 8) }]} behavior="padding">
       <Text style={styles.chatTitle}>Room chat</Text>
-      <ScrollView style={styles.chatList}>{messages.map(message => <Text key={message.id} style={styles.chatMessage}><Text style={styles.chatName}>{message.name}: </Text>{message.body}</Text>)}</ScrollView>
+      <ScrollView style={styles.chatList}>{messages.map(message => <Pressable key={message.id} onLongPress={() => {
+        if (message.userId !== currentUserId) setReportPeer({ userId: message.userId, name: message.name, kind: 'room', messageId: message.id, evidenceText: message.body });
+      }}><Text style={styles.chatMessage}><Text style={styles.chatName}>{message.name}: </Text>{message.body}</Text></Pressable>)}</ScrollView>
       {!!chatError && <Text style={styles.chatError}>{chatError}</Text>}
       <View style={styles.chatInputRow}><TextInput style={styles.chatInput} placeholder="Message the room" placeholderTextColor="#A7B6AC" value={chatText} onChangeText={setChatText} maxLength={500} onSubmitEditing={() => void sendMessage()} /><Pressable accessibilityRole="button" accessibilityLabel="Send room message" onPress={() => void sendMessage()}><Send size={21} color="#F7FAF8" /></Pressable></View>
     </KeyboardAvoidingView>}
@@ -966,10 +1005,14 @@ export default function HangoutScreen() {
         </View>
       </View>
     </Modal>
+    <ReportUser visible={!!reportPeer} userId={reportPeer?.userId || ''} userName={reportPeer?.name || ''}
+      kind={reportPeer?.kind || 'user'} messageId={reportPeer?.messageId} roomId={params.roomId || activeRoomId}
+      evidenceText={reportPeer?.evidenceText} onClose={() => setReportPeer(null)} />
   </View>;
 }
 
 const styles = StyleSheet.create({
+  reportLabel: { color: '#F7FAF8', fontSize: 11, fontWeight: '700' },
   screen: { flex: 1, backgroundColor: colors.background },
   topBar: { position: 'absolute', top: 8, left: 16, right: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
   roomIdentity: { maxWidth: 220, backgroundColor: '#10221DCF', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8 },
