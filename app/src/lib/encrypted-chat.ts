@@ -234,9 +234,9 @@ export function clearKeyCache(target?: ChatTarget) {
 export async function getOrFetchKeys(target: ChatTarget, forceFresh = false): Promise<KeyList> {
   const cacheKey = `${target.kind}:${target.id}`;
   const hit = keyCache.get(cacheKey);
-  // Group keys expire in 15 seconds so new members and device key changes are rapidly picked up.
-  // Direct chats cache for 2 minutes.
-  const ttl = target.kind === 'group' ? 15 * 1000 : 2 * 60 * 1000;
+  // Group keys expire in 30 seconds so new members and device key changes are rapidly picked up.
+  // Direct chats cache for 30 minutes so 1:1 messaging is completely instant without network roundtrips.
+  const ttl = target.kind === 'group' ? 30 * 1000 : 30 * 60 * 1000;
   if (!forceFresh && hit && hit.expiresAt > Date.now()) {
     return hit.keys;
   }
@@ -438,8 +438,12 @@ export async function localPreviews(): Promise<ChatPreview[]> {
   }
 }
 
+const pinnedDeviceKeys = new Set<string>();
+
 async function pinKeysInternal(db: SQLite.SQLiteDatabase, devices: DeviceKey[]) {
   for (const device of devices) {
+    const fingerprint = `${device.deviceId}:${device.publicKey}`;
+    if (pinnedDeviceKeys.has(fingerprint)) continue;
     const known = await db.getFirstAsync<{ userId: string; publicKey: string }>('SELECT userId, publicKey FROM known_key WHERE deviceId = ?', device.deviceId);
     if (known) {
       if (known.userId !== device.userId || known.publicKey !== device.publicKey) {
@@ -449,6 +453,7 @@ async function pinKeysInternal(db: SQLite.SQLiteDatabase, devices: DeviceKey[]) 
     } else {
       await db.runAsync('INSERT OR IGNORE INTO known_key VALUES (?, ?, ?)', device.deviceId, device.userId, device.publicKey);
     }
+    pinnedDeviceKeys.add(fingerprint);
   }
 }
 
@@ -679,14 +684,16 @@ async function saveEncryptedMedia(media: EncryptedMedia) {
 // ========================================================
 // INCOMING MESSAGE ENVELOPE (WhatsApp Delivery ACK)
 // ========================================================
-export async function receiveDirectEnvelope(envelope: Envelope): Promise<void> {
+export async function receiveDirectEnvelope(envelope: Envelope): Promise<boolean> {
   if (!active) {
     const uid = getActiveUserId();
     if (uid) await initEncryptedChat(uid).catch(() => {});
   }
-  if (!active) return;
+  if (!active) return false;
   const me = active;
-  if (envelope.recipientDeviceId && envelope.recipientDeviceId !== me.deviceId) return;
+  if (envelope.recipientDeviceId && envelope.recipientDeviceId !== me.deviceId) return false;
+
+  let isNewMessage = false;
 
   // Acknowledge only after this device has a durable, decryptable SQLite row.
   // A duplicate envelope is safe to acknowledge because its row already exists.
@@ -733,6 +740,7 @@ export async function receiveDirectEnvelope(envelope: Envelope): Promise<void> {
         incomingMentions ? JSON.stringify(incomingMentions) : null
       );
 
+      isNewMessage = true;
       changed();
       return true;
     } catch (err) {
@@ -740,7 +748,7 @@ export async function receiveDirectEnvelope(envelope: Envelope): Promise<void> {
       return false;
     }
   });
-  if (!saved) return;
+  if (!saved) return false;
 
   const receipt = { messageId: envelope.messageId, recipientDeviceId: me.deviceId };
   const live = await getRealtimeSocket(me.deviceId).catch(() => null);
@@ -749,10 +757,11 @@ export async function receiveDirectEnvelope(envelope: Envelope): Promise<void> {
       live.timeout(5000).emit('chat:ack_delivery', receipt,
         (error: Error | null, result?: { ok: boolean }) => resolve(!error && result?.ok === true));
     });
-    if (accepted) return;
+    if (accepted) return isNewMessage;
   }
   // If this fails, the server keeps its encrypted copy and resends it on reconnect.
   await socialApi('/chat/delivery-ack', 'POST', receipt).catch(() => {});
+  return isNewMessage;
 }
 
 // ========================================================

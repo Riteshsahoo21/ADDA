@@ -248,6 +248,7 @@ export default function ConversationScreen() {
   const lastTyping = useRef(0);
   const draftRef = useRef('');
   const typingRevision = useRef(0);
+  const processedEnvelopesRef = useRef<Set<string>>(new Set());
   const valid = (kind === 'direct' || kind === 'group') && typeof id === 'string' && id.length > 0;
   const target: ChatTarget | null = useMemo(() => valid ? { kind: kind as ChatTarget['kind'], id: id as string } : null, [valid, kind, id]);
 
@@ -625,6 +626,8 @@ export default function ConversationScreen() {
     const revision = typingRevision;
 
     const onEnvelope = (envelope: Envelope) => {
+      if (processedEnvelopesRef.current.has(envelope.messageId)) return;
+
       const myId = selfId || getActiveUserId() || getCachedProfile()?.id || '';
       const isTargetMatch =
         envelope.kind === target.kind &&
@@ -635,8 +638,14 @@ export default function ConversationScreen() {
       const isIncoming = isTargetMatch && !!envelope.senderId && envelope.senderId !== myId;
 
       void receiveDirectEnvelope(envelope)
-        .then(() => {
-          if (isIncoming) {
+        .then(isNew => {
+          if (isIncoming && isNew) {
+            processedEnvelopesRef.current.add(envelope.messageId);
+            if (processedEnvelopesRef.current.size > 200) {
+              const iter = processedEnvelopesRef.current.values();
+              const oldest = iter.next().value;
+              if (oldest) processedEnvelopesRef.current.delete(oldest);
+            }
             SoundEffects.playReceived();
           }
           return markChatRead(target);
@@ -979,15 +988,37 @@ export default function ConversationScreen() {
     setMentionQuery(null);
     setError('');
     const messageId = Crypto.randomUUID();
+    const myId = selfId || getActiveUserId() || getCachedProfile()?.id || '';
     const myName = selfName || getCachedProfile()?.name || 'Me';
+    const now = new Date().toISOString();
 
-    try {
-      await sendEncryptedMessage(target, body, myName, messageId, currentReply, currentMentions);
-      SoundEffects.playSent();
-    } catch (cause) {
-      console.warn('Send error:', cause);
-      setError(cause instanceof Error ? cause.message : 'Could not send message.');
-    }
+    // 1. INSTANT 0ms OPTIMISTIC UI MESSAGE (Matches attach() pattern for 0ms WhatsApp-like speed!)
+    const optimisticMessage: LocalMessage = {
+      id: messageId,
+      kind: target.kind,
+      targetId: target.id,
+      senderId: myId,
+      senderName: myName,
+      body,
+      createdAt: now,
+      status: 'queued',
+      replyTo: currentReply,
+      mentions: currentMentions,
+    };
+    setMessages(current => current.some(item => item.id === messageId) ? current : [...current, optimisticMessage]);
+
+    // 2. INSTANT 0ms SENT SOUND (Crisp tick plays on tap!)
+    SoundEffects.playSent();
+
+    // 3. BACKGROUND ENCRYPTION & PERSISTENCE (Non-blocking)
+    void sendEncryptedMessage(target, body, myName, messageId, currentReply, currentMentions)
+      .then(sent => {
+        setMessages(current => current.map(item => item.id === messageId ? sent : item));
+      })
+      .catch(cause => {
+        console.warn('Send error:', cause);
+        setError(cause instanceof Error ? cause.message : 'Could not send message.');
+      });
   };
 
   const attach = async () => {

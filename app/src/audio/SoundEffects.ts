@@ -14,6 +14,8 @@ class SoundEffectsService {
   private step1Player: AudioPlayer | null = null;
   private step2Player: AudioPlayer | null = null;
   private lastStepTime = 0;
+  private lastSentTime = 0;
+  private lastReceivedTime = 0;
   private stepAlternator = false;
 
   private getSentPlayer(): AudioPlayer | null {
@@ -67,8 +69,13 @@ class SoundEffectsService {
   /**
    * Crisp 'tick' sound when user sends a message.
    * Only played when an active conversation / chat is open.
+   * Debounced to 250ms to prevent double-click stutter.
    */
   public playSent(): void {
+    const now = Date.now();
+    if (now - this.lastSentTime < 250) return;
+    this.lastSentTime = now;
+
     try {
       const p = this.getSentPlayer();
       if (p) {
@@ -82,8 +89,13 @@ class SoundEffectsService {
   /**
    * Gentle, pleasant incoming message chime/pop.
    * Only played when the user is actively viewing that live 1:1 or group conversation.
+   * Debounced to 250ms to prevent duplicate simultaneous envelopes from double-playing.
    */
   public playReceived(): void {
+    const now = Date.now();
+    if (now - this.lastReceivedTime < 250) return;
+    this.lastReceivedTime = now;
+
     try {
       const p = this.getReceivedPlayer();
       if (p) {
