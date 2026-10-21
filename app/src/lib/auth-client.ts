@@ -1,4 +1,5 @@
 import { createAuthClient } from 'better-auth/react';
+import { emailOTPClient } from 'better-auth/client/plugins';
 import * as SecureStore from 'expo-secure-store';
 
 export const API_BASE_URL =
@@ -56,6 +57,7 @@ export const authStorage = {
 
 export const authClient = createAuthClient({
   baseURL: API_BASE_URL,
+  plugins: [emailOTPClient()],
   fetchOptions: {
     headers: {
       Origin: API_BASE_URL,
@@ -66,3 +68,4 @@ export const authClient = createAuthClient({
     },
   },
 });
+

@@ -36,4 +36,11 @@ export const env = {
   mirotalkApiKey: process.env.MIROTALK_API_KEY?.trim() || '',
   mirotalkHostUser: process.env.MIROTALK_HOST_USER?.trim() || '',
   mirotalkHostPassword: process.env.MIROTALK_HOST_PASSWORD?.trim() || '',
+  resendApiKey: process.env.RESEND_API_KEY?.trim() || '',
+  smtpHost: process.env.SMTP_HOST?.trim() || '',
+  smtpPort: Number(process.env.SMTP_PORT || 587),
+  smtpUser: process.env.SMTP_USER?.trim() || '',
+  smtpPass: process.env.SMTP_PASS?.trim() || '',
+  smtpSecure: process.env.SMTP_SECURE === 'true' || process.env.SMTP_PORT === '465',
+  emailFrom: process.env.EMAIL_FROM?.trim() || process.env.SMTP_FROM?.trim() || '',
 };

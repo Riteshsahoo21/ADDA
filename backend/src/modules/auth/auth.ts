@@ -1,7 +1,8 @@
 import { betterAuth } from 'better-auth';
-import { bearer, jwt } from 'better-auth/plugins';
+import { bearer, emailOTP, jwt } from 'better-auth/plugins';
 import { env } from '../../config/env.js';
 import { pool } from '../../db/pool.js';
+import { sendOtpEmail } from '../mail/mail.js';
 
 export const auth = betterAuth({
   database: pool,
@@ -11,7 +12,14 @@ export const auth = betterAuth({
   advanced: {
     disableCSRFCheck: true,
   },
-  emailAndPassword: { enabled: true, autoSignIn: true },
+  emailAndPassword: {
+    enabled: true,
+    requireEmailVerification: true,
+    autoSignIn: false,
+  },
+  emailVerification: {
+    autoSignInAfterVerification: true,
+  },
   socialProviders:
     env.googleClientId && env.googleClientSecret
       ? { google: { clientId: env.googleClientId, clientSecret: env.googleClientSecret } }
@@ -22,6 +30,24 @@ export const auth = betterAuth({
       currentRoom: { type: 'string', defaultValue: 'loft', required: false },
     },
   },
-  plugins: [jwt({ jwt: { expirationTime: '15m' } }), bearer()],
+  plugins: [
+    jwt({ jwt: { expirationTime: '15m' } }),
+    bearer(),
+    emailOTP({
+      async sendVerificationOTP({ email, otp, type }) {
+        await sendOtpEmail({ email, otp, type });
+      },
+      otpLength: 6,
+      expiresIn: 300,
+      sendVerificationOnSignUp: true,
+      allowedAttempts: 5,
+      resendStrategy: 'rotate',
+      rateLimit: {
+        window: 60,
+        max: 5,
+      },
+    }),
+  ],
   rateLimit: { enabled: true, window: 60, max: 100 },
 });
+
