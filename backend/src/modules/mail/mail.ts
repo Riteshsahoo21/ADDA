@@ -197,6 +197,7 @@ export async function sendOtpEmail({ email, otp, type }: SendOtpEmailParams): Pr
         headers: {
           Authorization: `Bearer ${env.resendApiKey}`,
           'Content-Type': 'application/json',
+          'User-Agent': 'ADDA-Backend/1.0',
         },
         body: JSON.stringify({
           from,

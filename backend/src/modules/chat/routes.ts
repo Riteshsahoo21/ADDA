@@ -158,15 +158,15 @@ chatRoutes.get('/media/:id/download', run(async (request, response) => {
 }));
 
 chatRoutes.post('/delivery-ack', run(async (request, response) => {
-  const { messageId, recipientDeviceId } = request.body ?? {};
+  const { messageId, senderId } = request.body ?? {};
   if (typeof messageId !== 'string' || !messageId || messageId.length > 100 ||
-    typeof recipientDeviceId !== 'string' || !recipientDeviceId || recipientDeviceId.length > 100) {
+    typeof senderId !== 'string' || !senderId || senderId.length > 100) {
     response.status(400).json({ error: 'Invalid delivery ack.' });
     return;
   }
   const selfId = response.locals.userId as string;
-  const accepted = await processDeliveryAck(messageId, selfId, recipientDeviceId);
-  response.status(accepted ? 200 : 409).json({ ok: accepted });
+  await processDeliveryAck(messageId, selfId, senderId);
+  response.json({ ok: true });
 }));
 
 chatRoutes.post('/read-ack', run(async (request, response) => {
@@ -178,8 +178,8 @@ chatRoutes.post('/read-ack', run(async (request, response) => {
     return;
   }
   const selfId = response.locals.userId as string;
-  const accepted = await processReadAck(messageIds, selfId, senderId);
-  response.status(accepted ? 200 : 409).json({ ok: accepted });
+  await processReadAck(messageIds, selfId, senderId);
+  response.json({ ok: true });
 }));
 
 export async function retryDeliveredMediaCleanup(): Promise<void> {
