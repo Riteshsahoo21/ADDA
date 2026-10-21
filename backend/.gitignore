@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.env.*.local
+seed-credentials.json
+runtime.*.log
+public/
+scripts/
