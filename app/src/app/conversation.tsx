@@ -247,6 +247,7 @@ export default function ConversationScreen() {
   const typingExpiry = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const lastTyping = useRef(0);
   const draftRef = useRef('');
+  const messageRefreshVersion = useRef(0);
   const typingRevision = useRef(0);
   const processedEnvelopesRef = useRef<Set<string>>(new Set());
   const valid = (kind === 'direct' || kind === 'group') && typeof id === 'string' && id.length > 0;
@@ -550,8 +551,9 @@ export default function ConversationScreen() {
         if (uid) setSelfId(uid);
       }
       try {
+        const version = ++messageRefreshVersion.current;
         const local = await localMessages(target);
-        setMessages(local);
+        if (version === messageRefreshVersion.current) setMessages(local);
         if (!name && target.kind === 'direct') {
           const fromOther = local.find(m => m.senderId === target.id && m.senderName);
           if (fromOther?.senderName) setChatTitle(fromOther.senderName);
@@ -570,8 +572,9 @@ export default function ConversationScreen() {
       setSelfId(me.id);
       setSelfName(me.name);
 
+      const version = ++messageRefreshVersion.current;
       const local = await localMessages(target);
-      setMessages(local);
+      if (version === messageRefreshVersion.current) setMessages(local);
 
       if (target.kind === 'direct') {
         const fromOther = local.find(m => m.senderId === target.id && m.senderName);
@@ -615,7 +618,19 @@ export default function ConversationScreen() {
   }, [load, target, checkActiveGroupCall]));
 
   useEffect(() => onChatChanged(() => {
-    if (target) void localMessages(target).then(setMessages).catch(() => {});
+    if (!target) return;
+    const version = ++messageRefreshVersion.current;
+    void localMessages(target).then(local => {
+      if (version !== messageRefreshVersion.current) return;
+      setMessages(current => {
+        const savedIds = new Set(local.map(message => message.id));
+        const pending = current.filter(message =>
+          message.status === 'queued' && message.kind === target.kind &&
+          message.targetId === target.id && !savedIds.has(message.id)
+        );
+        return [...local, ...pending].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+      });
+    }).catch(() => {});
   }), [target]);
 
   useEffect(() => {
@@ -978,7 +993,7 @@ export default function ConversationScreen() {
   };
 
   const send = async () => {
-    const body = draft.trim();
+    const body = draftRef.current.trim();
     if (!target || !body) return;
     const currentReply = replyingTo;
     const currentMentions = selectedMentions.length > 0 ? [...selectedMentions] : undefined;
@@ -1005,14 +1020,13 @@ export default function ConversationScreen() {
       replyTo: currentReply,
       mentions: currentMentions,
     };
+    messageRefreshVersion.current++;
     setMessages(current => current.some(item => item.id === messageId) ? current : [...current, optimisticMessage]);
 
-    // 2. INSTANT 0ms SENT SOUND (Crisp tick plays on tap!)
-    SoundEffects.playSent();
-
-    // 3. BACKGROUND ENCRYPTION & PERSISTENCE (Non-blocking)
+    // The local bubble appears immediately; the sent sound waits for server confirmation.
     void sendEncryptedMessage(target, body, myName, messageId, currentReply, currentMentions)
       .then(sent => {
+        SoundEffects.playSent();
         setMessages(current => current.map(item => {
           if (item.id !== messageId) return item;
           const rank: Record<string, number> = { queued: 0, sent: 1, delivered: 2, read: 3 };
@@ -1775,7 +1789,7 @@ export default function ConversationScreen() {
             multiline
             maxLength={2000}
           />
-          <Pressable accessibilityLabel="Send message" disabled={!draft.trim()} onPress={() => void send()} style={[styles.send, !draft.trim() && styles.disabled]}>
+          <Pressable accessibilityLabel="Send message" onPress={() => void send()} style={[styles.send, !draft.trim() && styles.disabled]}>
             <Send size={20} color="#FFFFFF" />
           </Pressable>
         </View>

@@ -396,10 +396,10 @@ export async function localMessages(target: ChatTarget): Promise<LocalMessage[]>
   if (!active || !active.db) return [];
   try {
     const rows = await active.db.getAllAsync<any>(
-      'SELECT * FROM message WHERE kind = ? AND targetId = ? ORDER BY createdAt ASC, id ASC LIMIT 300',
+      'SELECT * FROM message WHERE kind = ? AND targetId = ? ORDER BY createdAt DESC, id DESC LIMIT 300',
       target.kind, target.id
     );
-    return rows.map(parseRow);
+    return rows.reverse().map(parseRow);
   } catch {
     return [];
   }
@@ -475,12 +475,18 @@ export async function sendEncryptedMessage(
 ): Promise<LocalMessage> {
   const previewText = customPreviewText || (body?.startsWith('__adda_room_card__:') ? previewBody(body) : (body.length > 80 ? body.slice(0, 77) + '...' : body));
   const messageId = existingId ?? Crypto.randomUUID();
-  try {
-    return await sendEncryptedContent(target, body, senderName, messageId, undefined, undefined, previewText, replyTo, mentions);
-  } catch (error) {
-    if (!(error instanceof Error) || !error.message.includes('Recipient device keys changed')) throw error;
-    clearKeyCache(target);
-    return sendEncryptedContent(target, body, senderName, messageId, undefined, undefined, previewText, replyTo, mentions);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await sendEncryptedContent(target, body, senderName, messageId, undefined, undefined, previewText, replyTo, mentions);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : '';
+      const keysChanged = reason.includes('Recipient device keys changed');
+      const transient = reason.includes('Message was not confirmed') ||
+        reason.includes('Live connection timed out') || reason === 'Send error';
+      if (keysChanged) clearKeyCache(target);
+      if (attempt >= 2 || (!keysChanged && !transient)) throw error;
+      await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 500 : 1500));
+    }
   }
 }
 
