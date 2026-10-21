@@ -470,6 +470,23 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
     }
   });
 
+  socket.on('room:signal', (input: { to?: string; signal?: unknown }) => {
+    const shardId = socket.data.roomId as string | undefined;
+    if (!shardId || !input?.to || !input?.signal) return;
+    if (JSON.stringify(input.signal).length > 65_536) return;
+    const targetSocketId = [...io.sockets.adapter.rooms.get(channel(shardId)) ?? []]
+      .find(id => peers.get(id)?.userId === input.to);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('room:signal', { from: userId, signal: input.signal });
+    }
+  });
+
+  socket.on('room:voice-ready', () => {
+    const shardId = socket.data.roomId as string | undefined;
+    if (!shardId) return;
+    socket.to(channel(shardId)).emit('room:voice-ready', { from: userId });
+  });
+
   socket.on('room:message', (body: unknown, ack?: Ack<RoomMessage>) => {
     const shardId = socket.data.roomId as string | undefined;
     const value = typeof body === 'string' ? body.trim() : '';
