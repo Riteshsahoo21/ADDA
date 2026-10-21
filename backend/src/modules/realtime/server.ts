@@ -324,6 +324,18 @@ export function attachRealtime(httpServer: HttpServer): Server {
         const devices = await getRecipientDevices(recipientUserIds);
         const senderPublicKey = senderDevice.rows[0].publicKey;
 
+        // A group send must cover every member in its recipient snapshot. Otherwise
+        // a missing device key would silently omit that member and falsify receipts.
+        if (target.kind === 'group') {
+          const deviceUsers = new Set(devices.map(device => device.userId));
+          const suppliedKeys = new Set(keys.map(key => key.deviceId));
+          if (recipientUserIds.some(userId => !deviceUsers.has(userId)) ||
+            devices.some(device => !suppliedKeys.has(device.deviceId))) {
+            ack?.({ ok: false, error: 'A group member needs to open ADDA before encrypted messages can be sent.' });
+            return;
+          }
+        }
+
         // Track online recipients for dispatch after the transaction commits.
         const spoolRows: any[] = [];
         const pushUserIds = new Set<string>();
@@ -400,6 +412,15 @@ export function attachRealtime(httpServer: HttpServer): Server {
             }
             return;
           }
+          if (recipientUserIds.length > 0) {
+            await client.query(
+              `INSERT INTO chat_delivery_state ("messageId", "senderId", "recipientId")
+               SELECT $1, $2, recipients."recipientId"
+               FROM UNNEST($3::text[]) AS recipients("recipientId")
+               ON CONFLICT DO NOTHING`,
+              [messageId, selfId, [...new Set(recipientUserIds)]]
+            );
+          }
           if (mediaId) {
             const media = await client.query(
               'UPDATE chat_media SET "messageId" = $1 WHERE id = $2 AND "ownerId" = $3 AND kind = $4 AND "targetId" = $5 RETURNING id',
@@ -461,17 +482,48 @@ export function attachRealtime(httpServer: HttpServer): Server {
     // ========================================================
     // WHATSAPP-GRADE HOT-PATH 2: DELIVERY ACK (Double Gray Tick ✓✓)
     // ========================================================
-    socket.on('chat:ack_delivery', (data: { messageId: string; senderId: string }) => {
-      if (!data?.messageId || !data?.senderId) return;
-      void processDeliveryAck(data.messageId, selfId, data.senderId);
+    socket.on('chat:ack_delivery', (data: { messageId: string; recipientDeviceId: string }, ack?: (result: { ok: boolean }) => void) => {
+      if (typeof data?.messageId !== 'string' || !data.messageId || data.messageId.length > 100 ||
+        typeof data.recipientDeviceId !== 'string' || !data.recipientDeviceId || data.recipientDeviceId.length > 100) {
+        ack?.({ ok: false });
+        return;
+      }
+      void processDeliveryAck(data.messageId, selfId, data.recipientDeviceId).then(ok => ack?.({ ok }));
     });
 
     // ========================================================
     // WHATSAPP-GRADE HOT-PATH 3: READ ACK (Double Blue Tick ✓✓)
     // ========================================================
-    socket.on('chat:ack_read', (data: { messageIds: string[]; senderId: string }) => {
-      if (!Array.isArray(data?.messageIds) || !data?.senderId || data.messageIds.length === 0) return;
-      void processReadAck(data.messageIds, selfId, data.senderId);
+    socket.on('chat:ack_read', (data: { messageIds: string[]; senderId: string }, ack?: (result: { ok: boolean }) => void) => {
+      if (!Array.isArray(data?.messageIds) || data.messageIds.length === 0 || data.messageIds.length > 100 ||
+        !data.messageIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 100) ||
+        typeof data.senderId !== 'string' || !data.senderId || data.senderId.length > 100) {
+        ack?.({ ok: false });
+        return;
+      }
+      void processReadAck(data.messageIds, selfId, data.senderId).then(ok => ack?.({ ok }));
+    });
+
+    socket.on('chat:receipt_status', async (messageIds: string[], ack?: (result: { ok: boolean; statuses?: Array<{ messageId: string; status: 'sent' | 'delivered' | 'read' }> }) => void) => {
+      if (!Array.isArray(messageIds) || messageIds.length === 0 || messageIds.length > 100 ||
+        !messageIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 100)) {
+        ack?.({ ok: false });
+        return;
+      }
+      try {
+        const result = await pool.query<{ messageId: string; status: 'sent' | 'delivered' | 'read' }>(
+          `SELECT s."messageId",
+             CASE WHEN COUNT(d."recipientId") > 0 AND BOOL_AND(d."readAt" IS NOT NULL) THEN 'read'
+                  WHEN COUNT(d."recipientId") > 0 AND BOOL_AND(d."deliveredAt" IS NOT NULL) THEN 'delivered'
+                  ELSE 'sent' END AS status
+           FROM chat_sent_id s LEFT JOIN chat_delivery_state d ON d."messageId" = s."messageId"
+           WHERE s."senderId" = $1 AND s."messageId" = ANY($2::text[])
+           GROUP BY s."messageId"`, [selfId, messageIds]);
+        ack?.({ ok: true, statuses: result.rows });
+      } catch (error) {
+        console.warn('[ADDA Spool] receipt status sync error:', error);
+        ack?.({ ok: false });
+      }
     });
 
     // ========================================================
@@ -526,55 +578,103 @@ export function attachRealtime(httpServer: HttpServer): Server {
   return io;
 }
 
-export async function processDeliveryAck(messageId: string, recipientId: string, senderId: string): Promise<void> {
+export async function processDeliveryAck(messageId: string, recipientId: string, recipientDeviceId: string): Promise<boolean> {
   try {
-    const del = await pool.query<{ senderId: string; kind: string; targetId: string }>(
-      'DELETE FROM chat_spool WHERE "messageId" = $1 AND "recipientId" = $2 RETURNING "senderId", kind, "targetId"',
-      [messageId, recipientId]
-    );
-    const row = del.rows[0];
-    const isGroup = row ? row.kind === 'group' : false;
+    const client = await pool.connect();
+    let row: { senderId: string; kind: string; targetId: string } | undefined;
+    try {
+      await client.query('BEGIN');
+      const del = await client.query<{ senderId: string; kind: string; targetId: string }>(
+        'DELETE FROM chat_spool WHERE "messageId" = $1 AND "recipientId" = $2 AND "recipientDeviceId" = $3 RETURNING "senderId", kind, "targetId"',
+        [messageId, recipientId, recipientDeviceId]
+      );
+      row = del.rows[0];
+      if (row) {
+        await client.query(
+          `UPDATE chat_delivery_state SET "deliveredAt" = COALESCE("deliveredAt", now())
+           WHERE "messageId" = $1 AND "recipientId" = $2`,
+          [messageId, recipientId]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    if (!row) return false;
+    const isGroup = row.kind === 'group';
 
     if (io) {
       if (!isGroup) {
         // Direct chat: recipient wrote message to SQLite, notify sender immediately (✓✓ Double Grey Tick)
-        io.to(userRoom(senderId)).emit('chat:msg_status', {
+        io.to(userRoom(row.senderId)).emit('chat:msg_status', {
           messageId,
           status: 'delivered',
           recipientId
         });
       } else {
-        // Group chat: check if all group members have received and saved
-        const pending = await pool.query('SELECT 1 FROM chat_spool WHERE "messageId" = $1 LIMIT 1', [messageId]);
-        if ((pending.rowCount ?? 0) === 0) {
-          io.to(userRoom(senderId)).emit('chat:msg_status', {
+        // One saved device per member is enough; other devices keep their own spool rows.
+        const receipts = await pool.query<{ total: number; pending: number }>(
+          `SELECT COUNT(*)::int AS total,
+                  COUNT(*) FILTER (WHERE "deliveredAt" IS NULL)::int AS pending
+           FROM chat_delivery_state WHERE "messageId" = $1`, [messageId]);
+        const { total, pending } = receipts.rows[0];
+        if (total > 0 && pending === 0) {
+          io.to(userRoom(row.senderId)).emit('chat:msg_status', {
             messageId,
             status: 'delivered'
           });
         }
       }
     }
+    return true;
   } catch (err) {
     console.warn('[ADDA Spool] processDeliveryAck error:', err);
+    return false;
   }
 }
 
-export async function processReadAck(messageIds: string[], recipientId: string, senderId: string): Promise<void> {
-  if (messageIds.length === 0) return;
+export async function processReadAck(messageIds: string[], recipientId: string, senderId: string): Promise<boolean> {
+  if (messageIds.length === 0) return false;
   try {
-    if (io) {
-      io.to(userRoom(senderId)).emit('chat:msg_status', {
-        messageIds,
-        status: 'read',
-        recipientId
-      });
-    }
-
-    await pool.query(
-      'DELETE FROM chat_spool WHERE "messageId" = ANY($1::text[]) AND "recipientId" = $2',
-      [messageIds, recipientId]
+    const valid = await pool.query<{ messageId: string }>(
+      `SELECT s."messageId" FROM chat_sent_id s
+       JOIN chat_delivery_state d ON d."messageId" = s."messageId"
+       WHERE s."messageId" = ANY($1::text[]) AND s."senderId" = $3
+         AND s."senderId" <> $2 AND d."recipientId" = $2`,
+      [messageIds, recipientId, senderId]
     );
+    const acceptedIds = valid.rows.map(row => row.messageId);
+    if (acceptedIds.length > 0) {
+      const updated = await pool.query<{ messageId: string }>(
+        `UPDATE chat_delivery_state SET "readAt" = now()
+         WHERE "messageId" = ANY($1::text[]) AND "recipientId" = $2 AND "readAt" IS NULL
+         RETURNING "messageId"`, [acceptedIds, recipientId]);
+      const newlyReadIds = updated.rows.map(row => row.messageId);
+      if (io && newlyReadIds.length > 0) {
+        const completed = await pool.query<{ messageId: string }>(
+          `SELECT d."messageId" FROM chat_delivery_state d
+           JOIN chat_sent_id s ON s."messageId" = d."messageId"
+           WHERE d."messageId" = ANY($1::text[]) AND s."senderId" = $2
+           GROUP BY d."messageId", s.kind
+           HAVING s.kind = 'direct' OR BOOL_AND(d."readAt" IS NOT NULL)`,
+          [newlyReadIds, senderId]);
+        const completedIds = completed.rows.map(row => row.messageId);
+        if (completedIds.length > 0) {
+          io.to(userRoom(senderId)).emit('chat:msg_status', {
+            messageIds: completedIds,
+            status: 'read',
+            recipientId
+          });
+        }
+      }
+    }
+    // Reading never deletes a pending envelope; only a saved-device delivery ACK can.
+    return acceptedIds.length === messageIds.length;
   } catch (err) {
     console.warn('[ADDA Spool] processReadAck error:', err);
+    return false;
   }
 }

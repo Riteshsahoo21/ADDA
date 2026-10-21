@@ -9,8 +9,13 @@ import { Check, Crown, Headphones, House, MessageCircle, Mic, MicOff, Music, Sen
 import { GameRoom } from '@/components/room/GameRoom';
 import { ReportUser } from '@/components/safety/ReportUser';
 import InCallManager from 'react-native-incall-manager';
-import { WebView } from 'react-native-webview';
-import type { WebView as WebViewHandle } from 'react-native-webview';
+import {
+  mediaDevices,
+  RTCIceCandidate,
+  RTCPeerConnection,
+  RTCSessionDescription,
+  type MediaStream,
+} from 'react-native-webrtc';
 import { RoomKind } from '@/three/environment/createGameScene';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
@@ -23,6 +28,14 @@ import { getActiveUserId, sendEncryptedMessage, type RoomCardPayload } from '@/l
 import { socialApi, type ChatGroup, type GroupDetails, type GroupMember, type PublicProfile, type SocialBundle } from '@/lib/social-api';
 
 const avatarBodies = new Set(['man', 'uncle', 'photo_boy', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman']);
+
+const ROOM_STUN_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+  ],
+};
 
 export default function HangoutScreen() {
   const { username, avatarStyle } = useSession();
@@ -84,21 +97,12 @@ export default function HangoutScreen() {
 
   const activeRoomId = shardId || (params.roomId ? `room:${params.roomId}` : (params.groupId ? `group:${params.groupId}:${roomKind}` : roomKind));
 
-  interface RoomMediaBridge {
-    sendMotion: (motion: { x: number; y: number; z: number; r: number; pose: string }) => boolean;
-    setMuted: (muted: boolean) => void;
-    setPlaybackMuted: (playbackMuted: boolean) => void;
-    setUserMuted: (id: string, muted: boolean) => void;
-  }
-  const mediaRef = useRef<RoomMediaBridge | null>(null);
-  const mirotalkEnabled = process.env.EXPO_PUBLIC_MIROTALK_ENABLED === 'true';
-  const [mirotalkUrl, setMirotalkUrl] = useState('');
-  const mirotalkWebView = useRef<WebViewHandle>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const roomPeersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const remoteStreamsRef = useRef<Map<string, MediaStream>>(new Map());
+  const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidate[]>>(new Map());
   const latestRemote = useRef(new Map<string, PlayerSnapshot>());
   const volumeSentAt = useRef(0);
-  const injectMirotalk = useCallback((expression: string) => {
-    mirotalkWebView.current?.injectJavaScript(`${expression};true;`);
-  }, []);
   const micMutedRef = useRef(false);
   const speakerMutedRef = useRef(false);
   const isBluetoothRef = useRef(false);
@@ -107,6 +111,117 @@ export default function HangoutScreen() {
   const mutedPeersRef = useRef<Set<string>>(new Set());
   const presenceRef = useRef<Awaited<ReturnType<typeof getRealtimeSocket>> | null>(null);
   const positionRef = useRef<RoomMotionSnapshot>({ x: 0, y: 0, z: 0, yaw: 0, vx: 0, vz: 0, pose: 'idle' });
+  const lastMotionSentAt = useRef(0);
+  const lastMotionSnapshot = useRef<{ x: number; z: number; r: number; pose: string } | null>(null);
+
+  const getOrCreateRoomPeer = useCallback(async (peerUserId: string, isInitiator: boolean) => {
+    let peer = roomPeersRef.current.get(peerUserId);
+    if (peer) return peer;
+
+    peer = new RTCPeerConnection(ROOM_STUN_CONFIG);
+    roomPeersRef.current.set(peerUserId, peer);
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        peer!.addTrack(track, localStreamRef.current!);
+      });
+    }
+
+    const listen = peer as unknown as { addEventListener: (type: string, listener: any) => void };
+    listen.addEventListener('icecandidate', (event: any) => {
+      if (event.candidate) {
+        const cand = typeof event.candidate.toJSON === 'function' ? event.candidate.toJSON() : event.candidate;
+        presenceRef.current?.emit('room:signal', { to: peerUserId, signal: { candidate: cand } });
+      }
+    });
+
+    listen.addEventListener('track', (event: any) => {
+      const stream = event.streams?.[0];
+      if (stream) {
+        remoteStreamsRef.current.set(peerUserId, stream);
+        const other = latestRemote.current.get(peerUserId);
+        const myPos = positionRef.current;
+        const dist = other ? Math.hypot(other.x - myPos.x, other.z - myPos.z) : 999;
+        const isMuted = speakerMutedRef.current || mutedPeersRef.current.has(peerUserId) || blockedPeersRef.current.has(peerUserId) || dist > 15;
+        stream.getAudioTracks().forEach((t: any) => { t.enabled = !isMuted; });
+      }
+    });
+
+    listen.addEventListener('connectionstatechange', () => {
+      if (peer!.connectionState === 'connected') {
+        setVoiceStatus('Nearby voice on');
+      }
+    });
+
+    if (isInitiator) {
+      try {
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        presenceRef.current?.emit('room:signal', {
+          to: peerUserId,
+          signal: { type: 'offer', sdp: offer.sdp ?? '' },
+        });
+      } catch (err) {
+        console.warn('[ADDA Room Voice] Offer failed for peer:', peerUserId, err);
+      }
+    }
+
+    return peer;
+  }, []);
+
+  const onRoomSignal = useCallback(async (event: { from: string; signal: any }) => {
+    const { from, signal } = event;
+    if (!from || !signal || blockedPeersRef.current.has(from)) return;
+
+    if (signal.candidate) {
+      const candidate = new RTCIceCandidate(signal.candidate);
+      const peer = roomPeersRef.current.get(from);
+      if (peer && peer.remoteDescription) {
+        await peer.addIceCandidate(candidate).catch(() => {});
+      } else {
+        if (!pendingIceCandidatesRef.current.has(from)) pendingIceCandidatesRef.current.set(from, []);
+        pendingIceCandidatesRef.current.get(from)!.push(candidate);
+      }
+      return;
+    }
+
+    if (signal.type === 'offer') {
+      let peer = roomPeersRef.current.get(from);
+      if (!peer) {
+        peer = await getOrCreateRoomPeer(from, false);
+      }
+      await peer.setRemoteDescription(new RTCSessionDescription(signal));
+      const pending = pendingIceCandidatesRef.current.get(from) || [];
+      pendingIceCandidatesRef.current.delete(from);
+      for (const c of pending) await peer.addIceCandidate(c).catch(() => {});
+      const answer = await peer.createAnswer();
+      await peer.setLocalDescription(answer);
+      presenceRef.current?.emit('room:signal', {
+        to: from,
+        signal: { type: 'answer', sdp: answer.sdp ?? '' },
+      });
+      return;
+    }
+
+    if (signal.type === 'answer') {
+      const peer = roomPeersRef.current.get(from);
+      if (peer && peer.signalingState === 'have-local-offer') {
+        await peer.setRemoteDescription(new RTCSessionDescription(signal));
+        const pending = pendingIceCandidatesRef.current.get(from) || [];
+        pendingIceCandidatesRef.current.delete(from);
+        for (const c of pending) await peer.addIceCandidate(c).catch(() => {});
+      }
+      return;
+    }
+  }, [getOrCreateRoomPeer]);
+
+  const onVoiceReady = useCallback((data: { from: string }) => {
+    if (!data?.from || !currentUserId || blockedPeersRef.current.has(data.from)) return;
+    if (currentUserId < data.from) {
+      void getOrCreateRoomPeer(data.from, true);
+    }
+  }, [currentUserId, getOrCreateRoomPeer]);
+
   const onSnapshot = useCallback((snapshot: PlayerSnapshot) => {
     if (blockedPeersRef.current.has(snapshot.id)) return;
     latestRemote.current.set(snapshot.id, snapshot);
@@ -116,60 +231,112 @@ export default function HangoutScreen() {
     queue.push(snapshot);
     if (queue.length > 25) queue.shift();
   }, []);
+
   useEffect(() => {
     void socialApi<{ id: string }[]>('/safety/blocks').then(blocks => {
       blockedPeersRef.current = new Set(blocks.map(block => block.id));
       setPeers(current => current.filter(peer => !blockedPeersRef.current.has(peer.userId)));
       setMessages(current => current.filter(message => !blockedPeersRef.current.has(message.userId)));
-      for (const id of blockedPeersRef.current) mediaRef.current?.setUserMuted(id, true);
+      for (const id of blockedPeersRef.current) {
+        const stream = remoteStreamsRef.current.get(id);
+        if (stream) stream.getAudioTracks().forEach((t: any) => { t.enabled = false; });
+      }
     }).catch(() => {});
   }, []);
+
   const onPosition = useCallback((snapshot: RoomMotionSnapshot) => {
     positionRef.current = snapshot;
-    mediaRef.current?.sendMotion({
-      x: Number(snapshot.x.toFixed(3)), y: Number(snapshot.y.toFixed(3)), z: Number(snapshot.z.toFixed(3)),
-      r: Number(snapshot.yaw.toFixed(3)), pose: snapshot.pose,
-    });
-    if (mirotalkEnabled && Date.now() - volumeSentAt.current >= 200) {
+
+    // Send movement at ideal 10Hz (every 100ms) with delta-thresholding directly over reliable WebSocket
+    const now = Date.now();
+    const last = lastMotionSnapshot.current;
+    const distMoved = last ? Math.hypot(snapshot.x - last.x, snapshot.z - last.z) : 1;
+    const rotChanged = last ? Math.abs(snapshot.yaw - last.r) : 1;
+    const poseChanged = !last || snapshot.pose !== last.pose;
+    const timeElapsed = now - lastMotionSentAt.current;
+
+    if (poseChanged || distMoved > 0.03 || rotChanged > 0.03 || timeElapsed >= 1000) {
+      if (timeElapsed >= 90 || poseChanged) {
+        lastMotionSentAt.current = now;
+        lastMotionSnapshot.current = { x: snapshot.x, z: snapshot.z, r: snapshot.yaw, pose: snapshot.pose };
+        presenceRef.current?.emit('room:snapshot', {
+          x: Number(snapshot.x.toFixed(3)),
+          y: Number(snapshot.y.toFixed(3)),
+          z: Number(snapshot.z.toFixed(3)),
+          r: Number(snapshot.yaw.toFixed(3)),
+          pose: snapshot.pose,
+        });
+      }
+    }
+
+    // Spatial audio proximity cutoff (checked every 200ms)
+    if (Date.now() - volumeSentAt.current >= 200) {
       volumeSentAt.current = Date.now();
-      const volumes: Record<string, number> = {};
       let audible = 0;
-      for (const [id, other] of latestRemote.current) {
-        const distance = Math.hypot(other.x - snapshot.x, other.z - snapshot.z);
-        const volume = speakerMutedRef.current || mutedPeersRef.current.has(id) || blockedPeersRef.current.has(id)
-          ? 0 : Math.max(0, Math.min(1, 1 - distance / 12));
-        volumes[id] = volume;
-        if (volume > 0.05) audible++;
+      for (const [id, stream] of remoteStreamsRef.current) {
+        const other = latestRemote.current.get(id);
+        const distance = other ? Math.hypot(other.x - snapshot.x, other.z - snapshot.z) : 999;
+        const isMuted = speakerMutedRef.current || mutedPeersRef.current.has(id) || blockedPeersRef.current.has(id) || distance > 15;
+        stream.getAudioTracks().forEach((track: any) => {
+          if (track.enabled !== !isMuted) {
+            track.enabled = !isMuted;
+          }
+        });
+        if (!isMuted && distance <= 15) {
+          audible++;
+        }
       }
       setNearbySpeakers(audible);
       if (audible > 0) setVoiceStatus('Nearby voice on');
-      injectMirotalk(`window.addaBridgeSetAudio?.(${JSON.stringify({ muted: micMutedRef.current, playbackMuted: speakerMutedRef.current, volumes })})`);
+      else setVoiceStatus('Voice ready');
     }
-  }, [injectMirotalk, mirotalkEnabled]);
+  }, []);
 
+  // Room Audio Mesh Lifecycle
   useEffect(() => {
-    if (!mirotalkEnabled || !focused || !shardId || !currentUserId) return;
+    if (!username || !focused || !shardId || !currentUserId) return;
     let active = true;
-    void socialApi<{ url: string }>('/mirotalk/join', 'POST', { kind: 'room', id: shardId })
-      .then(({ url }) => { if (active) setMirotalkUrl(url); })
-      .catch(error => { if (active) setVoiceStatus(error instanceof Error ? error.message : 'Voice unavailable.'); });
-    const bridge: RoomMediaBridge = {
-      sendMotion: (motion: { x: number; y: number; z: number; r: number; pose: string }) => {
-        injectMirotalk(`window.addaBridgeSendMotion?.(${JSON.stringify({ ...motion, id: currentUserId, time: Date.now() })})`);
-        return true;
-      },
-      setMuted: (muted: boolean) => injectMirotalk(`window.addaBridgeSetAudio?.(${JSON.stringify({ muted })})`),
-      setPlaybackMuted: (playbackMuted: boolean) => injectMirotalk(`window.addaBridgeSetAudio?.(${JSON.stringify({ playbackMuted })})`),
-      setUserMuted: (_id: string, _muted: boolean) => {},
-    };
-    mediaRef.current = bridge;
+
+    void mediaDevices.getUserMedia({ audio: true, video: false })
+      .then(stream => {
+        if (!active) {
+          stream.getTracks().forEach((t: any) => t.stop());
+          return;
+        }
+        localStreamRef.current = stream;
+        if (micMutedRef.current) {
+          stream.getAudioTracks().forEach((t: any) => { t.enabled = false; });
+        }
+        setVoiceStatus('Voice ready');
+        presenceRef.current?.emit('room:voice-ready');
+
+        for (const peer of peers) {
+          if (peer.userId !== currentUserId && currentUserId < peer.userId && !blockedPeersRef.current.has(peer.userId)) {
+            void getOrCreateRoomPeer(peer.userId, true);
+          }
+        }
+      })
+      .catch(err => {
+        console.warn('[ADDA Room Voice] Microphone error:', err);
+        if (active) setVoiceStatus('Microphone unavailable');
+      });
+
     return () => {
       active = false;
-      setMirotalkUrl('');
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(t => t.stop());
+        localStreamRef.current = null;
+      }
+      for (const [, pc] of roomPeersRef.current) {
+        pc.close();
+      }
+      roomPeersRef.current.clear();
+      remoteStreamsRef.current.clear();
+      pendingIceCandidatesRef.current.clear();
       latestRemote.current.clear();
-      if (mediaRef.current === bridge) mediaRef.current = null;
     };
-  }, [mirotalkEnabled, focused, shardId, currentUserId, injectMirotalk]);
+  }, [username, focused, shardId, currentUserId, getOrCreateRoomPeer]);
+
 
   const showRouteToast = useCallback((msg: string) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -379,6 +546,9 @@ export default function HangoutScreen() {
         next.delete(peer.userId);
         return next;
       });
+      if (localStreamRef.current && currentUserId && currentUserId < peer.userId && !blockedPeersRef.current.has(peer.userId)) {
+        void getOrCreateRoomPeer(peer.userId, true);
+      }
     };
     const onLeft = ({ userId }: { userId: string }) => {
       queues.delete(userId);
@@ -389,6 +559,13 @@ export default function HangoutScreen() {
         next.delete(userId);
         return next;
       });
+      const pc = roomPeersRef.current.get(userId);
+      if (pc) {
+        pc.close();
+        roomPeersRef.current.delete(userId);
+      }
+      remoteStreamsRef.current.delete(userId);
+      pendingIceCandidatesRef.current.delete(userId);
     };
     const onMessage = (message: RoomMessage) => {
       if (!blockedPeersRef.current.has(message.userId)) setMessages(current => [...current, message].slice(-50));
@@ -448,7 +625,7 @@ export default function HangoutScreen() {
           }]);
         }
         setPeers(result.value.peers.filter(peer => !blockedPeersRef.current.has(peer.userId)));
-          setMessages(result.value.messages.filter(message => !blockedPeersRef.current.has(message.userId)));
+        setMessages(result.value.messages.filter(message => !blockedPeersRef.current.has(message.userId)));
         if (result.value.shardId) setShardId(result.value.shardId);
         if (result.value.ownerId) setRoomOwnerId(result.value.ownerId);
         if (result.value.shardIndex) {
@@ -462,6 +639,13 @@ export default function HangoutScreen() {
           MusicService.setRadioEnabled(result.value.radio.enabled, true);
           MusicService.playRadioTrack(result.value.radio.trackIndex);
         }
+        if (localStreamRef.current && currentUserId) {
+          for (const p of result.value.peers) {
+            if (p.userId !== currentUserId && currentUserId < p.userId && !blockedPeersRef.current.has(p.userId)) {
+              void getOrCreateRoomPeer(p.userId, true);
+            }
+          }
+        }
         setChatError('');
         onPosition(positionRef.current);
       });
@@ -472,6 +656,9 @@ export default function HangoutScreen() {
       presenceRef.current = socket;
       socket.on('room:peer', onPeer);
       socket.on('room:peer-left', onLeft);
+      socket.on('room:snapshot', onSnapshot);
+      socket.on('room:signal', onRoomSignal);
+      socket.on('room:voice-ready', onVoiceReady);
       socket.on('room:message', onMessage);
       socket.on('room:radio-sync', onRadioSync);
       socket.on('room:kicked', onKicked);
@@ -484,6 +671,9 @@ export default function HangoutScreen() {
       MusicService.stopAll();
       live?.off('room:peer', onPeer);
       live?.off('room:peer-left', onLeft);
+      live?.off('room:snapshot', onSnapshot);
+      live?.off('room:signal', onRoomSignal);
+      live?.off('room:voice-ready', onVoiceReady);
       live?.off('room:message', onMessage);
       live?.off('room:radio-sync', onRadioSync);
       live?.off('room:kicked', onKicked);
@@ -494,7 +684,7 @@ export default function HangoutScreen() {
       setPeers([]);
       if (presenceRef.current === live) presenceRef.current = null;
     };
-  }, [roomKind, username, avatar, focused, showRouteToast, onPosition, params.groupId, params.roomId, params.groupName]);
+  }, [roomKind, username, avatar, focused, showRouteToast, onPosition, params.groupId, params.roomId, params.groupName, currentUserId, getOrCreateRoomPeer, onRoomSignal, onVoiceReady]);
 
   // Pause background music when the app is minimized to prevent audio stream conflicts
   useEffect(() => {
@@ -588,7 +778,7 @@ export default function HangoutScreen() {
   const toggleMic = () => {
     const next = !micMutedRef.current;
     micMutedRef.current = next;
-    mediaRef.current?.setMuted(next);
+    localStreamRef.current?.getAudioTracks().forEach((t: any) => { t.enabled = !next; });
     setMicMuted(next);
 
     // Root fix: when unmuting, WebRTC ADM restarts AudioRecord.
@@ -603,16 +793,31 @@ export default function HangoutScreen() {
   const toggleSpeaker = () => {
     const next = !speakerMutedRef.current;
     speakerMutedRef.current = next;
-    mediaRef.current?.setPlaybackMuted(next);
     setSpeakerMuted(next);
+    for (const [id, stream] of remoteStreamsRef.current) {
+      const other = latestRemote.current.get(id);
+      const myPos = positionRef.current;
+      const distance = other ? Math.hypot(other.x - myPos.x, other.z - myPos.z) : 999;
+      const isMuted = next || mutedPeersRef.current.has(id) || blockedPeersRef.current.has(id) || distance > 15;
+      stream.getAudioTracks().forEach((t: any) => { t.enabled = !isMuted; });
+    }
   };
+
   const togglePeerSpeaker = (userId: string) => {
     const next = new Set(mutedPeersRef.current);
     const muted = !next.has(userId);
     if (muted) next.add(userId); else next.delete(userId);
     mutedPeersRef.current = next;
-    mediaRef.current?.setUserMuted(userId, muted);
     setMutedPeers(next);
+
+    const stream = remoteStreamsRef.current.get(userId);
+    if (stream) {
+      const other = latestRemote.current.get(userId);
+      const myPos = positionRef.current;
+      const distance = other ? Math.hypot(other.x - myPos.x, other.z - myPos.z) : 999;
+      const isMuted = muted || speakerMutedRef.current || blockedPeersRef.current.has(userId) || distance > 15;
+      stream.getAudioTracks().forEach((t: any) => { t.enabled = !isMuted; });
+    }
   };
 
   const blockPeer = (peer: RoomPeer) => {
@@ -622,7 +827,13 @@ export default function HangoutScreen() {
         try {
           await socialApi('/safety/blocks', 'POST', { userId: peer.userId });
           blockedPeersRef.current.add(peer.userId);
-          mediaRef.current?.setUserMuted(peer.userId, true);
+          const stream = remoteStreamsRef.current.get(peer.userId);
+          if (stream) stream.getAudioTracks().forEach((t: any) => { t.enabled = false; });
+          const pc = roomPeersRef.current.get(peer.userId);
+          if (pc) {
+            pc.close();
+            roomPeersRef.current.delete(peer.userId);
+          }
           peerSnapshots.current.delete(peer.userId);
           setPeers(current => current.filter(item => item.userId !== peer.userId));
           setMessages(current => current.filter(message => message.userId !== peer.userId));
@@ -642,31 +853,6 @@ export default function HangoutScreen() {
   return <View style={styles.screen}>
     <StatusBar hidden />
     <NavigationBar hidden />
-    {mirotalkEnabled && Boolean(mirotalkUrl) && <WebView
-      ref={mirotalkWebView}
-      source={{ uri: mirotalkUrl }}
-      javaScriptEnabled
-      domStorageEnabled
-      mediaPlaybackRequiresUserAction={false}
-      onMessage={event => {
-        try {
-          const packet = JSON.parse(event.nativeEvent.data) as { type: string; peerId?: string; motion?: PlayerSnapshot };
-          if (packet.type === 'peer-open' || packet.type === 'voice-ready') {
-            setVoiceStatus('Nearby voice on');
-          }
-          if (packet.type === 'motion' && packet.motion && packet.motion.id !== currentUserId) {
-            setVoiceStatus('Nearby voice on');
-            onSnapshot({ ...packet.motion, time: Date.now() });
-          }
-        } catch { /* Ignore malformed bridge events. */ }
-      }}
-      onError={() => setVoiceStatus('Could not connect to room voice.')}
-      onLoad={() => {
-        setTimeout(() => setVoiceStatus('Nearby voice on'), 1500);
-      }}
-      containerStyle={styles.hiddenBridge}
-      style={styles.hiddenBridge}
-    />}
     {landscapeReady && (width >= height || orientationFailed) && (
       <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
         <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} peerSnapshotsRef={peerSnapshots} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} onOpenRadio={() => { setMusicModalTab('radio'); setMusicModalOpen(true); }} />
@@ -1083,7 +1269,6 @@ export default function HangoutScreen() {
 const styles = StyleSheet.create({
   reportLabel: { color: '#F7FAF8', fontSize: 11, fontWeight: '700' },
   screen: { flex: 1, backgroundColor: '#0A0E14' },
-  hiddenBridge: { position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' },
   topBar: { position: 'absolute', top: 8, left: 16, right: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
   roomIdentity: { maxWidth: 220, backgroundColor: '#10221DCF', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8 },
   roomIdentityHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },

@@ -688,54 +688,44 @@ export async function receiveDirectEnvelope(envelope: Envelope): Promise<void> {
   const me = active;
   if (envelope.recipientDeviceId && envelope.recipientDeviceId !== me.deviceId) return;
 
-  // Immediately emit delivery ACK over socket (or HTTP fallback) to trigger Double Gray Tick (✓✓) on sender
-  const live = await getRealtimeSocket(me.deviceId).catch(() => null);
-  if (live?.connected) {
-    live.emit('chat:ack_delivery', {
-      messageId: envelope.messageId,
-      senderId: envelope.senderId
-    });
-  } else {
-    void socialApi('/chat/delivery-ack', 'POST', {
-      messageId: envelope.messageId,
-      senderId: envelope.senderId
-    }).catch(() => {});
-  }
-
-  await withDbLock(async () => {
-    const existing = await me.db.getFirstAsync<{ id: string }>('SELECT id FROM message WHERE id = ?', envelope.messageId);
-    if (existing) return;
+  // Acknowledge only after this device has a durable, decryptable SQLite row.
+  // A duplicate envelope is safe to acknowledge because its row already exists.
+  const saved = await withDbLock(async (): Promise<boolean> => {
+    const existing = await me.db.getFirstAsync<{ senderId: string; kind: string }>(
+      'SELECT senderId, kind FROM message WHERE id = ?', envelope.messageId
+    );
+    if (existing) return existing.senderId === envelope.senderId && existing.kind === envelope.kind;
 
     try {
       if (!envelope.senderPublicKey) {
         console.warn('[ADDA] Envelope missing senderPublicKey, skipping');
-        return;
+        return false;
       }
       await pinKeysInternal(me.db, [{ deviceId: envelope.senderDeviceId, userId: envelope.senderId, publicKey: envelope.senderPublicKey }]);
       const contentKey = nacl.box.open(base64ToBytes(envelope.wrappedKey), base64ToBytes(envelope.wrapNonce), base64ToBytes(envelope.senderPublicKey), me.secretKey);
       if (!contentKey) {
         console.warn('[ADDA] Could not decrypt contentKey for envelope', envelope.messageId);
-        return;
+        return false;
       }
       const plaintext = nacl.secretbox.open(base64ToBytes(envelope.ciphertext), base64ToBytes(envelope.nonce), contentKey);
       if (!plaintext) {
         console.warn('[ADDA] Could not decrypt plaintext for envelope', envelope.messageId);
-        return;
+        return false;
       }
       const content: unknown = JSON.parse(new TextDecoder().decode(plaintext));
-      if (!content || typeof content !== 'object' || !('type' in content) || (content.type !== 'text' && content.type !== 'media')) return;
+      if (!content || typeof content !== 'object' || !('type' in content) || (content.type !== 'text' && content.type !== 'media')) return false;
       if (content.type === 'media' && 'localUri' in content) {
         delete (content as any).localUri;
       }
       const body = content.type === 'media' ? mediaPrefix + JSON.stringify(content) : ('body' in content && typeof content.body === 'string' ? content.body : null);
-      if (body === null) return;
+      if (body === null) return false;
       const savedCreatedAt = ('createdAt' in content && typeof content.createdAt === 'string') ? content.createdAt : envelope.createdAt;
       const targetId = envelope.kind === 'direct' ? (envelope.senderId === me.userId ? envelope.targetId : envelope.senderId) : envelope.targetId;
       const incomingReplyTo = ('replyTo' in (content as any) && (content as any).replyTo) ? (content as any).replyTo : null;
       const incomingMentions = ('mentions' in (content as any) && Array.isArray((content as any).mentions)) ? (content as any).mentions : null;
 
       await me.db.runAsync(
-        'INSERT OR IGNORE INTO message (id, kind, targetId, senderId, senderName, body, createdAt, status, replyTo, mentions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO message (id, kind, targetId, senderId, senderName, body, createdAt, status, replyTo, mentions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         envelope.messageId, envelope.kind, targetId, envelope.senderId,
         'senderName' in content && typeof content.senderName === 'string' ? content.senderName : envelope.senderName,
         body, savedCreatedAt, envelope.senderId === me.userId ? 'sent' : 'received',
@@ -744,10 +734,25 @@ export async function receiveDirectEnvelope(envelope: Envelope): Promise<void> {
       );
 
       changed();
+      return true;
     } catch (err) {
       console.warn('[ADDA] Direct envelope processing warning:', err);
+      return false;
     }
   });
+  if (!saved) return;
+
+  const receipt = { messageId: envelope.messageId, recipientDeviceId: me.deviceId };
+  const live = await getRealtimeSocket(me.deviceId).catch(() => null);
+  if (live?.connected) {
+    const accepted = await new Promise<boolean>(resolve => {
+      live.timeout(5000).emit('chat:ack_delivery', receipt,
+        (error: Error | null, result?: { ok: boolean }) => resolve(!error && result?.ok === true));
+    });
+    if (accepted) return;
+  }
+  // If this fails, the server keeps its encrypted copy and resends it on reconnect.
+  await socialApi('/chat/delivery-ack', 'POST', receipt).catch(() => {});
 }
 
 // ========================================================
@@ -774,6 +779,43 @@ export async function handleMessageStatusUpdate(update: { messageId?: string; me
 // ========================================================
 // MARK CHAT READ (WhatsApp Double Blue Tick ✓✓)
 // ========================================================
+async function flushPendingReadReceipts(me: NonNullable<typeof active>): Promise<void> {
+  const receipts = await withDbLock(() => me.db.getAllAsync<{ messageId: string; senderId: string }>(
+    'SELECT messageId, senderId FROM pending_read_receipt ORDER BY senderId, messageId'
+  ));
+  const bySender = new Map<string, string[]>();
+  for (const receipt of receipts) {
+    const ids = bySender.get(receipt.senderId) ?? [];
+    ids.push(receipt.messageId);
+    bySender.set(receipt.senderId, ids);
+  }
+  const live = await getRealtimeSocket(me.deviceId).catch(() => null);
+  for (const [senderId, ids] of bySender) {
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      const messageIds = ids.slice(offset, offset + 100);
+      const body = { messageIds, senderId };
+      let accepted = false;
+      if (live?.connected) {
+        accepted = await new Promise<boolean>(resolve => {
+          live.timeout(5000).emit('chat:ack_read', body,
+            (error: Error | null, result?: { ok: boolean }) => resolve(!error && result?.ok === true));
+        });
+      }
+      if (!accepted) {
+        accepted = await socialApi<{ ok: boolean }>('/chat/read-ack', 'POST', body)
+          .then(result => result.ok === true).catch(() => false);
+      }
+      if (accepted) {
+        await withDbLock(async () => {
+          for (const id of messageIds) {
+            await me.db.runAsync('DELETE FROM pending_read_receipt WHERE messageId = ? AND senderId = ?', id, senderId);
+          }
+        });
+      }
+    }
+  }
+}
+
 export async function markChatRead(target: ChatTarget): Promise<void> {
   if (!active) return;
   const me = active;
@@ -785,27 +827,14 @@ export async function markChatRead(target: ChatTarget): Promise<void> {
 
   if (rows.length === 0) return;
 
-  const ids = rows.map(r => r.id);
-  const otherUserId = target.kind === 'direct' ? target.id : rows[0]?.senderId;
-
   await withDbLock(async () => {
-    for (const id of ids) {
-      await me.db.runAsync("UPDATE message SET status = 'read' WHERE id = ?", id);
+    for (const row of rows) {
+      await me.db.runAsync("UPDATE message SET status = 'read' WHERE id = ?", row.id);
+      await me.db.runAsync('INSERT OR IGNORE INTO pending_read_receipt VALUES (?, ?)', row.id, row.senderId);
     }
   });
   changed();
-
-  const live = await getRealtimeSocket(me.deviceId).catch(() => null);
-  if (live?.connected && otherUserId) {
-    live.emit('chat:ack_read', { messageIds: ids, senderId: otherUserId });
-  } else if (otherUserId) {
-    void socialApi('/chat/read-ack', 'POST', { messageIds: ids, senderId: otherUserId }).catch(() => {});
-    await withDbLock(async () => {
-      for (const id of ids) {
-        await me.db.runAsync('INSERT OR IGNORE INTO pending_read_receipt VALUES (?, ?)', id, otherUserId);
-      }
-    });
-  }
+  await flushPendingReadReceipts(me);
 }
 
 // ========================================================
@@ -828,18 +857,26 @@ export async function syncEncryptedChat(): Promise<void> {
   }
 
   // 2. Flush pending read receipts
-  const receipts = await me.db.getAllAsync<{ messageId: string; senderId: string }>('SELECT messageId, senderId FROM pending_read_receipt');
-  if (receipts.length > 0) {
-    const bySender = new Map<string, string[]>();
-    for (const r of receipts) {
-      const list = bySender.get(r.senderId) ?? [];
-      list.push(r.messageId);
-      bySender.set(r.senderId, list);
+  await flushPendingReadReceipts(me);
+
+  // Recover ticks that changed while the sender was offline.
+  const outgoing = await me.db.getAllAsync<{ id: string }>(
+    "SELECT id FROM message WHERE senderId = ? AND status IN ('sent', 'delivered') ORDER BY createdAt DESC LIMIT 500",
+    me.userId
+  );
+  for (let offset = 0; offset < outgoing.length; offset += 100) {
+    const ids = outgoing.slice(offset, offset + 100).map(row => row.id);
+    const result = await new Promise<{ ok: boolean; statuses?: { messageId: string; status: 'sent' | 'delivered' | 'read' }[] }>(resolve => {
+      live.timeout(5000).emit('chat:receipt_status', ids,
+        (error: Error | null, response?: { ok: boolean; statuses?: { messageId: string; status: 'sent' | 'delivered' | 'read' }[] }) =>
+          resolve(error ? { ok: false } : response ?? { ok: false }));
+    });
+    if (!result.ok) break;
+    for (const item of result.statuses ?? []) {
+      if (item.status === 'delivered' || item.status === 'read') {
+        await handleMessageStatusUpdate({ messageId: item.messageId, status: item.status });
+      }
     }
-    for (const [senderId, messageIds] of bySender.entries()) {
-      live.emit('chat:ack_read', { messageIds, senderId });
-    }
-    await me.db.runAsync('DELETE FROM pending_read_receipt');
   }
 }
 
