@@ -24,9 +24,13 @@ function waitConnected(live: Socket): Promise<Socket> {
 }
 
 export function setRealtimeDeviceId(deviceId: string | null) {
+  const previous = currentDeviceId;
   currentDeviceId = deviceId;
-  if (socket && socket.connected && deviceId) {
+  if (socket) {
     socket.auth = { ...(socket.auth as object), deviceId };
+    if (socket.connected && deviceId && previous !== deviceId) {
+      socket.emit('chat:drain_spool', { deviceId });
+    }
   }
 }
 
@@ -38,6 +42,9 @@ export async function getRealtimeSocket(deviceId?: string): Promise<Socket> {
   if (socket && socketToken === token) {
     if (currentDeviceId && (socket.auth as any)?.deviceId !== currentDeviceId) {
       socket.auth = { token, deviceId: currentDeviceId };
+      socket.disconnect();
+      socket.connect();
+      return waitConnected(socket);
     }
     if (!socket.connected) socket.connect();
     return waitConnected(socket);
@@ -61,4 +68,5 @@ export function disconnectRealtime() {
   socket?.disconnect();
   socket = null;
   socketToken = null;
+  currentDeviceId = null;
 }

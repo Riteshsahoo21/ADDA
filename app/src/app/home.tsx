@@ -129,7 +129,25 @@ export default function HomeScreen() {
   const [serverMaxPlayers, setServerMaxPlayers] = useState<number>(10);
   const [selectedGroupInvites, setSelectedGroupInvites] = useState<string[]>([]);
   const [selectedContactInvites, setSelectedContactInvites] = useState<string[]>([]);
+  const [inviteSearch, setInviteSearch] = useState('');
   const [creatingServer, setCreatingServer] = useState(false);
+
+  const filteredContacts = useMemo(() => {
+    const q = inviteSearch.trim().toLowerCase();
+    if (!q) return contacts;
+    return contacts.filter(c =>
+      c.name.toLowerCase().includes(q) ||
+      c.username.toLowerCase().includes(q)
+    );
+  }, [contacts, inviteSearch]);
+
+  const filteredGroups = useMemo(() => {
+    const q = inviteSearch.trim().toLowerCase();
+    if (!q) return groups;
+    return groups.filter(g =>
+      g.name.toLowerCase().includes(q)
+    );
+  }, [groups, inviteSearch]);
   const [sheet, setSheet] = useState<Sheet>(null);
   const [avatarPreview, setAvatarPreview] = useState<{
     kind: 'direct' | 'group';
@@ -646,6 +664,7 @@ export default function HomeScreen() {
     setServerMaxPlayers(10);
     setSelectedGroupInvites([]);
     setSelectedContactInvites([]);
+    setInviteSearch('');
     setCreateModalOpen(true);
   };
 
@@ -865,7 +884,13 @@ export default function HomeScreen() {
             <Text style={styles.pageTitle}>Create 3D Adda</Text>
             <Text style={styles.pageCopy}>Pick a virtual map to launch a real-time hangout space for your friends.</Text>
 
-            <View style={styles.themeList}>
+            {/* Horizontal Swipeable Map Carousel */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.horizontalMapCarousel}
+              decelerationRate="fast"
+            >
               {THEMES.map(theme => {
                 const isSelected = selectedTheme === theme.id;
                 return (
@@ -873,16 +898,16 @@ export default function HomeScreen() {
                     key={theme.id}
                     onPress={() => setSelectedTheme(theme.id)}
                     style={[
-                      styles.roomMapCard,
-                      isSelected && [styles.roomMapCardSelected, { borderColor: theme.color }],
+                      styles.roomMapCardHorizontal,
+                      isSelected && [styles.roomMapCardHorizontalSelected, { borderColor: theme.color }],
                     ]}
                   >
                     <Image source={theme.image} style={styles.roomMapCardBg} resizeMode="cover" />
                     <Svg height="100%" width="100%" style={StyleSheet.absoluteFill}>
                       <Defs>
                         <LinearGradient id={`grad_${theme.id}`} x1="0" y1="0" x2="0" y2="1">
-                          <Stop offset="0" stopColor="#000000" stopOpacity="0.25" />
-                          <Stop offset="0.45" stopColor="#000000" stopOpacity="0.5" />
+                          <Stop offset="0" stopColor="#000000" stopOpacity="0.2" />
+                          <Stop offset="0.45" stopColor="#000000" stopOpacity="0.45" />
                           <Stop offset="1" stopColor="#040907" stopOpacity="0.94" />
                         </LinearGradient>
                       </Defs>
@@ -900,11 +925,11 @@ export default function HomeScreen() {
                       ]}>
                         {isSelected ? (
                           <View style={styles.roomSelectCheckRow}>
-                            <Check size={12} strokeWidth={3} color="#FFFFFF" />
-                            <Text style={styles.roomSelectTextActive}>SELECTED</Text>
+                            <Check size={11} strokeWidth={3} color="#FFFFFF" />
+                            <Text style={styles.roomSelectTextActive}>READY</Text>
                           </View>
                         ) : (
-                          <Text style={styles.roomSelectTextInactive}>TAP TO SELECT</Text>
+                          <Text style={styles.roomSelectTextInactive}>SELECT</Text>
                         )}
                       </View>
                     </View>
@@ -912,10 +937,10 @@ export default function HomeScreen() {
                     {/* Bottom Row: Title, 3D Badge, and Tagline */}
                     <View style={styles.roomMapBottomContent}>
                       <View style={styles.roomMapTitleRow}>
-                        <Text style={styles.roomMapTitle}>{theme.title}</Text>
+                        <Text style={styles.roomMapTitleHorizontal}>{theme.title}</Text>
                         <View style={styles.room3DBadge}>
-                          <Sparkles size={11} color="#34D399" />
-                          <Text style={styles.room3DBadgeText}>3D SPACE</Text>
+                          <Sparkles size={10} color="#34D399" />
+                          <Text style={styles.room3DBadgeText}>3D</Text>
                         </View>
                       </View>
                       <Text style={styles.roomMapTagline} numberOfLines={1}>{theme.tagline}</Text>
@@ -923,14 +948,43 @@ export default function HomeScreen() {
                   </Pressable>
                 );
               })}
+            </ScrollView>
+
+            {/* Quick Map Switcher Pills Row */}
+            <View style={styles.mapQuickPillsRow}>
+              {THEMES.map(theme => {
+                const isSelected = selectedTheme === theme.id;
+                return (
+                  <Pressable
+                    key={theme.id}
+                    onPress={() => setSelectedTheme(theme.id)}
+                    style={[
+                      styles.mapQuickPill,
+                      isSelected && [styles.mapQuickPillActive, { backgroundColor: theme.color + '22', borderColor: theme.color }],
+                    ]}
+                  >
+                    <Text style={{ fontSize: 13 }}>{theme.emoji}</Text>
+                    <Text
+                      style={[
+                        styles.mapQuickPillText,
+                        isSelected && [styles.mapQuickPillTextActive, { color: theme.color }],
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {theme.title.split(' ')[0]}
+                    </Text>
+                  </Pressable>
+                );
+              })}
             </View>
 
+            {/* Launch Server CTA directly below - no scroll needed */}
             {(() => {
               const activeTheme = THEMES.find(t => t.id === selectedTheme) || THEMES[0];
               return (
                 <Pressable
                   onPress={() => handleOpenCreateModal(selectedTheme)}
-                  style={[styles.launchServerButton, { backgroundColor: activeTheme.color }]}
+                  style={[styles.launchServerButton, { backgroundColor: activeTheme.color, marginTop: 14 }]}
                 >
                   <CirclePlus size={20} color="#FFFFFF" strokeWidth={2.4} />
                   <Text style={styles.launchServerButtonText}>LAUNCH {activeTheme.title.toUpperCase()}</Text>
@@ -1508,63 +1562,110 @@ export default function HomeScreen() {
               </View>
             </View>
 
-            {/* Invite Groups & Contacts multi-selectors (Available for both public and private servers) */}
-            <Text style={styles.fieldLabel}>INVITE GROUPS ({selectedGroupInvites.length} SELECTED)</Text>
+            {/* Invite Groups & Contacts multi-selectors */}
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <Text style={[styles.fieldLabel, { marginBottom: 0 }]}>
+                INVITE GROUPS ({selectedGroupInvites.length} SELECTED)
+              </Text>
+              {selectedGroupInvites.length > 0 && (
+                <Pressable onPress={() => setSelectedGroupInvites([])}>
+                  <Text style={styles.clearSelectedText}>Clear</Text>
+                </Pressable>
+              )}
+            </View>
+
             {groups.length === 0 ? (
               <Text style={styles.helper}>You have not joined any groups yet.</Text>
             ) : (
               <View style={styles.inviteListContainer}>
-                {groups.map(group => {
-                  const isSelected = selectedGroupInvites.includes(group.id);
-                  return (
-                    <Pressable
-                      key={group.id}
-                      style={styles.memberRow}
-                      onPress={() => {
-                        setSelectedGroupInvites(curr =>
-                          isSelected ? curr.filter(id => id !== group.id) : [...curr, group.id]
-                        );
-                      }}
-                    >
-                      <View style={[styles.checkbox, isSelected && styles.checked]}>
-                        {isSelected && <Text style={styles.checkMark}>✓</Text>}
-                      </View>
-                      <UsersRound size={18} color={colors.primaryDark} style={{ marginRight: 6 }} />
-                      <Text style={styles.memberName}>{group.name}</Text>
-                      <Text style={styles.memberUsername}>{group.memberCount} members</Text>
-                    </Pressable>
-                  );
-                })}
+                <ScrollView nestedScrollEnabled style={styles.inviteScroll} showsVerticalScrollIndicator={true}>
+                  {filteredGroups.map(group => {
+                    const isSelected = selectedGroupInvites.includes(group.id);
+                    return (
+                      <Pressable
+                        key={group.id}
+                        style={styles.memberRow}
+                        onPress={() => {
+                          setSelectedGroupInvites(curr =>
+                            isSelected ? curr.filter(id => id !== group.id) : [...curr, group.id]
+                          );
+                        }}
+                      >
+                        <View style={[styles.checkbox, isSelected && styles.checked]}>
+                          {isSelected && <Text style={styles.checkMark}>✓</Text>}
+                        </View>
+                        <UsersRound size={18} color={colors.primaryDark} style={{ marginRight: 6 }} />
+                        <Text style={styles.memberName}>{group.name}</Text>
+                        <Text style={styles.memberUsername}>{group.memberCount} members</Text>
+                      </Pressable>
+                    );
+                  })}
+                  {filteredGroups.length === 0 && (
+                    <Text style={styles.inviteEmptyText}>No groups match "{inviteSearch}"</Text>
+                  )}
+                </ScrollView>
               </View>
             )}
 
-            <Text style={[styles.fieldLabel, { marginTop: 14 }]}>
-              INVITE CONTACTS ({selectedContactInvites.length} SELECTED)
-            </Text>
+            {/* Invite Contacts */}
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 14, marginBottom: 8 }}>
+              <Text style={[styles.fieldLabel, { marginBottom: 0 }]}>
+                INVITE CONTACTS ({selectedContactInvites.length} SELECTED)
+              </Text>
+              {selectedContactInvites.length > 0 && (
+                <Pressable onPress={() => setSelectedContactInvites([])}>
+                  <Text style={styles.clearSelectedText}>Clear</Text>
+                </Pressable>
+              )}
+            </View>
+
+            {/* SEARCH INPUT FOR INVITE CONTACTS */}
+            <View style={styles.inviteSearchBox}>
+              <Search size={15} color={colors.muted} />
+              <TextInput
+                style={styles.inviteSearchInput}
+                placeholder="Search friends to invite..."
+                placeholderTextColor={colors.muted}
+                value={inviteSearch}
+                onChangeText={setInviteSearch}
+                autoCapitalize="none"
+              />
+              {inviteSearch.length > 0 && (
+                <Pressable onPress={() => setInviteSearch('')} hitSlop={8}>
+                  <X size={15} color={colors.muted} />
+                </Pressable>
+              )}
+            </View>
+
             {contacts.length === 0 ? (
               <Text style={styles.helper}>No contacts yet.</Text>
             ) : (
               <View style={styles.inviteListContainer}>
-                {contacts.map(contact => {
-                  const isSelected = selectedContactInvites.includes(contact.id);
-                  return (
-                    <Pressable
-                      key={contact.id}
-                      style={styles.memberRow}
-                      onPress={() => {
-                        setSelectedContactInvites(curr =>
-                          isSelected ? curr.filter(id => id !== contact.id) : [...curr, contact.id]
-                        );
-                      }}
-                    >
-                      <View style={[styles.checkbox, isSelected && styles.checked]}>
-                        {isSelected && <Text style={styles.checkMark}>✓</Text>}
-                      </View>
-                      <Text style={styles.memberName}>{contact.name}</Text>
-                      <Text style={styles.memberUsername}>@{contact.username}</Text>
-                    </Pressable>
-                  );
-                })}
+                <ScrollView nestedScrollEnabled style={styles.inviteScroll} showsVerticalScrollIndicator={true}>
+                  {filteredContacts.map(contact => {
+                    const isSelected = selectedContactInvites.includes(contact.id);
+                    return (
+                      <Pressable
+                        key={contact.id}
+                        style={styles.memberRow}
+                        onPress={() => {
+                          setSelectedContactInvites(curr =>
+                            isSelected ? curr.filter(id => id !== contact.id) : [...curr, contact.id]
+                          );
+                        }}
+                      >
+                        <View style={[styles.checkbox, isSelected && styles.checked]}>
+                          {isSelected && <Text style={styles.checkMark}>✓</Text>}
+                        </View>
+                        <Text style={styles.memberName}>{contact.name}</Text>
+                        <Text style={styles.memberUsername}>@{contact.username}</Text>
+                      </Pressable>
+                    );
+                  })}
+                  {filteredContacts.length === 0 && (
+                    <Text style={styles.inviteEmptyText}>No contacts match "{inviteSearch}"</Text>
+                  )}
+                </ScrollView>
               </View>
             )}
 
@@ -1748,6 +1849,65 @@ const styles = StyleSheet.create({
 
   // Themes / 3D Room Cards
   themeList: { gap: 16, marginBottom: 22 },
+  horizontalMapCarousel: {
+    paddingRight: 16,
+    gap: 12,
+    paddingVertical: 4,
+  },
+  roomMapCardHorizontal: {
+    width: 285,
+    height: 170,
+    borderRadius: 22,
+    overflow: 'hidden',
+    position: 'relative',
+    borderWidth: 2,
+    borderColor: 'rgba(0, 0, 0, 0.08)',
+    backgroundColor: '#0F172A',
+    elevation: 3,
+  },
+  roomMapCardHorizontalSelected: {
+    borderWidth: 2.5,
+    elevation: 8,
+  },
+  roomMapTitleHorizontal: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+    textShadowColor: 'rgba(0, 0, 0, 0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  mapQuickPillsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  mapQuickPill: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+  },
+  mapQuickPillActive: {
+    elevation: 2,
+  },
+  mapQuickPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.muted,
+  },
+  mapQuickPillTextActive: {
+    fontWeight: '900',
+  },
   roomMapCard: {
     height: 195,
     borderRadius: 22,
@@ -1990,7 +2150,47 @@ const styles = StyleSheet.create({
   privacyOptionTitle: { fontSize: 14, fontWeight: '800', color: colors.text },
   privacyOptionTitleSelected: { color: colors.primaryDark },
   privacyOptionDesc: { fontSize: 10, color: colors.muted, textAlign: 'center', marginTop: 2 },
-  inviteListContainer: { maxHeight: 180, borderWidth: 1, borderColor: colors.border, borderRadius: 14, paddingHorizontal: 12, marginBottom: 12 },
+  inviteListContainer: {
+    maxHeight: 180,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 14,
+    backgroundColor: colors.surface,
+    overflow: 'hidden',
+    marginBottom: 12,
+  },
+  inviteScroll: {
+    paddingHorizontal: 12,
+  },
+  inviteSearchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 10,
+  },
+  inviteSearchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: colors.text,
+    padding: 0,
+  },
+  inviteEmptyText: {
+    textAlign: 'center',
+    color: colors.muted,
+    fontSize: 12,
+    paddingVertical: 18,
+  },
+  clearSelectedText: {
+    color: colors.error,
+    fontSize: 12,
+    fontWeight: '700',
+  },
   capacityCapText: { fontSize: 12, fontWeight: '700', color: colors.primaryDark },
   capacityStepperRow: {
     flexDirection: 'row',

@@ -67,52 +67,48 @@ export function SessionProvider({ children }: PropsWithChildren) {
   }, []);
 
   useEffect(() => {
-    if (username) void getRealtimeSocket().catch(error => console.warn('Live chat unavailable:', error));
-    else disconnectRealtime();
-    return () => disconnectRealtime();
-  }, [username]);
-  useEffect(() => {
-    if (!username) { void closeEncryptedChat(); return; }
+    if (!username) { void closeEncryptedChat(); disconnectRealtime(); return; }
     let active = true;
     let live: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
-    let onEnvelope: ((envelope: Envelope) => void) | null = null;
-    let onStatus: ((update: any) => void) | null = null;
-    let onGroupUpdate: ((data: any) => void) | null = null;
-    let onConnect: (() => void) | null = null;
     const sync = () => { void syncEncryptedChat().catch(error => console.warn('Encrypted chat sync unavailable:', error)); };
 
-    // Use cached profile if already loaded to init encrypted chat immediately!
-    const cachedMe = getCachedProfile();
-    if (cachedMe?.id) {
-      void initEncryptedChat(cachedMe.id).then(() => {
-        if (active) sync();
-      }).catch(() => {});
-    }
-
-    void socialApi<OwnProfile>('/me').then(async me => {
-      if (!active) return;
-      setCachedProfile(me);
-      void SecureStore.setItemAsync(SAVED_USER_ID_KEY, me.id);
-      await initEncryptedChat(me.id);
-      if (!active) return;
+    const onEnvelope = (envelope: Envelope) => { void receiveDirectEnvelope(envelope).catch(() => {}); };
+    const onStatus = (update: any) => { void handleMessageStatusUpdate(update).catch(() => {}); };
+    const onGroupUpdate = (data: any) => {
+      if (data?.groupId) clearKeyCache({ kind: 'group', id: data.groupId });
+      else clearKeyCache();
+    };
+    const onConnect = () => {
       sync();
-      live = await getRealtimeSocket();
-      if (!active) return;
-      onEnvelope = (envelope: Envelope) => { void receiveDirectEnvelope(envelope).catch(() => {}); };
-      onStatus = (update: any) => { void handleMessageStatusUpdate(update).catch(() => {}); };
-      onGroupUpdate = (data: any) => {
-        if (data?.groupId) clearKeyCache({ kind: 'group', id: data.groupId });
-        else clearKeyCache();
-      };
-      onConnect = () => {
+      if (!hasCallPushToken()) void registerCallNotifications().catch(() => {});
+    };
+
+    void (async () => {
+      try {
+        live = await getRealtimeSocket();
+        if (!active) return;
+        live.on('chat:envelope', onEnvelope);
+        live.on('chat:msg_status', onStatus);
+        live.on('group:updated', onGroupUpdate);
+        live.on('connect', onConnect);
+
+        const cachedMe = getCachedProfile();
+        if (cachedMe?.id) {
+          await initEncryptedChat(cachedMe.id).catch(() => {});
+        }
+
+        const me = await socialApi<OwnProfile>('/me');
+        if (!active) return;
+        setCachedProfile(me);
+        void SecureStore.setItemAsync(SAVED_USER_ID_KEY, me.id);
+        await initEncryptedChat(me.id);
+        if (!active) return;
         sync();
-        if (!hasCallPushToken()) void registerCallNotifications().catch(() => {});
-      };
-      live.on('chat:envelope', onEnvelope);
-      live.on('chat:msg_status', onStatus);
-      live.on('group:updated', onGroupUpdate);
-      live.on('connect', onConnect);
-    }).catch(error => console.warn('Encrypted chat unavailable:', error));
+      } catch (error) {
+        console.warn('Encrypted chat setup error:', error);
+      }
+    })();
+
     const appState = AppState.addEventListener('change', state => {
       if (state === 'active') {
         sync();
@@ -122,10 +118,12 @@ export function SessionProvider({ children }: PropsWithChildren) {
     return () => {
       active = false;
       appState.remove();
-      if (onEnvelope) live?.off('chat:envelope', onEnvelope);
-      if (onStatus) live?.off('chat:msg_status', onStatus);
-      if (onGroupUpdate) live?.off('group:updated', onGroupUpdate);
-      if (onConnect) live?.off('connect', onConnect);
+      if (live) {
+        live.off('chat:envelope', onEnvelope);
+        live.off('chat:msg_status', onStatus);
+        live.off('group:updated', onGroupUpdate);
+        live.off('connect', onConnect);
+      }
     };
   }, [username]);
   useEffect(() => {

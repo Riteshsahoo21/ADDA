@@ -5,7 +5,7 @@ export type ChatTarget = { kind: 'direct' | 'group'; id: string };
 export type CachedDevice = { deviceId: string; userId: string; publicKey: string };
 
 const deviceCache = new Map<string, { devices: CachedDevice[]; expiresAt: number }>();
-const devicePublicKeyCache = new Map<string, { publicKey: string; expiresAt: number }>();
+const devicePublicKeyCache = new Map<string, { userId: string; publicKey: string; expiresAt: number }>();
 
 export async function getRecipientDevices(userIds: string[]): Promise<CachedDevice[]> {
   const missingUsers: string[] = [];
@@ -34,12 +34,28 @@ export async function getRecipientDevices(userIds: string[]): Promise<CachedDevi
       list.push(dev);
       results.push(dev);
       // Cache public key by deviceId
-      devicePublicKeyCache.set(row.id, { publicKey: row.publicKey, expiresAt: now + 3600 * 1000 });
+      devicePublicKeyCache.set(row.id, { userId: row.userId, publicKey: row.publicKey, expiresAt: now + 3600 * 1000 });
     }
 
     for (const uid of missingUsers) {
+      let list = userMap.get(uid) ?? [];
+      if (list.length === 0) {
+        // Recovery: if user has an existing device that was marked revoked, un-revoke the latest one
+        const fallback = await pool.query<{ id: string; userId: string; publicKey: string }>(
+          'SELECT id, "userId", "publicKey" FROM chat_device WHERE "userId" = $1 ORDER BY "createdAt" DESC LIMIT 1',
+          [uid]
+        );
+        if (fallback.rows[0]) {
+          const row = fallback.rows[0];
+          await pool.query('UPDATE chat_device SET "revokedAt" = NULL WHERE id = $1', [row.id]).catch(() => {});
+          const dev = { deviceId: row.id, userId: row.userId, publicKey: row.publicKey };
+          list = [dev];
+          results.push(dev);
+          devicePublicKeyCache.set(row.id, { userId: row.userId, publicKey: row.publicKey, expiresAt: now + 3600 * 1000 });
+        }
+      }
       deviceCache.set(uid, {
-        devices: userMap.get(uid) ?? [],
+        devices: list,
         expiresAt: now + 30 * 1000 // 30 seconds cache (rapid key sync)
       });
     }
@@ -50,21 +66,35 @@ export async function getRecipientDevices(userIds: string[]): Promise<CachedDevi
 
 export function invalidateUserDeviceCache(userId: string): void {
   deviceCache.delete(userId);
+  for (const [deviceId, key] of devicePublicKeyCache) {
+    if (key.userId === userId) devicePublicKeyCache.delete(deviceId);
+  }
 }
 
 export async function getDevicePublicKey(deviceId: string, userId: string): Promise<string | null> {
   const now = Date.now();
   const cached = devicePublicKeyCache.get(deviceId);
-  if (cached && cached.expiresAt > now) {
+  if (cached && cached.userId === userId && cached.expiresAt > now) {
     return cached.publicKey;
   }
-  const dbRes = await pool.query<{ publicKey: string }>(
+  let dbRes = await pool.query<{ publicKey: string }>(
     'SELECT "publicKey" FROM chat_device WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL',
     [deviceId, userId]
   );
-  if (!dbRes.rows[0]) return null;
+  if (!dbRes.rows[0]) {
+    const revRes = await pool.query<{ publicKey: string }>(
+      'SELECT "publicKey" FROM chat_device WHERE id = $1 AND "userId" = $2',
+      [deviceId, userId]
+    );
+    if (revRes.rows[0]) {
+      await pool.query('UPDATE chat_device SET "revokedAt" = NULL WHERE id = $1', [deviceId]).catch(() => {});
+      dbRes = revRes;
+    } else {
+      return null;
+    }
+  }
   const key = dbRes.rows[0].publicKey;
-  devicePublicKeyCache.set(deviceId, { publicKey: key, expiresAt: now + 3600 * 1000 });
+  devicePublicKeyCache.set(deviceId, { userId, publicKey: key, expiresAt: now + 3600 * 1000 });
   return key;
 }
 
@@ -146,27 +176,4 @@ export function markMessageProcessed(messageId: string, senderId: string, timest
     timestamp,
     expiresAt: Date.now() + 5 * 60 * 1000,
   });
-}
-
-// In-memory tracker for delivery receipts to handle race condition where ACK arrives before DB spool commits
-const deliveryAckTracker = new Map<string, number>(); // key: `${messageId}:${recipientId}` -> expiresAt
-
-export function markDeliveryAcked(messageId: string, recipientId: string): void {
-  if (deliveryAckTracker.size > 20000) {
-    const now = Date.now();
-    for (const [key, exp] of deliveryAckTracker) {
-      if (exp < now) deliveryAckTracker.delete(key);
-    }
-  }
-  deliveryAckTracker.set(`${messageId}:${recipientId}`, Date.now() + 60 * 1000);
-}
-
-export function isDeliveryAcked(messageId: string, recipientId: string): boolean {
-  const exp = deliveryAckTracker.get(`${messageId}:${recipientId}`);
-  if (!exp) return false;
-  if (exp < Date.now()) {
-    deliveryAckTracker.delete(`${messageId}:${recipientId}`);
-    return false;
-  }
-  return true;
 }

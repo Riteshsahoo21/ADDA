@@ -14,8 +14,6 @@ import {
   checkCanAccessCached,
   isMessageProcessed,
   markMessageProcessed,
-  markDeliveryAcked,
-  isDeliveryAcked,
 } from './cache.js';
 import { hasAcceptedPolicy, isBlockedPair } from '../social/safety.js';
 
@@ -204,8 +202,10 @@ export function attachRealtime(httpServer: HttpServer): Server {
     attachRoomHandlers(io!, socket);
     attachPushHandlers(socket);
 
-    // Drain pending offline messages for this user/device upon connection
-    void drainOfflineSpool(socket, selfId, selfDeviceId);
+    // Drain pending offline messages for this user/device upon connection if deviceId is known
+    if (selfDeviceId) {
+      void drainOfflineSpool(socket, selfId, selfDeviceId);
+    }
 
     // Allow client to trigger explicit spool drain upon device initialization or reconnect
     socket.on('chat:drain_spool', (data?: { deviceId?: string }) => {
@@ -277,7 +277,7 @@ export function attachRealtime(httpServer: HttpServer): Server {
         target: ChatTarget;
         ciphertext: string;
         nonce: string;
-        keys: Array<{ deviceId: string; wrappedKey: string; wrapNonce: string }>;
+        keys: Array<{ deviceId: string; publicKey?: string; wrappedKey: string; wrapNonce: string }>;
         mediaId?: string;
         mentions?: string[];
       },
@@ -293,6 +293,7 @@ export function attachRealtime(httpServer: HttpServer): Server {
           (mentions != null && (!Array.isArray(mentions) || mentions.length > 50 ||
             !mentions.every(id => typeof id === 'string' && id.length <= 100))) ||
           !keys.every(key => typeof key?.deviceId === 'string' && key.deviceId.length <= 100 &&
+            (key.publicKey == null || (typeof key.publicKey === 'string' && key.publicKey.length <= 100)) &&
             typeof key.wrappedKey === 'string' && key.wrappedKey.length <= 1024 &&
             typeof key.wrapNonce === 'string' && key.wrapNonce.length <= 256)) {
           ack?.({ ok: false, error: 'Invalid message structure.' });
@@ -345,12 +346,17 @@ export function attachRealtime(httpServer: HttpServer): Server {
           ack?.({ ok: false, error: 'Recipient device keys are unavailable.' });
           return;
         }
+        if (devices.some(device => !keys.some(key => key.deviceId === device.deviceId &&
+          (key.publicKey == null || key.publicKey === device.publicKey)))) {
+          ack?.({ ok: false, error: 'Recipient device keys changed. Refresh and try again.' });
+          return;
+        }
 
         // 3. BUILD ENVELOPES IN MEMORY (0.1ms)
         const spoolRows: any[] = [];
         const pushUserIds = new Set<string>();
         const offlineEnvelopesByUser = new Map<string, DirectEnvelope>();
-        const onlineEnvelopes: Array<{ userId: string; envelope: DirectEnvelope }> = [];
+        const envelopes: Array<{ userId: string; envelope: DirectEnvelope }> = [];
 
         for (const dev of devices) {
           const keyEntry = keys.find(k => k.deviceId === dev.deviceId);
@@ -375,9 +381,8 @@ export function attachRealtime(httpServer: HttpServer): Server {
           const isOnline = io!.sockets.adapter.rooms.has(deviceRoom(dev.deviceId)) ||
                            io!.sockets.adapter.rooms.has(userRoom(dev.userId));
 
-          if (isOnline) {
-            onlineEnvelopes.push({ userId: dev.userId, envelope });
-          } else {
+          envelopes.push({ userId: dev.userId, envelope });
+          if (!isOnline) {
             pushUserIds.add(dev.userId);
             if (!offlineEnvelopesByUser.has(dev.userId)) {
               offlineEnvelopesByUser.set(dev.userId, envelope);
@@ -391,25 +396,9 @@ export function attachRealtime(httpServer: HttpServer): Server {
           ]);
         }
 
-        // 4. HOT-PATH 0ms DISPATCH: FORWARD TO ONLINE RECIPIENTS & SENDER ACK IMMEDIATELY (< 1ms)
-        markMessageProcessed(messageId, selfId, createdAt);
-
-        for (const { userId, envelope } of onlineEnvelopes) {
-          if (envelope.recipientDeviceId && io!.sockets.adapter.rooms.has(deviceRoom(envelope.recipientDeviceId))) {
-            io!.to(deviceRoom(envelope.recipientDeviceId)).emit('chat:envelope', envelope);
-          } else {
-            io!.to(userRoom(userId)).emit('chat:envelope', envelope);
-          }
-        }
-
-        // Immediate sender ACK - sender UI moves to Sent tick (✓) in ~15ms roundtrip!
-        ack?.({ ok: true, timestamp: createdAt });
-
-        // 5. ASYNCHRONOUS BACKGROUND PERSISTENCE & PUSH (Non-blocking Neon DB transaction)
-        void (async () => {
-          // Filter out any devices that ALREADY acknowledged delivery in the instant window
-          const rowsToInsert = spoolRows.filter(r => !isDeliveryAcked(r[0], r[3]));
-
+        // Persist before acknowledging or forwarding. An online recipient can disconnect
+        // at any moment; the encrypted spool must already exist for reconnect delivery.
+        await (async () => {
           const client = await pool.connect();
           try {
             await client.query('BEGIN');
@@ -426,7 +415,7 @@ export function attachRealtime(httpServer: HttpServer): Server {
               ).catch(() => {});
             }
 
-            if (rowsToInsert.length > 0) {
+            if (spoolRows.length > 0) {
               await client.query(`
                 INSERT INTO chat_spool (
                   "messageId", "senderId", "senderDeviceId", "recipientId", "recipientDeviceId",
@@ -439,24 +428,17 @@ export function attachRealtime(httpServer: HttpServer): Server {
                   $12::text[], $13::text[], $14::timestamptz[]
                 )
               `, [
-                rowsToInsert.map(r => r[0]), rowsToInsert.map(r => r[1]), rowsToInsert.map(r => r[2]),
-                rowsToInsert.map(r => r[3]), rowsToInsert.map(r => r[4]), rowsToInsert.map(r => r[5]),
-                rowsToInsert.map(r => r[6]), rowsToInsert.map(r => r[7]), rowsToInsert.map(r => r[8]),
-                rowsToInsert.map(r => r[9]), rowsToInsert.map(r => r[10]), rowsToInsert.map(r => r[11]),
-                rowsToInsert.map(r => r[12]), rowsToInsert.map(r => r[13]),
+                spoolRows.map(r => r[0]), spoolRows.map(r => r[1]), spoolRows.map(r => r[2]),
+                spoolRows.map(r => r[3]), spoolRows.map(r => r[4]), spoolRows.map(r => r[5]),
+                spoolRows.map(r => r[6]), spoolRows.map(r => r[7]), spoolRows.map(r => r[8]),
+                spoolRows.map(r => r[9]), spoolRows.map(r => r[10]), spoolRows.map(r => r[11]),
+                spoolRows.map(r => r[12]), spoolRows.map(r => r[13]),
               ]);
             }
             await client.query('COMMIT');
-
-            // Cleanup any recipients that acknowledged while the transaction was executing
-            for (const r of rowsToInsert) {
-              if (isDeliveryAcked(r[0], r[3])) {
-                void pool.query('DELETE FROM chat_spool WHERE "messageId" = $1 AND "recipientId" = $2', [r[0], r[3]]).catch(() => {});
-              }
-            }
           } catch (dbErr) {
             await client.query('ROLLBACK').catch(() => {});
-            console.error('[ADDA Chat] Background DB persist warning:', dbErr);
+            throw dbErr;
           } finally {
             client.release();
           }
@@ -474,7 +456,17 @@ export function attachRealtime(httpServer: HttpServer): Server {
               mentions
             ).catch((e) => console.warn('[ADDA] Push send warning:', e));
           }
-        })().catch(err => console.error('[ADDA Chat] Background task error:', err));
+        })();
+
+        markMessageProcessed(messageId, selfId, createdAt);
+        for (const { userId, envelope } of envelopes) {
+          if (envelope.recipientDeviceId && io!.sockets.adapter.rooms.has(deviceRoom(envelope.recipientDeviceId))) {
+            io!.to(deviceRoom(envelope.recipientDeviceId)).emit('chat:envelope', envelope);
+          } else {
+            io!.to(userRoom(userId)).emit('chat:envelope', envelope);
+          }
+        }
+        ack?.({ ok: true, timestamp: createdAt });
       } catch (err: any) {
         ack?.({ ok: false, error: err?.message || 'Send error' });
       }
@@ -483,17 +475,17 @@ export function attachRealtime(httpServer: HttpServer): Server {
     // ========================================================
     // WHATSAPP-GRADE HOT-PATH 2: DELIVERY ACK (Double Gray Tick ✓✓)
     // ========================================================
-    socket.on('chat:ack_delivery', (data: { messageId: string; senderId: string }) => {
-      if (!data?.messageId || !data?.senderId) return;
-      void processDeliveryAck(data.messageId, selfId, data.senderId);
+    socket.on('chat:ack_delivery', async (data: { messageId: string; senderId: string }, ack?: (result: { ok: boolean }) => void) => {
+      if (!data?.messageId || !data?.senderId) { ack?.({ ok: false }); return; }
+      ack?.({ ok: await processDeliveryAck(data.messageId, selfId, data.senderId) });
     });
 
     // ========================================================
     // WHATSAPP-GRADE HOT-PATH 3: READ ACK (Double Blue Tick ✓✓)
     // ========================================================
-    socket.on('chat:ack_read', (data: { messageIds: string[]; senderId: string }) => {
-      if (!Array.isArray(data?.messageIds) || !data?.senderId || data.messageIds.length === 0) return;
-      void processReadAck(data.messageIds, selfId, data.senderId);
+    socket.on('chat:ack_read', async (data: { messageIds: string[]; senderId: string }, ack?: (result: { ok: boolean }) => void) => {
+      if (!Array.isArray(data?.messageIds) || !data?.senderId || data.messageIds.length === 0) { ack?.({ ok: false }); return; }
+      ack?.({ ok: await processReadAck(data.messageIds, selfId, data.senderId) });
     });
 
     // ========================================================
@@ -548,10 +540,8 @@ export function attachRealtime(httpServer: HttpServer): Server {
   return io;
 }
 
-export async function processDeliveryAck(messageId: string, recipientId: string, senderId: string): Promise<void> {
+export async function processDeliveryAck(messageId: string, recipientId: string, senderId: string): Promise<boolean> {
   try {
-    markDeliveryAcked(messageId, recipientId);
-
     const del = await pool.query<{ senderId: string; kind: string; targetId: string }>(
       'DELETE FROM chat_spool WHERE "messageId" = $1 AND "recipientId" = $2 RETURNING "senderId", kind, "targetId"',
       [messageId, recipientId]
@@ -583,13 +573,15 @@ export async function processDeliveryAck(messageId: string, recipientId: string,
         }
       }
     }
+    return true;
   } catch (err) {
     console.warn('[ADDA Spool] processDeliveryAck error:', err);
+    return false;
   }
 }
 
-export async function processReadAck(messageIds: string[], recipientId: string, senderId: string): Promise<void> {
-  if (messageIds.length === 0) return;
+export async function processReadAck(messageIds: string[], recipientId: string, senderId: string): Promise<boolean> {
+  if (messageIds.length === 0) return false;
   try {
     if (io) {
       io.to(userRoom(senderId)).emit('chat:msg_status', {
@@ -603,7 +595,9 @@ export async function processReadAck(messageIds: string[], recipientId: string, 
       'DELETE FROM chat_spool WHERE "messageId" = ANY($1::text[]) AND "recipientId" = $2',
       [messageIds, recipientId]
     );
+    return true;
   } catch (err) {
     console.warn('[ADDA Spool] processReadAck error:', err);
+    return false;
   }
 }

@@ -234,14 +234,13 @@ export function clearKeyCache(target?: ChatTarget) {
 export async function getOrFetchKeys(target: ChatTarget, forceFresh = false): Promise<KeyList> {
   const cacheKey = `${target.kind}:${target.id}`;
   const hit = keyCache.get(cacheKey);
-  // Group keys expire in 30 seconds so new members and device key changes are rapidly picked up.
-  // Direct chats cache for 30 minutes so 1:1 messaging is completely instant without network roundtrips.
   const ttl = target.kind === 'group' ? 30 * 1000 : 30 * 60 * 1000;
   if (!forceFresh && hit && hit.expiresAt > Date.now()) {
     return hit.keys;
   }
   const fetched = await socialApi<KeyList>(`/chat/keys/${target.kind}/${encodeURIComponent(target.id)}`);
-  keyCache.set(cacheKey, { keys: fetched, expiresAt: Date.now() + ttl });
+  const effectiveTtl = (target.kind === 'direct' && fetched.devices.length === 0) ? 5 * 1000 : ttl;
+  keyCache.set(cacheKey, { keys: fetched, expiresAt: Date.now() + effectiveTtl });
   return fetched;
 }
 
@@ -475,7 +474,14 @@ export async function sendEncryptedMessage(
   customPreviewText?: string
 ): Promise<LocalMessage> {
   const previewText = customPreviewText || (body?.startsWith('__adda_room_card__:') ? previewBody(body) : (body.length > 80 ? body.slice(0, 77) + '...' : body));
-  return sendEncryptedContent(target, body, senderName, existingId, undefined, undefined, previewText, replyTo, mentions);
+  const messageId = existingId ?? Crypto.randomUUID();
+  try {
+    return await sendEncryptedContent(target, body, senderName, messageId, undefined, undefined, previewText, replyTo, mentions);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes('Recipient device keys changed')) throw error;
+    clearKeyCache(target);
+    return sendEncryptedContent(target, body, senderName, messageId, undefined, undefined, previewText, replyTo, mentions);
+  }
 }
 
 const inFlightMessages = new Set<string>();
@@ -529,9 +535,10 @@ async function sendEncryptedContent(
     changed();
 
     // 2. Encrypt in-memory using TweetNaCl (3ms)
-    // Key caching: Direct chats cache 30m, group chats cache 30s.
-    // Never force fresh HTTP fetch on every send - uses cached keys in RAM for 0ms encryption!
-    const keyList = prefetchedKeys ?? await getOrFetchKeys(target, false);
+    let keyList = prefetchedKeys ?? await getOrFetchKeys(target);
+    if (target.kind === 'direct' && keyList.devices.filter(d => d.deviceId !== me.deviceId).length === 0) {
+      keyList = await getOrFetchKeys(target, true);
+    }
     await pinKeys(keyList.devices);
 
     const contentKey = nacl.randomBytes(nacl.secretbox.keyLength);
@@ -554,6 +561,7 @@ async function sendEncryptedContent(
       const wrapNonce = nacl.randomBytes(nacl.box.nonceLength);
       return {
         deviceId: device.deviceId,
+        publicKey: device.publicKey,
         wrappedKey: bytesToBase64(nacl.box(contentKey, wrapNonce, base64ToBytes(device.publicKey), me.secretKey)),
         wrapNonce: bytesToBase64(wrapNonce)
       };
@@ -562,14 +570,14 @@ async function sendEncryptedContent(
     // 3. Emit directly over persistent WebSocket (Single Gray Tick ✓)
     const live = await getRealtimeSocket(me.deviceId);
 
-    return await new Promise<LocalMessage>((resolve) => {
+    return await new Promise<LocalMessage>((resolve, reject) => {
       let settled = false;
       const fallbackTimer = setTimeout(() => {
         if (!settled) {
           settled = true;
-          resolve(message);
+          reject(new Error('Message was not confirmed. It is saved on this phone and will retry when chat reconnects.'));
         }
-      }, 1500);
+      }, 10_000);
 
       live.emit('chat:send_instant', {
         messageId,
@@ -582,20 +590,17 @@ async function sendEncryptedContent(
         mediaId: attachedMediaId,
         mentions: effectiveMentions && effectiveMentions.length > 0 ? effectiveMentions : undefined
       }, async (ack: any) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(fallbackTimer);
         if (ack?.ok) {
-          await withDbLock(() => me.db.runAsync("UPDATE message SET status = 'sent' WHERE id = ? AND status = 'queued'", messageId));
-          changed();
-          if (!settled) {
-            settled = true;
-            clearTimeout(fallbackTimer);
+          try {
+            await withDbLock(() => me.db.runAsync("UPDATE message SET status = 'sent' WHERE id = ? AND status = 'queued'", messageId));
+            changed();
             resolve({ ...message, status: 'sent' });
-          }
+          } catch (error) { reject(error); }
         } else {
-          if (!settled) {
-            settled = true;
-            clearTimeout(fallbackTimer);
-            resolve(message);
-          }
+          reject(new Error(ack?.error || 'Message was not accepted. It is saved on this phone for retry.'));
         }
       });
     });
@@ -624,12 +629,8 @@ export async function sendEncryptedMedia(
   const sourceBytes = await source.bytes();
   const encrypted = nacl.secretbox(sourceBytes, nonce, key);
 
-  // In parallel: obtain upload URL and fetch recipient public keys
-  const [upload, keyList] = await Promise.all([
-    socialApi<{ mediaId: string; url: string; contentType: string }>('/chat/media/upload', 'POST',
-      { target, mediaKind, contentLength: encrypted.byteLength }),
-    socialApi<KeyList>(`/chat/keys/${target.kind}/${encodeURIComponent(target.id)}`)
-  ]);
+  const upload = await socialApi<{ mediaId: string; url: string; contentType: string }>('/chat/media/upload', 'POST',
+    { target, mediaKind, contentLength: encrypted.byteLength });
 
   // The original picker file is already local; the server holds the encrypted
   // copy. Avoid keeping two more 25 MB copies after the upload finishes.
@@ -654,7 +655,15 @@ export async function sendEncryptedMedia(
   };
 
   const previewText = mediaKind === 'video' ? '🎥 Video' : '📷 Photo';
-  return sendEncryptedContent(target, mediaPrefix + JSON.stringify(media), senderName, existingMessageId, keyList, upload.mediaId, previewText, replyTo, mentions);
+  const messageId = existingMessageId ?? Crypto.randomUUID();
+  const body = mediaPrefix + JSON.stringify(media);
+  try {
+    return await sendEncryptedContent(target, body, senderName, messageId, undefined, upload.mediaId, previewText, replyTo, mentions);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes('Recipient device keys changed')) throw error;
+    clearKeyCache(target);
+    return sendEncryptedContent(target, body, senderName, messageId, undefined, upload.mediaId, previewText, replyTo, mentions);
+  }
 }
 
 export async function openEncryptedMedia(media: EncryptedMedia): Promise<string> {
@@ -880,6 +889,7 @@ export async function syncEncryptedChat(): Promise<void> {
   live.emit('chat:drain_spool', { deviceId: me.deviceId });
 
   // 1. Flush queued outbox messages
+  clearKeyCache();
   const queued = await me.db.getAllAsync<LocalMessage>("SELECT * FROM message WHERE senderId = ? AND status = 'queued' ORDER BY createdAt LIMIT 20", me.userId);
   for (const item of queued) {
     try { await sendEncryptedContent({ kind: item.kind, id: item.targetId }, item.body, item.senderName, item.id); }
@@ -889,25 +899,6 @@ export async function syncEncryptedChat(): Promise<void> {
   // 2. Flush pending read receipts
   await flushPendingReadReceipts(me);
 
-  // Recover ticks that changed while the sender was offline.
-  const outgoing = await me.db.getAllAsync<{ id: string }>(
-    "SELECT id FROM message WHERE senderId = ? AND status IN ('sent', 'delivered') ORDER BY createdAt DESC LIMIT 500",
-    me.userId
-  );
-  for (let offset = 0; offset < outgoing.length; offset += 100) {
-    const ids = outgoing.slice(offset, offset + 100).map(row => row.id);
-    const result = await new Promise<{ ok: boolean; statuses?: { messageId: string; status: 'sent' | 'delivered' | 'read' }[] }>(resolve => {
-      live.timeout(5000).emit('chat:receipt_status', ids,
-        (error: Error | null, response?: { ok: boolean; statuses?: { messageId: string; status: 'sent' | 'delivered' | 'read' }[] }) =>
-          resolve(error ? { ok: false } : response ?? { ok: false }));
-    });
-    if (!result.ok) break;
-    for (const item of result.statuses ?? []) {
-      if (item.status === 'delivered' || item.status === 'read') {
-        await handleMessageStatusUpdate({ messageId: item.messageId, status: item.status });
-      }
-    }
-  }
 }
 
 export async function deleteLocalMessage(messageId: string): Promise<void> {

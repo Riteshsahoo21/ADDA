@@ -66,7 +66,17 @@ chatRoutes.post('/devices', run(async (request, response) => {
       await pool.query('UPDATE chat_device SET "publicKey" = $1, "revokedAt" = NULL WHERE id = $2', [publicKey, deviceId]);
     }
   } else {
-    await pool.query('UPDATE chat_device SET "revokedAt" = now() WHERE "userId" = $1 AND id <> $2 AND "revokedAt" IS NULL', [response.locals.userId, deviceId]);
+    // Keep multiple devices active (support multi-phone / multi-device). Only cap if excessive (> 10)
+    await pool.query(
+      `UPDATE chat_device SET "revokedAt" = now()
+       WHERE id IN (
+         SELECT id FROM chat_device
+         WHERE "userId" = $1 AND "revokedAt" IS NULL
+         ORDER BY "createdAt" DESC
+         OFFSET 9
+       )`,
+      [response.locals.userId]
+    );
     await pool.query('INSERT INTO chat_device (id, "userId", "publicKey") VALUES ($1, $2, $3)', [deviceId, response.locals.userId, publicKey]);
   }
   invalidateUserDeviceCache(response.locals.userId);
