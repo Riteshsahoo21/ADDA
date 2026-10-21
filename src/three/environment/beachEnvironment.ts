@@ -1,7 +1,15 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
 import * as THREE from 'three';
-import { readRoomAssetBytes, roomAssetUri } from '../roomAssets';
+import { Asset } from 'expo-asset';
+import { File } from 'expo-file-system';
 import { BEACH_ASSETS } from './beachAssets';
 import { BeachSeat, createWoodenBeachBench, WoodenBenchConfig } from './beachInteractions';
+
+async function readBundledAssetBytes(moduleId: number): Promise<Uint8Array> {
+  const asset = await Asset.fromModule(moduleId).downloadAsync();
+  if (!asset.localUri) throw new Error('Failed to resolve bundled asset uri');
+  return new File(asset.localUri).bytes();
+}
 
 export interface BeachObstacle {
   x: number;
@@ -175,12 +183,9 @@ export function createBeachEnvironment(scene: THREE.Scene): BeachEnvironment {
   void (async () => {
     try {
       const [colorAsset, normalAsset, waterNormalAsset] = await Promise.all([
-
-        readRoomAssetBytes(roomAssetUri('beach', 'textures/beach-sand.rgba')),
-
-        readRoomAssetBytes(roomAssetUri('beach', 'textures/beach-sand-normal.rgba')),
-
-        readRoomAssetBytes(roomAssetUri('beach', 'textures/beach-water-normal.rgba')),
+        readBundledAssetBytes(require('../../../assets/textures/beach-sand.rgba')),
+        readBundledAssetBytes(require('../../../assets/textures/beach-sand-normal.rgba')),
+        readBundledAssetBytes(require('../../../assets/textures/beach-water-normal.rgba')),
       ]);
 
       if (colorAsset.byteLength) {

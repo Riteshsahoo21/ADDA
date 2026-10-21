@@ -167,8 +167,13 @@ export default function HomeScreen() {
       }
 
       if (bundle.me.requiredPolicyVersion && bundle.me.policyVersion !== bundle.me.requiredPolicyVersion) {
-        router.replace('/policies' as Href);
-        return;
+        const fresh = await socialApi<OwnProfile>('/me').catch(() => null);
+        if (fresh && fresh.policyVersion && fresh.policyVersion === fresh.requiredPolicyVersion) {
+          bundle.me = fresh;
+        } else {
+          router.replace('/policies' as Href);
+          return;
+        }
       }
 
       void initEncryptedChat(bundle.me.id);
@@ -1604,7 +1609,7 @@ const styles = StyleSheet.create({
   declineButton: { backgroundColor: colors.surfaceRaised, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 20 }, declineText: { color: colors.text, fontWeight: '800' },
   empty: { alignItems: 'center', paddingVertical: 43, paddingHorizontal: 25, gap: 9 }, emptyTitle: { color: colors.text, fontSize: 18, fontWeight: '800' }, emptyCopy: { color: colors.muted, fontSize: 13, textAlign: 'center', lineHeight: 20 },
   errorBox: { marginTop: 20, padding: 16, backgroundColor: colors.errorSoft, borderRadius: 16, gap: 9 }, errorText: { color: colors.error }, retry: { color: colors.primary, fontWeight: '800' },
-  fab: { position: 'absolute', right: 24, bottom: 85, width: 62, height: 62, borderRadius: 20, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center', elevation: 5, shadowColor: colors.primary, shadowOpacity: 0.2, shadowRadius: 8 },
+  fab: { position: 'absolute', right: 24, bottom: 100, width: 62, height: 62, borderRadius: 20, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center', elevation: 5, shadowColor: colors.primary, shadowOpacity: 0.2, shadowRadius: 8 },
   pageTitle: { color: colors.text, fontSize: 27, fontWeight: '800', marginTop: 16 }, pageCopy: { color: colors.muted, fontSize: 14, lineHeight: 21, marginTop: 6, marginBottom: 24 },
   avatarCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.amberSoft, borderRadius: 20, padding: 16, marginBottom: 19 },
   avatarIcon: { width: 49, height: 49, borderRadius: 16, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center' }, avatarLetter: { color: colors.amber, fontWeight: '900', fontSize: 22 },

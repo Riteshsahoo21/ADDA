@@ -12,7 +12,6 @@ import { createLoftDetails } from '@/three/environment/loftDetails';
 import { addMapleTrees } from '@/three/environment/teaBoundary';
 import { canWalkTea, createTeaSeats, getBenchSeatSpot, TeaObstacle, TeaSeat, teaObstacleFromBounds, teaStallObstacle } from '@/three/environment/teaInteractions';
 import { BEACH_ASSETS } from '@/three/environment/beachAssets';
-import { roomAssetUri } from '@/three/roomAssets';
 import { canWalkBeach, createBeachEnvironment, getBeachSandElevation, BeachEnvironment } from '@/three/environment/beachEnvironment';
 import { BeachSeat, createLoungerBeachSeat, getBeachSeatSpot } from '@/three/environment/beachInteractions';
 import { loadBundledGlb } from '@/three/loaders/loadBundledGlb';
@@ -397,7 +396,7 @@ export function GameRoom({
         if (roomKind === 'beach') {
           for (const item of BEACH_ASSETS) {
             try {
-              const gltf = await loadBundledGlb(roomAssetUri('beach', item.model), { moduleId: roomAssetUri('beach', item.texture), images: item.images });
+              const gltf = await loadBundledGlb(item.modelSource, { moduleId: item.textureSource, images: item.images });
               if (!active) return;
               const holder = new THREE.Group();
               holder.name = `Imported ${item.name}`;
@@ -466,21 +465,21 @@ export function GameRoom({
         }
         const roomAssets = roomKind === 'beach' ? [] : roomKind === 'loft' ? [
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: roomAssetUri('loft', 'models/loft16.glb'), texture: roomAssetUri('loft', 'textures/loft16.rgba'), images: require('../../../assets/textures/loft16.json'), name: 'Loft 16', size: 10.6, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: false },
+          { id: require('../../../assets/runtime_models/loft16.glb'), texture: require('../../../assets/textures/loft16.rgba'), images: require('../../../assets/textures/loft16.json'), name: 'Loft 16', size: 10.6, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: false },
         ] : roomKind === 'roof' ? [
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: roomAssetUri('roof', 'models/school-rooftop.glb'), texture: roomAssetUri('roof', 'textures/school-rooftop.rgba'), images: require('../../../assets/textures/school-rooftop.json'), name: 'School Rooftop', size: 1, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
+          { id: require('../../../assets/runtime_models/school-rooftop.glb'), texture: require('../../../assets/textures/school-rooftop.rgba'), images: require('../../../assets/textures/school-rooftop.json'), name: 'School Rooftop', size: 1, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
         ] : [
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: roomAssetUri('tea', 'models/tea-ground.glb'), texture: roomAssetUri('tea', 'textures/tea-ground.rgba'), images: require('../../../assets/textures/tea-ground.json'), name: 'road and ground', size: 26, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
+          { id: require('../../../assets/runtime_models/tea-ground.glb'), texture: require('../../../assets/textures/tea-ground.rgba'), images: require('../../../assets/textures/tea-ground.json'), name: 'road and ground', size: 26, axis: 'x' as const, x: 0, z: 0, rotation: 0, rawScale: true },
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: roomAssetUri('tea', 'models/chai-stall.glb'), texture: roomAssetUri('tea', 'textures/chai-stall.rgba'), images: require('../../../assets/textures/chai-stall.json'), name: 'chai stall and bench', size: 3.2, axis: 'y' as const, x: -7.2, z: -2.2, rotation: Math.PI / 2, rawScale: false },
+          { id: require('../../../assets/runtime_models/chai-stall.glb'), texture: require('../../../assets/textures/chai-stall.rgba'), images: require('../../../assets/textures/chai-stall.json'), name: 'chai stall and bench', size: 3.2, axis: 'y' as const, x: -7.2, z: -2.2, rotation: Math.PI / 2, rawScale: false },
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: roomAssetUri('tea', 'models/three-shops.glb'), texture: roomAssetUri('tea', 'textures/three-shops.rgba'), images: require('../../../assets/textures/three-shops.json'), name: 'three shops', size: 2.8, axis: 'y' as const, x: 7.7, z: -2.2, rotation: -Math.PI / 2, rawScale: false },
+          { id: require('../../../assets/runtime_models/three-shops.glb'), texture: require('../../../assets/textures/three-shops.rgba'), images: require('../../../assets/textures/three-shops.json'), name: 'three shops', size: 2.8, axis: 'y' as const, x: 7.7, z: -2.2, rotation: -Math.PI / 2, rawScale: false },
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: roomAssetUri('tea', 'models/barber-shop.glb'), texture: roomAssetUri('tea', 'textures/barber-shop.rgba'), images: require('../../../assets/textures/barber-shop.json'), name: 'desi barber shop', size: 2.8, axis: 'y' as const, x: 7.7, z: 6.8, rotation: -Math.PI / 2, rawScale: false },
+          { id: require('../../../assets/runtime_models/barber-shop.glb'), texture: require('../../../assets/textures/barber-shop.rgba'), images: require('../../../assets/textures/barber-shop.json'), name: 'desi barber shop', size: 2.8, axis: 'y' as const, x: 7.7, z: 6.8, rotation: -Math.PI / 2, rawScale: false },
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          { id: roomAssetUri('tea', 'models/dance-stage.glb'), texture: roomAssetUri('tea', 'textures/dance-stage.rgba'), images: require('../../../assets/textures/dance-stage.json'), name: 'dance stage', size: 2.5, axis: 'y' as const, x: -7.5, z: 5.2, rotation: Math.PI / 2, rawScale: false },
+          { id: require('../../../assets/runtime_models/dance-stage.glb'), texture: require('../../../assets/textures/dance-stage.rgba'), images: require('../../../assets/textures/dance-stage.json'), name: 'dance stage', size: 2.5, axis: 'y' as const, x: -7.5, z: 5.2, rotation: Math.PI / 2, rawScale: false },
         ];
         for (const item of roomAssets) {
           try {
@@ -572,9 +571,10 @@ export function GameRoom({
         if (roomKind === 'tea') {
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const treeId = roomAssetUri('tea', 'models/maple-tree.glb');
+            const treeId = require('../../../assets/runtime_models/maple-tree.glb');
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const textureId = roomAssetUri('tea', 'textures/maple-tree.rgba');
+            const textureId = require('../../../assets/textures/maple-tree.rgba');
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
             const images = require('../../../assets/textures/maple-tree.json');
             const trees = await loadBundledGlb(treeId, { moduleId: textureId, images });
             if (!active) return;
@@ -1136,7 +1136,7 @@ export function GameRoom({
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.background },
+  container: { ...StyleSheet.absoluteFill, backgroundColor: '#0A0E14' },
   lookZone: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
   loading: { position: 'absolute', alignSelf: 'center', top: '48%', backgroundColor: '#10221DBB', borderRadius: 22, padding: 12 },
   modelBadge: { position: 'absolute', left: 18, top: 85, maxWidth: '60%', backgroundColor: '#10221DEB', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 },

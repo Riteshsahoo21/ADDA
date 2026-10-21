@@ -37,7 +37,7 @@ export default function LobbyScreen() {
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState('');
-  const [downloaded, setDownloaded] = useState(false);
+  const [downloaded, setDownloaded] = useState(true);
 
   useEffect(() => {
     void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
@@ -57,21 +57,9 @@ export default function LobbyScreen() {
     setAvatarStyle({ body });
   };
 
-  useEffect(() => { setDownloaded(roomIsDownloaded(roomKind)); setDownloadProgress(0); setDownloadError(''); }, [roomKind]);
+  useEffect(() => { setDownloaded(true); setDownloadProgress(0); setDownloadError(''); }, [roomKind]);
 
-  const handleEnterHangout = async () => {
-    if (downloading) return;
-    setDownloading(true);
-    setDownloadError('');
-    try {
-      await ensureRoomAssets(roomKind, (done, total) => setDownloadProgress(total ? done / total : 0));
-      setDownloaded(true);
-    } catch (error) {
-      setDownloadError(error instanceof Error ? error.message : 'Room download failed. Please retry.');
-      setDownloading(false);
-      return;
-    }
-    setDownloading(false);
+  const handleEnterHangout = () => {
     router.replace({
       pathname: '/hangout',
       params: {

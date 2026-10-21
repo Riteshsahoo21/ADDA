@@ -9,11 +9,12 @@ import { Check, Crown, Headphones, House, MessageCircle, Mic, MicOff, Music, Sen
 import { GameRoom } from '@/components/room/GameRoom';
 import { ReportUser } from '@/components/safety/ReportUser';
 import InCallManager from 'react-native-incall-manager';
+import { WebView } from 'react-native-webview';
+import type { WebView as WebViewHandle } from 'react-native-webview';
 import { RoomKind } from '@/three/environment/createGameScene';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
 import { AvatarBody } from '@/three/player/avatarStyle';
-import { GroupMedia } from '@/lib/group-media';
 import { getRealtimeSocket } from '@/lib/realtime';
 import { deleteCurrentRoom, inviteGroupToRoom, inviteToRoom, kickRoomPeer, sendRoomMessage, type PlayerSnapshot, type RoomJoin, type RoomMessage, type RoomMotionSnapshot, type RoomPeer } from '@/lib/rooms';
 import { MusicHubModal } from '@/components/music/MusicHubModal';
@@ -83,7 +84,21 @@ export default function HangoutScreen() {
 
   const activeRoomId = shardId || (params.roomId ? `room:${params.roomId}` : (params.groupId ? `group:${params.groupId}:${roomKind}` : roomKind));
 
-  const mediaRef = useRef<GroupMedia | null>(null);
+  interface RoomMediaBridge {
+    sendMotion: (motion: { x: number; y: number; z: number; r: number; pose: string }) => boolean;
+    setMuted: (muted: boolean) => void;
+    setPlaybackMuted: (playbackMuted: boolean) => void;
+    setUserMuted: (id: string, muted: boolean) => void;
+  }
+  const mediaRef = useRef<RoomMediaBridge | null>(null);
+  const mirotalkEnabled = process.env.EXPO_PUBLIC_MIROTALK_ENABLED === 'true';
+  const [mirotalkUrl, setMirotalkUrl] = useState('');
+  const mirotalkWebView = useRef<WebViewHandle>(null);
+  const latestRemote = useRef(new Map<string, PlayerSnapshot>());
+  const volumeSentAt = useRef(0);
+  const injectMirotalk = useCallback((expression: string) => {
+    mirotalkWebView.current?.injectJavaScript(`${expression};true;`);
+  }, []);
   const micMutedRef = useRef(false);
   const speakerMutedRef = useRef(false);
   const isBluetoothRef = useRef(false);
@@ -94,6 +109,7 @@ export default function HangoutScreen() {
   const positionRef = useRef<RoomMotionSnapshot>({ x: 0, y: 0, z: 0, yaw: 0, vx: 0, vz: 0, pose: 'idle' });
   const onSnapshot = useCallback((snapshot: PlayerSnapshot) => {
     if (blockedPeersRef.current.has(snapshot.id)) return;
+    latestRemote.current.set(snapshot.id, snapshot);
     const queues = peerSnapshots.current;
     let queue = queues.get(snapshot.id);
     if (!queue) { queue = []; queues.set(snapshot.id, queue); }
@@ -114,7 +130,46 @@ export default function HangoutScreen() {
       x: Number(snapshot.x.toFixed(3)), y: Number(snapshot.y.toFixed(3)), z: Number(snapshot.z.toFixed(3)),
       r: Number(snapshot.yaw.toFixed(3)), pose: snapshot.pose,
     });
-  }, []);
+    if (mirotalkEnabled && Date.now() - volumeSentAt.current >= 200) {
+      volumeSentAt.current = Date.now();
+      const volumes: Record<string, number> = {};
+      let audible = 0;
+      for (const [id, other] of latestRemote.current) {
+        const distance = Math.hypot(other.x - snapshot.x, other.z - snapshot.z);
+        const volume = speakerMutedRef.current || mutedPeersRef.current.has(id) || blockedPeersRef.current.has(id)
+          ? 0 : Math.max(0, Math.min(1, 1 - distance / 12));
+        volumes[id] = volume;
+        if (volume > 0.05) audible++;
+      }
+      setNearbySpeakers(audible);
+      if (audible > 0) setVoiceStatus('Nearby voice on');
+      injectMirotalk(`window.addaBridgeSetAudio?.(${JSON.stringify({ muted: micMutedRef.current, playbackMuted: speakerMutedRef.current, volumes })})`);
+    }
+  }, [injectMirotalk, mirotalkEnabled]);
+
+  useEffect(() => {
+    if (!mirotalkEnabled || !focused || !shardId || !currentUserId) return;
+    let active = true;
+    void socialApi<{ url: string }>('/mirotalk/join', 'POST', { kind: 'room', id: shardId })
+      .then(({ url }) => { if (active) setMirotalkUrl(url); })
+      .catch(error => { if (active) setVoiceStatus(error instanceof Error ? error.message : 'Voice unavailable.'); });
+    const bridge: RoomMediaBridge = {
+      sendMotion: (motion: { x: number; y: number; z: number; r: number; pose: string }) => {
+        injectMirotalk(`window.addaBridgeSendMotion?.(${JSON.stringify({ ...motion, id: currentUserId, time: Date.now() })})`);
+        return true;
+      },
+      setMuted: (muted: boolean) => injectMirotalk(`window.addaBridgeSetAudio?.(${JSON.stringify({ muted })})`),
+      setPlaybackMuted: (playbackMuted: boolean) => injectMirotalk(`window.addaBridgeSetAudio?.(${JSON.stringify({ playbackMuted })})`),
+      setUserMuted: (_id: string, _muted: boolean) => {},
+    };
+    mediaRef.current = bridge;
+    return () => {
+      active = false;
+      setMirotalkUrl('');
+      latestRemote.current.clear();
+      if (mediaRef.current === bridge) mediaRef.current = null;
+    };
+  }, [mirotalkEnabled, focused, shardId, currentUserId, injectMirotalk]);
 
   const showRouteToast = useCallback((msg: string) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -520,30 +575,15 @@ export default function HangoutScreen() {
       if (plugged) showRouteToast('🎧 Wired Earphones Connected');
     });
 
-    const media = new GroupMedia(tracks => {
-      if (active) setNearbySpeakers(new Set(tracks.filter(track => track.kind === 'audio').map(track => track.userId)).size);
-    }, error => { if (active) setVoiceStatus(error); });
-    media.setMotionListener(onSnapshot);
-    media.setMuted(micMutedRef.current);
-    media.setPlaybackMuted(speakerMutedRef.current);
-    for (const userId of mutedPeersRef.current) media.setUserMuted(userId, true);
-    mediaRef.current = media;
-    void media.join({ kind: 'room', id: activeRoomId }, false, positionRef.current).then(() => {
-      if (!active) return;
-      onPosition(positionRef.current);
-      setVoiceStatus('Nearby voice on');
-    }).catch(error => { if (active) setVoiceStatus(error instanceof Error ? error.message : 'Voice unavailable.'); });
     return () => {
       active = false;
       audioDeviceSub.remove();
       headsetSub.remove();
-      media.close();
       InCallManager.setForceSpeakerphoneOn(false);
       InCallManager.stop();
       setNearbySpeakers(0);
-      if (mediaRef.current === media) mediaRef.current = null;
     };
-  }, [activeRoomId, shardId, username, voiceEpoch, focused, applyAudioRoute, onSnapshot, onPosition]);
+  }, [shardId, username, focused, applyAudioRoute]);
 
   const toggleMic = () => {
     const next = !micMutedRef.current;
@@ -602,7 +642,36 @@ export default function HangoutScreen() {
   return <View style={styles.screen}>
     <StatusBar hidden />
     <NavigationBar hidden />
-    {landscapeReady && (width >= height || orientationFailed) && <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} peerSnapshotsRef={peerSnapshots} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} onOpenRadio={() => { setMusicModalTab('radio'); setMusicModalOpen(true); }} />}
+    {mirotalkEnabled && Boolean(mirotalkUrl) && <WebView
+      ref={mirotalkWebView}
+      source={{ uri: mirotalkUrl }}
+      javaScriptEnabled
+      domStorageEnabled
+      mediaPlaybackRequiresUserAction={false}
+      onMessage={event => {
+        try {
+          const packet = JSON.parse(event.nativeEvent.data) as { type: string; peerId?: string; motion?: PlayerSnapshot };
+          if (packet.type === 'peer-open' || packet.type === 'voice-ready') {
+            setVoiceStatus('Nearby voice on');
+          }
+          if (packet.type === 'motion' && packet.motion && packet.motion.id !== currentUserId) {
+            setVoiceStatus('Nearby voice on');
+            onSnapshot({ ...packet.motion, time: Date.now() });
+          }
+        } catch { /* Ignore malformed bridge events. */ }
+      }}
+      onError={() => setVoiceStatus('Could not connect to room voice.')}
+      onLoad={() => {
+        setTimeout(() => setVoiceStatus('Nearby voice on'), 1500);
+      }}
+      containerStyle={styles.hiddenBridge}
+      style={styles.hiddenBridge}
+    />}
+    {landscapeReady && (width >= height || orientationFailed) && (
+      <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+        <GameRoom key={`${roomKind}-${roomAvatar.body}`} roomKind={roomKind} avatar={roomAvatar} peers={peers} peerSnapshotsRef={peerSnapshots} onPosition={onPosition} onPortal={() => setRoomKind(current => current === 'roof' ? 'loft' : 'roof')} onOpenRadio={() => { setMusicModalTab('radio'); setMusicModalOpen(true); }} />
+      </View>
+    )}
     <View style={[styles.topBar, { left: Math.max(16, insets.left + 8), right: Math.max(16, insets.right + 8), top: Math.max(8, insets.top + 4) }]}>
       <View style={styles.toolbar}>
         <Pressable accessibilityRole="button" accessibilityLabel="Room menu" accessibilityState={{ expanded: roomMenuOpen }} onPress={() => { setRoomMenuOpen(current => !current); setPlayersOpen(false); setChatOpen(false); }} style={[styles.toolButton, roomMenuOpen && styles.toolButtonActive]}><House size={22} color="#F7FAF8" /></Pressable>
@@ -627,7 +696,7 @@ export default function HangoutScreen() {
             </View>
           )}
         </View>
-        <Text style={styles.roomStatus} numberOfLines={1}>{voiceStatus}{nearbySpeakers ? ` · ${nearbySpeakers} nearby` : ''}</Text>
+        <Text style={styles.roomStatus} numberOfLines={1}>{voiceStatus === 'Connecting nearby voice…' && nearbySpeakers > 0 ? 'Nearby voice on' : voiceStatus}{nearbySpeakers ? ` · ${nearbySpeakers} nearby` : ''}</Text>
       </View>
     </View>
     {!!routeToast && (
@@ -1013,7 +1082,8 @@ export default function HangoutScreen() {
 
 const styles = StyleSheet.create({
   reportLabel: { color: '#F7FAF8', fontSize: 11, fontWeight: '700' },
-  screen: { flex: 1, backgroundColor: colors.background },
+  screen: { flex: 1, backgroundColor: '#0A0E14' },
+  hiddenBridge: { position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' },
   topBar: { position: 'absolute', top: 8, left: 16, right: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
   roomIdentity: { maxWidth: 220, backgroundColor: '#10221DCF', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8 },
   roomIdentityHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },

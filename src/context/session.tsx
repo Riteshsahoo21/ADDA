@@ -11,7 +11,7 @@ import { AppState, Modal, Pressable, StyleSheet, Text, View } from 'react-native
 import { colors } from '@/constants/theme';
 import * as Notifications from 'expo-notifications';
 import InCallManager from 'react-native-incall-manager';
-import { hasCallPushToken, registerCallNotifications, showSocketCallNotification, unregisterCallNotifications } from '@/lib/push-notifications';
+import { dismissCallNotification, hasCallPushToken, registerCallNotifications, showSocketCallNotification, unregisterCallNotifications } from '@/lib/push-notifications';
 import { closeEncryptedChat, initEncryptedChat, receiveDirectEnvelope, handleMessageStatusUpdate, setCachedProfile, getCachedProfile, syncEncryptedChat, clearKeyCache, type Envelope } from '@/lib/encrypted-chat';
 import { clearSocialCache, initSocialCache } from '@/lib/social-cache';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
@@ -132,6 +132,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
       void showSocketCallNotification(call).catch(error => console.warn('Call alert unavailable:', error));
     };
     const onEnded = ({ callId }: { callId: string }) => {
+      void dismissCallNotification(callId);
       setIncomingCall(current => {
         if (current?.id === callId) {
           try { InCallManager.stopRingtone(); } catch {}
@@ -139,6 +140,11 @@ export function SessionProvider({ children }: PropsWithChildren) {
         }
         return current;
       });
+    };
+    const onJoined = ({ callId, userId }: { callId: string; userId: string }) => {
+      if (userId !== getCachedProfile()?.id) return;
+      void dismissCallNotification(callId);
+      setIncomingCall(current => current?.id === callId ? null : current);
     };
     const checkPending = () => {
       live?.timeout(5000).emit('call:pending', (error: Error | null, result?: { ok: boolean; value?: CallInfo[] }) => {
@@ -154,10 +160,11 @@ export function SessionProvider({ children }: PropsWithChildren) {
       live = value;
       value.on('call:invite', onInvite);
       value.on('call:ended', onEnded);
+      value.on('call:participant-joined', onJoined);
       value.on('connect', checkPending);
       checkPending();
     }).catch(() => {});
-    return () => { active = false; live?.off('call:invite', onInvite); live?.off('call:ended', onEnded); live?.off('connect', checkPending); };
+    return () => { active = false; live?.off('call:invite', onInvite); live?.off('call:ended', onEnded); live?.off('call:participant-joined', onJoined); live?.off('connect', checkPending); };
   }, [username]);
 
   useEffect(() => {
@@ -223,6 +230,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
       }
       if (data?.kind !== 'call' || typeof data.callId !== 'string') return;
       try { InCallManager.stopRingtone(); } catch {}
+      void dismissCallNotification(data.callId);
       const actionIdentifier = response.actionIdentifier;
       if (actionIdentifier === 'decline') {
         void getRealtimeSocket().then(live => live.emit('call:decline', data.callId));
@@ -280,11 +288,15 @@ export function SessionProvider({ children }: PropsWithChildren) {
     try { InCallManager.stopRingtone(); } catch {}
     openedNotificationCall.current = call.id;
     setIncomingCall(null);
+    void dismissCallNotification(call.id);
     router.push({ pathname: '/call', params: { callId: call.id, role: 'callee', name: call.callerName, media: call.media } } as unknown as Href);
   };
   const declineCall = () => {
     try { InCallManager.stopRingtone(); } catch {}
-    if (incomingCall) void getRealtimeSocket().then(live => live.emit('call:decline', incomingCall.id));
+    if (incomingCall) {
+      void dismissCallNotification(incomingCall.id);
+      void getRealtimeSocket().then(live => live.emit('call:decline', incomingCall.id));
+    }
     setIncomingCall(null);
   };
 

@@ -3,12 +3,14 @@ import { AppState, Platform } from 'react-native';
 import { getRealtimeSocket } from './realtime';
 
 let currentToken: string | null = null;
+const handledCallIds = new Set<string>();
 
 Notifications.setNotificationHandler({
   handleNotification: async notification => {
     const data = notification.request.content.data;
     const isBackground = AppState.currentState !== 'active';
     const show = (data?.kind === 'call' || data?.kind === 'chat' || data?.kind === 'room_invite') &&
+      !(data?.kind === 'call' && !data.isOngoing && typeof data.callId === 'string' && handledCallIds.has(data.callId)) &&
       (data.source !== 'socket' || isBackground) &&
       (data.kind !== 'chat' || isBackground) &&
       (data.kind !== 'room_invite' || isBackground);
@@ -18,8 +20,21 @@ Notifications.setNotificationHandler({
 
 export function hasCallPushToken() { return !!currentToken; }
 
+export async function dismissCallNotification(callId: string) {
+  handledCallIds.add(callId);
+  if (handledCallIds.size > 100) handledCallIds.delete(handledCallIds.values().next().value!);
+  try {
+    const presented = await Notifications.getPresentedNotificationsAsync();
+    await Promise.all(presented
+      .filter(notification => notification.request.content.data?.kind === 'call' && notification.request.content.data.callId === callId && !notification.request.content.data.isOngoing)
+      .map(notification => Notifications.dismissNotificationAsync(notification.request.identifier)));
+  } catch (error) {
+    console.warn('[Push] Could not dismiss call alert:', error);
+  }
+}
+
 export async function showSocketCallNotification(call: { id: string; callerName: string; media: string; target: { kind: string; id?: string } }) {
-  if (AppState.currentState === 'active' || hasCallPushToken()) return;
+  if (AppState.currentState === 'active' || hasCallPushToken() || handledCallIds.has(call.id)) return;
   const isGroup = call.target.kind === 'group';
   await Notifications.scheduleNotificationAsync({
     content: {
@@ -64,7 +79,7 @@ export async function setupCallNotificationCategories() {
         buttonTitle: 'Decline',
         options: {
           isDestructive: true,
-          opensAppToForeground: false,
+          opensAppToForeground: true,
         },
       },
     ]);

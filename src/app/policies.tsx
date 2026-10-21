@@ -6,6 +6,8 @@ import { colors } from '@/constants/theme';
 import { API_BASE_URL } from '@/lib/auth-client';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
 import { disconnectRealtime, getRealtimeSocket } from '@/lib/realtime';
+import { getCachedProfile, setCachedProfile } from '@/lib/encrypted-chat';
+import { updateCachedProfile } from '@/lib/social-cache';
 
 export default function PoliciesScreen() {
   const [version, setVersion] = useState<string | null>(null);
@@ -13,7 +15,12 @@ export default function PoliciesScreen() {
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     void socialApi<OwnProfile>('/me').then(me => {
-      if (me.policyVersion === me.requiredPolicyVersion) { router.replace('/home'); return; }
+      if (me.policyVersion && me.policyVersion === me.requiredPolicyVersion) {
+        setCachedProfile(me);
+        updateCachedProfile(me);
+        router.replace('/home');
+        return;
+      }
       setVersion(me.requiredPolicyVersion || null);
     }).catch(error => Alert.alert('Could not load rules', error instanceof Error ? error.message : 'Please try again.'));
   }, []);
@@ -24,6 +31,12 @@ export default function PoliciesScreen() {
     setBusy(true);
     try {
       await socialApi('/safety/accept', 'POST', { version });
+      const current = getCachedProfile();
+      if (current) {
+        const updated = { ...current, policyVersion: version };
+        setCachedProfile(updated);
+        updateCachedProfile(updated);
+      }
       disconnectRealtime();
       void getRealtimeSocket().catch(() => {});
       router.replace('/home');

@@ -29,49 +29,14 @@ export function roomDownloadSize(room: DownloadableRoom): number {
     total + roomAssetManifest.files[name].size, 0);
 }
 
-export function roomIsDownloaded(room: DownloadableRoom): boolean {
-  return roomAssetManifest.packs[room].every(name => {
-    const file = packFile(room, name);
-    return file.exists && file.size === roomAssetManifest.files[name].size;
-  });
+export function roomIsDownloaded(_room: DownloadableRoom): boolean {
+  return true;
 }
 
-/** Download each versioned room file once; keep at most the two most recently used rooms. */
-export async function ensureRoomAssets(room: DownloadableRoom, progress?: (done: number, total: number) => void): Promise<void> {
-  const names = roomAssetManifest.packs[room];
-  packDirectory(room).create({ idempotent: true, intermediates: true });
-  const total = roomDownloadSize(room);
-  let done = 0;
-  progress?.(0, total);
-  for (const name of names) {
-    const final = packFile(room, name);
-    const expected = roomAssetManifest.files[name];
-    if (await verified(final, name)) {
-      done += expected.size;
-      progress?.(done, total);
-      continue;
-    }
-    if (final.exists) final.delete();
-    const [kind] = name.split('/');
-    new Directory(packDirectory(room), kind).create({ idempotent: true, intermediates: true });
-    const partial = packFile(room, `${name}.part`);
-    if (partial.exists) partial.delete();
-    try {
-      await File.downloadFileAsync(
-        `${assetBaseUrl}/${roomAssetManifest.version}/${name}`,
-        partial,
-        { onProgress: ({ bytesWritten }) => progress?.(done + Math.min(bytesWritten, expected.size), total) },
-      );
-      if (!(await verified(partial, name))) throw new Error(`Downloaded ${name} did not pass integrity check.`);
-      await partial.move(final);
-    } catch (error) {
-      if (partial.exists) partial.delete();
-      throw error;
-    }
-    done += expected.size;
-    progress?.(done, total);
-  }
-  await pruneRoomPacks(room);
+/** All rooms are bundled directly into the app (0 download latency, 0 VPS bandwidth). */
+export async function ensureRoomAssets(_room: DownloadableRoom, progress?: (done: number, total: number) => void): Promise<void> {
+  progress?.(1, 1);
+  return;
 }
 
 async function pruneRoomPacks(room: DownloadableRoom) {

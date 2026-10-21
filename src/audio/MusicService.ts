@@ -1,4 +1,5 @@
 import { createVideoPlayer, type VideoPlayer } from 'expo-video';
+import { Directory, File, Paths } from 'expo-file-system';
 import { API_BASE_URL } from '../lib/auth-client';
 import playlistTracks from '../../assets/playlist_tracks.json';
 
@@ -34,6 +35,8 @@ class MusicServiceManager {
   private currentClientUrl: string | null = null;
   private currentRadioUrl: string | null = null;
   private lastAppliedRadioVolume = -1;
+  private lastAttenuationUpdate = 0;
+  private preloadingIds = new Set<string>();
   private listeners = new Set<Listener>();
 
   public state: MusicState = {
@@ -49,40 +52,89 @@ class MusicServiceManager {
     radio3DAttenuation: 0.7,
   };
 
-  private getTrackUrl(id: string): string {
+  private getCacheFile(id: string): File {
+    const dir = new Directory(Paths.document, 'adda-music-cache');
+    dir.create({ idempotent: true, intermediates: true });
+    return new File(dir, `${id}.m4a`);
+  }
+
+  private getTrackUri(id: string): string {
+    try {
+      const file = this.getCacheFile(id);
+      if (file.exists && file.size > 20000) {
+        return file.uri;
+      }
+      // Trigger background download to local cache so future plays are 100% offline & stutter-free
+      void this.preloadTrack(id);
+    } catch {}
     return `${API_BASE_URL}/music/${id}.m4a`;
   }
 
+  private async preloadTrack(id: string) {
+    if (this.preloadingIds.has(id)) return;
+    this.preloadingIds.add(id);
+    try {
+      const file = this.getCacheFile(id);
+      if (file.exists && file.size > 20000) return;
+      const remoteUrl = `${API_BASE_URL}/music/${id}.m4a`;
+      await File.downloadFileAsync(remoteUrl, file);
+      console.log('[ADDA Music] Cached track locally:', id, file.size);
+    } catch (e) {
+      console.warn('[ADDA Music] Background cache failed for track:', id, e);
+    } finally {
+      this.preloadingIds.delete(id);
+    }
+  }
+
   public init() {
-    if (this.clientPlayer || PLAYLIST_TRACKS.length === 0) return;
+    // Only verify state is initialized; players are created lazily on-demand
+  }
+
+  private ensureClientPlayer(): VideoPlayer | null {
+    if (this.clientPlayer) return this.clientPlayer;
+    if (PLAYLIST_TRACKS.length === 0) return null;
 
     try {
-      const firstUrl = this.getTrackUrl(PLAYLIST_TRACKS[this.state.clientTrackIndex].id);
-      this.currentClientUrl = firstUrl;
-      console.log('[ADDA Music] Initializing client player:', firstUrl);
-      this.clientPlayer = createVideoPlayer(firstUrl);
-      this.clientPlayer.audioMixingMode = 'mixWithOthers';
-      this.clientPlayer.loop = true;
-      this.clientPlayer.volume = this.state.clientMuted ? 0 : this.state.clientVolume;
-      this.clientPlayer.addListener('statusChange', (payload: any) => {
+      const trackId = PLAYLIST_TRACKS[this.state.clientTrackIndex].id;
+      const uri = this.getTrackUri(trackId);
+      this.currentClientUrl = uri;
+      console.log('[ADDA Music] Creating lazy client player:', uri);
+      const player = createVideoPlayer(uri);
+      player.audioMixingMode = 'mixWithOthers';
+      player.loop = true;
+      player.volume = this.state.clientMuted ? 0 : this.state.clientVolume;
+      player.addListener('statusChange', (payload: any) => {
         console.log('[ADDA Music] Client player status:', payload?.status, payload?.error?.message ?? '');
       });
+      this.clientPlayer = player;
+      return player;
+    } catch (e) {
+      console.warn('[ADDA Music] Failed to create client player', e);
+      return null;
+    }
+  }
 
-      const radioUrl = this.getTrackUrl(PLAYLIST_TRACKS[this.state.radioTrackIndex].id);
-      this.currentRadioUrl = radioUrl;
-      console.log('[ADDA Music] Initializing radio player:', radioUrl);
-      this.radioPlayer = createVideoPlayer(radioUrl);
-      this.radioPlayer.audioMixingMode = 'mixWithOthers';
-      this.radioPlayer.loop = true;
-      this.radioPlayer.addListener('statusChange', (payload: any) => {
+  private ensureRadioPlayer(): VideoPlayer | null {
+    if (this.radioPlayer) return this.radioPlayer;
+    if (PLAYLIST_TRACKS.length === 0) return null;
+
+    try {
+      const trackId = PLAYLIST_TRACKS[this.state.radioTrackIndex].id;
+      const uri = this.getTrackUri(trackId);
+      this.currentRadioUrl = uri;
+      console.log('[ADDA Music] Creating lazy radio player:', uri);
+      const player = createVideoPlayer(uri);
+      player.audioMixingMode = 'mixWithOthers';
+      player.loop = true;
+      player.addListener('statusChange', (payload: any) => {
         console.log('[ADDA Music] Radio player status:', payload?.status, payload?.error?.message ?? '');
       });
+      this.radioPlayer = player;
       this.updateEffectiveRadioVolume();
-      if (this.state.radioEnabled) {
-        this.radioPlayer.play();
-      }
+      return player;
     } catch (e) {
-      console.warn('[ADDA Music] Failed to initialize audio players', e);
+      console.warn('[ADDA Music] Failed to create radio player', e);
+      return null;
     }
   }
 
@@ -129,32 +181,33 @@ class MusicServiceManager {
   // --- Headphone (Client-Side) Controls ---
 
   public toggleClientPlay() {
-    this.init();
-    if (!this.clientPlayer) return;
+    const player = this.ensureClientPlayer();
+    if (!player) return;
+
     if (this.state.clientIsPlaying) {
-      this.clientPlayer.pause();
+      player.pause();
       this.state.clientIsPlaying = false;
     } else {
-      this.clientPlayer.play();
+      player.play();
       this.state.clientIsPlaying = true;
     }
     this.notify();
   }
 
   public playClientTrack(index: number) {
-    this.init();
     if (index < 0 || index >= PLAYLIST_TRACKS.length) return;
     const trackChanged = this.state.clientTrackIndex !== index;
     this.state.clientTrackIndex = index;
-    if (this.clientPlayer) {
-      const url = this.getTrackUrl(PLAYLIST_TRACKS[index].id);
-      if (trackChanged || this.currentClientUrl !== url) {
-        this.currentClientUrl = url;
-        console.log('[ADDA Music] Replacing client track:', index, url);
-        this.clientPlayer.replace(url);
+    const player = this.ensureClientPlayer();
+    if (player) {
+      const uri = this.getTrackUri(PLAYLIST_TRACKS[index].id);
+      if (trackChanged || this.currentClientUrl !== uri) {
+        this.currentClientUrl = uri;
+        console.log('[ADDA Music] Replacing client track:', index, uri);
+        player.replace(uri);
       }
-      this.clientPlayer.volume = this.state.clientMuted ? 0 : this.state.clientVolume;
-      this.clientPlayer.play();
+      player.volume = this.state.clientMuted ? 0 : this.state.clientVolume;
+      player.play();
       this.state.clientIsPlaying = true;
     }
     this.notify();
@@ -189,44 +242,47 @@ class MusicServiceManager {
   // --- In-World 3D Radio Controls ---
 
   public setRadioEnabled(enabled: boolean, force = false) {
-    this.init();
     if (this.state.radioEnabled === enabled && !force) return;
     this.state.radioEnabled = enabled;
-    if (this.radioPlayer) {
-      if (enabled) {
+    if (enabled) {
+      const player = this.ensureRadioPlayer();
+      if (player) {
         this.updateEffectiveRadioVolume();
-        this.radioPlayer.play();
-      } else {
-        this.radioPlayer.pause();
-        this.lastAppliedRadioVolume = 0;
-        this.radioPlayer.volume = 0;
+        player.play();
       }
+    } else if (this.radioPlayer) {
+      this.radioPlayer.pause();
+      this.lastAppliedRadioVolume = 0;
+      this.radioPlayer.volume = 0;
     }
     this.notify();
   }
 
   public playRadioTrack(index: number, seekSeconds = 0) {
-    this.init();
     if (index < 0 || index >= PLAYLIST_TRACKS.length) return;
     const trackChanged = this.state.radioTrackIndex !== index;
     this.state.radioTrackIndex = index;
-    if (this.radioPlayer) {
-      const url = this.getTrackUrl(PLAYLIST_TRACKS[index].id);
-      if (trackChanged || this.currentRadioUrl !== url) {
-        this.currentRadioUrl = url;
-        console.log('[ADDA Music] Replacing radio track:', index, url);
-        this.radioPlayer.replace(url);
-        if (seekSeconds > 0) {
-          this.radioPlayer.currentTime = seekSeconds;
+
+    if (this.state.radioEnabled || this.radioPlayer) {
+      const player = this.ensureRadioPlayer();
+      if (player) {
+        const uri = this.getTrackUri(PLAYLIST_TRACKS[index].id);
+        if (trackChanged || this.currentRadioUrl !== uri) {
+          this.currentRadioUrl = uri;
+          console.log('[ADDA Music] Replacing radio track:', index, uri);
+          player.replace(uri);
+          if (seekSeconds > 0) {
+            player.currentTime = seekSeconds;
+          }
         }
-      }
-      if (this.state.radioEnabled) {
-        this.updateEffectiveRadioVolume();
-        this.radioPlayer.play();
-      } else {
-        this.radioPlayer.pause();
-        this.lastAppliedRadioVolume = 0;
-        this.radioPlayer.volume = 0;
+        if (this.state.radioEnabled) {
+          this.updateEffectiveRadioVolume();
+          player.play();
+        } else {
+          player.pause();
+          this.lastAppliedRadioVolume = 0;
+          player.volume = 0;
+        }
       }
     }
     this.notify();
@@ -256,13 +312,17 @@ class MusicServiceManager {
 
   /**
    * Called from Three.js render loop to update distance-based volume.
-   * Only calls native bridge if attenuation change is significant, eliminating lag!
+   * Throttled to ~10Hz and ignores tiny movements to prevent ExoPlayer audio jitter!
    * @param attenuation 0.0 (too far) to 1.0 (right beside the radio)
    */
   public updateSpatialAttenuation(attenuation: number) {
+    const now = Date.now();
+    if (now - this.lastAttenuationUpdate < 90) return; // ~11 updates per second maximum
+    this.lastAttenuationUpdate = now;
+
     const clamped = Math.max(0, Math.min(1, attenuation));
     // Skip if difference is negligible to save native bridge calls
-    if (Math.abs(clamped - this.state.radio3DAttenuation) < 0.015) {
+    if (Math.abs(clamped - this.state.radio3DAttenuation) < 0.035) {
       return;
     }
     this.state.radio3DAttenuation = clamped;
@@ -275,8 +335,8 @@ class MusicServiceManager {
       ? 0
       : Math.max(0, Math.min(1, this.state.radioVolume * this.state.radio3DAttenuation));
 
-    // Only update native volume if it changed by at least 1%
-    if (Math.abs(targetVolume - this.lastAppliedRadioVolume) >= 0.01) {
+    // Only update native volume if it changed by at least 3.5%
+    if (Math.abs(targetVolume - this.lastAppliedRadioVolume) >= 0.035) {
       this.lastAppliedRadioVolume = targetVolume;
       this.radioPlayer.volume = targetVolume;
     }

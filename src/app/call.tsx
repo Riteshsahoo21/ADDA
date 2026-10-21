@@ -35,13 +35,14 @@ import {
   type MediaStream,
 } from 'react-native-webrtc';
 import InCallManager from 'react-native-incall-manager';
+import { WebView } from 'react-native-webview';
 import { useKeepAwake } from 'expo-keep-awake';
 import * as Notifications from 'expo-notifications';
 import { colors } from '@/constants/theme';
 import { callRequest, type CallInfo } from '@/lib/calls';
-import { getRealtimeSocket } from '@/lib/realtime';
+import { getActiveSocket, getRealtimeSocket } from '@/lib/realtime';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
-import { GroupMedia, type RemoteTrack } from '@/lib/group-media';
+import { dismissCallNotification } from '@/lib/push-notifications';
 import { MusicService } from '@/audio/MusicService';
 
 type Signal = { type: 'offer' | 'answer'; sdp: string } | { candidate: object };
@@ -66,13 +67,15 @@ export default function CallScreen() {
   const [callDuration, setCallDuration] = useState(0);
   const [local, setLocal] = useState<MediaStream | null>(null);
   const [remote, setRemote] = useState<MediaStream | null>(null);
-  const [groupTracks, setGroupTracks] = useState<RemoteTrack[]>([]);
+  const [groupTracks, setGroupTracks] = useState<{ id: string; kind: 'audio' | 'video'; stream: MediaStream; userId: string }[]>([]);
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(initialCameraOff);
   const [speakerOn, setSpeakerOn] = useState(true);
   const [isHeadsetConnected, setIsHeadsetConnected] = useState(false);
   const [routeToast, setRouteToast] = useState<string | null>(null);
   const [userNames, setUserNames] = useState<Record<string, string>>({});
+  const [mirotalkUrl, setMirotalkUrl] = useState('');
+  const mirotalkWebView = useRef<WebView>(null);
 
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mutedRef = useRef(false);
@@ -86,9 +89,13 @@ export default function CallScreen() {
   const pendingSignals = useRef<{ callId: string; from: string; signal: Signal }[]>([]);
   const offered = useRef(false);
   const ending = useRef(false);
-  const relayStarted = useRef(false);
-  const groupMedia = useRef<GroupMedia | null>(null);
   const readyPeer = useRef<string | null>(null);
+  const closeRef = useRef<((leave: boolean) => void) | null>(null);
+
+  const safeExit = () => {
+    if (router.canGoBack()) router.back();
+    else router.replace('/home');
+  };
 
   const showRouteToast = (msg: string) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -268,6 +275,10 @@ export default function CallScreen() {
     let active = true;
     let socket: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
     let currentCall: CallInfo | null = null;
+    let selfId: string | null = null;
+    let isCaller: boolean | null = null;
+    let applyingDescription = false;
+    let answeredOffer = false;
     let connectionTimer: ReturnType<typeof setTimeout> | null = null;
     const clearConnectionTimer = () => { if (connectionTimer) clearTimeout(connectionTimer); connectionTimer = null; };
     const onLocalStream = (stream: MediaStream) => {
@@ -276,42 +287,22 @@ export default function CallScreen() {
       setLocal(stream);
     };
 
-    const startRelay = async () => {
-      if (!currentCall || relayStarted.current || !active) return;
-      relayStarted.current = true;
-      clearConnectionTimer();
-      pc.current?.close(); pc.current = null;
-      localRef.current?.getTracks().forEach(track => track.stop()); localRef.current = null;
-      setLocal(null); setRemote(null); setStatus('Connecting through ADDA server…');
-      try {
-        const media = new GroupMedia(tracks => { if (active) setGroupTracks(tracks); }, message => { if (active) setStatus(message); }, undefined, onLocalStream);
-        groupMedia.current = media;
-        media.setMuted(mutedRef.current);
-        media.setCameraOff(cameraOffRef.current);
-        await media.join({ kind: 'call', id: callId }, !cameraOffRef.current);
-        if (active) {
-          localRef.current = media.local;
-          setLocal(media.local);
-          setStatus('Connected through ADDA server');
-        }
-      } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Call relay unavailable.'); }
-    };
-
-    const requestRelay = () => { if (currentCall && !relayStarted.current) socket?.emit('call:relay', callId); };
-    const onRelay = (event: { callId: string }) => { if (event.callId === callId) void startRelay(); };
-
     const close = (leave: boolean) => {
       if (ending.current) return;
       ending.current = true;
       clearConnectionTimer();
       void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
       InCallManager.stop();
-      if (leave) socket?.emit('call:leave', callId);
+      if (leave) {
+        const s = socket ?? getActiveSocket();
+        if (s?.connected) s.emit('call:leave', callId);
+        else void getRealtimeSocket().then(live => live.emit('call:leave', callId)).catch(() => {});
+      }
       pc.current?.close(); pc.current = null;
-      groupMedia.current?.close(); groupMedia.current = null;
       localRef.current?.getTracks().forEach(track => track.stop()); localRef.current = null;
-      if (active) router.back();
+      if (active) safeExit();
     };
+    closeRef.current = close;
 
     const sendSignal = (to: string, signal: Signal) => socket?.emit('call:signal', { callId, to, signal });
 
@@ -323,16 +314,14 @@ export default function CallScreen() {
         await pc.current.setLocalDescription(offer);
         sendSignal(peerId, { type: 'offer', sdp: offer.sdp ?? '' });
         clearConnectionTimer();
-        connectionTimer = setTimeout(requestRelay, 12000);
       } catch (error) {
         offered.current = false;
         if (active) setStatus(error instanceof Error ? error.message : 'Could not start media.');
-        connectionTimer = setTimeout(requestRelay, 12000);
       }
     };
 
     const onSignal = async (event: { callId: string; from: string; signal: Signal }) => {
-      if (event.callId !== callId || relayStarted.current) return;
+      if (event.callId !== callId || ending.current) return;
       if (!pc.current) { pendingSignals.current.push(event); return; }
       try {
         if ('candidate' in event.signal) {
@@ -341,20 +330,29 @@ export default function CallScreen() {
           else pendingCandidates.current.push(candidate);
           return;
         }
+        if (applyingDescription) return;
         if (event.signal.type === 'answer' && pc.current.signalingState !== 'have-local-offer') return;
-        if (event.signal.type === 'offer' && pc.current.signalingState !== 'stable') return;
-        await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal));
-        for (const candidate of pendingCandidates.current.splice(0)) await pc.current.addIceCandidate(candidate);
-        if (event.signal.type === 'offer') {
-          const answer = await pc.current.createAnswer();
-          await pc.current.setLocalDescription(answer);
-          sendSignal(event.from, { type: 'answer', sdp: answer.sdp ?? '' });
+        if (event.signal.type === 'offer' && (pc.current.signalingState !== 'stable' || answeredOffer)) return;
+        applyingDescription = true;
+        try {
+          await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal));
+          for (const candidate of pendingCandidates.current.splice(0)) await pc.current.addIceCandidate(candidate);
+          if (event.signal.type === 'offer') {
+            const answer = await pc.current.createAnswer();
+            await pc.current.setLocalDescription(answer);
+            answeredOffer = true;
+            sendSignal(event.from, { type: 'answer', sdp: answer.sdp ?? '' });
+          }
+        } finally { applyingDescription = false; }
+      } catch (error) {
+        if (active && pc.current?.connectionState !== 'connected') {
+          setStatus(error instanceof Error ? error.message : 'Could not connect media.');
         }
-      } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Could not connect media.'); }
+      }
     };
 
     const onJoined = (event: { callId: string; userId: string }) => {
-      if (event.callId === callId && role === 'caller' && !relayStarted.current) {
+      if (event.callId === callId && isCaller) {
         // Joining only means the call screen opened. Wait until the other
         // phone has acquired media and created its peer connection.
         if (pc.current) socket?.emit('call:ready', callId);
@@ -362,8 +360,10 @@ export default function CallScreen() {
     };
 
     const onReady = (event: { callId: string; from: string }) => {
-      if (event.callId !== callId || relayStarted.current) return;
-      if (role !== 'caller') {
+      if (event.callId !== callId) return;
+      if (isCaller === null) {
+        readyPeer.current = event.from;
+      } else if (!isCaller) {
         // Reply to a caller probe only when this phone can accept an offer.
         if (pc.current) socket?.emit('call:ready', callId);
       } else {
@@ -373,7 +373,10 @@ export default function CallScreen() {
     };
 
     const onEnded = (event: { callId: string; reason: string }) => {
-      if (event.callId === callId) { setStatus(event.reason); setTimeout(() => close(false), 900); }
+      if (event.callId === callId) close(false);
+    };
+    const onParticipantLeft = (event: { callId: string; userId: string }) => {
+      if (event.callId === callId && currentCall?.target.kind === 'direct' && event.userId !== selfId) close(false);
     };
 
     void (async () => {
@@ -383,11 +386,14 @@ export default function CallScreen() {
         socket.on('call:participant-joined', onJoined);
         socket.on('call:ready', onReady);
         socket.on('call:ended', onEnded);
-        socket.on('call:relay', onRelay);
+        socket.on('call:participant-left', onParticipantLeft);
         const joined = await callRequest<CallInfo>('call:join', callId);
         if (!active) return;
         currentCall = joined;
         setCall(joined);
+        void dismissCallNotification(joined.id);
+        if (joined.target.kind === 'direct') selfId = (await socialApi<OwnProfile>('/me')).id;
+        isCaller = joined.target.kind === 'direct' ? joined.callerId === selfId : role === 'caller';
         if (joined.media === 'video') {
           setCameraOff(false);
           cameraOffRef.current = false;
@@ -397,16 +403,10 @@ export default function CallScreen() {
           cameraOffRef.current = off;
         }
 
-        if (joined.usingRelay) { await startRelay(); return; }
         if (joined.target.kind === 'group') {
-          const media = new GroupMedia(tracks => { if (active) setGroupTracks(tracks); }, message => { if (active) setStatus(message); }, undefined, onLocalStream);
-          groupMedia.current = media;
-          media.setMuted(mutedRef.current);
-          media.setCameraOff(cameraOffRef.current);
-          await media.join({ kind: 'call', id: joined.id }, !cameraOffRef.current);
+          const meeting = await socialApi<{ url: string }>('/mirotalk/join', 'POST', { kind: 'call', id: joined.id });
           if (!active) return;
-          localRef.current = media.local;
-          setLocal(media.local);
+          setMirotalkUrl(meeting.url);
           setStatus('Connected');
           return;
         }
@@ -425,32 +425,48 @@ export default function CallScreen() {
 
         const listen = peer as unknown as { addEventListener: (type: string, listener: (event: { candidate?: RTCIceCandidate; streams?: MediaStream[] }) => void) => void };
         listen.addEventListener('icecandidate', event => {
-          if (event.candidate) sendSignal(role === 'caller' ? joined.target.id : joined.callerId, { candidate: event.candidate.toJSON() });
+          if (event.candidate) sendSignal(isCaller ? joined.target.id : joined.callerId, { candidate: event.candidate.toJSON() });
         });
         listen.addEventListener('track', event => {
           const s = event.streams?.[0];
           if (s && active) setRemote(s);
         });
+        let disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null;
         listen.addEventListener('connectionstatechange', () => {
-          if (!active || relayStarted.current) return;
-          if (peer.connectionState === 'connected') { clearConnectionTimer(); setStatus('Connected'); }
-          else if (peer.connectionState === 'failed') requestRelay();
-          else if (peer.connectionState === 'disconnected') { clearConnectionTimer(); connectionTimer = setTimeout(requestRelay, 5000); setStatus('Reconnecting…'); }
-          else setStatus('Connecting…');
+          if (!active || ending.current) return;
+          if (peer.connectionState === 'connected') {
+            clearConnectionTimer();
+            if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
+            setStatus('Connected');
+          } else if (peer.connectionState === 'failed') {
+            if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
+            setStatus('Connection failed.');
+          } else if (peer.connectionState === 'disconnected') {
+            if (!disconnectGraceTimer) {
+              disconnectGraceTimer = setTimeout(() => {
+                disconnectGraceTimer = null;
+                if (!active || ending.current) return;
+                clearConnectionTimer();
+                setStatus('Reconnecting…');
+              }, 600);
+            }
+          } else if (peer.connectionState === 'closed') {
+            if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
+          } else {
+            setStatus('Connecting…');
+          }
         });
 
         for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
-        if (role === 'caller' && readyPeer.current) {
+        if (isCaller && readyPeer.current) {
           void startOffer(readyPeer.current);
         } else {
-          setStatus(role === 'caller' ? 'Calling…' : 'Connecting…');
+          setStatus(isCaller ? 'Calling…' : 'Connecting…');
           socket.emit('call:ready', callId);
-          if (role !== 'caller') {
-            clearConnectionTimer();
-            connectionTimer = setTimeout(requestRelay, 12000);
-          }
         }
-      } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Call failed.'); }
+      } catch (error) {
+        if (active) setStatus(error instanceof Error ? error.message : 'Call failed.');
+      }
     })();
 
     return () => {
@@ -459,13 +475,12 @@ export default function CallScreen() {
       socket?.off('call:participant-joined', onJoined);
       socket?.off('call:ready', onReady);
       socket?.off('call:ended', onEnded);
-      socket?.off('call:relay', onRelay);
+      socket?.off('call:participant-left', onParticipantLeft);
       clearConnectionTimer();
       void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
       InCallManager.stop();
-      if (!ending.current) socket?.emit('call:leave', callId);
+      socket?.emit('call:leave', callId);
       pc.current?.close(); pc.current = null;
-      groupMedia.current?.close(); groupMedia.current = null;
       localRef.current?.getTracks().forEach(track => track.stop()); localRef.current = null;
     };
   }, [callId, role]);
@@ -474,7 +489,12 @@ export default function CallScreen() {
     const next = !mutedRef.current;
     mutedRef.current = next;
     localRef.current?.getAudioTracks().forEach(track => { track.enabled = !next; });
-    groupMedia.current?.setMuted(next);
+    if (mirotalkUrl && mirotalkWebView.current) {
+      mirotalkWebView.current.injectJavaScript(`
+        try { (document.getElementById('audioBtn') || document.getElementById('initAudioBtn'))?.click(); } catch(e) {}
+        true;
+      `);
+    }
     setMuted(next);
 
     // Root fix: when unmuting, WebRTC restarts AudioRecord.
@@ -491,13 +511,14 @@ export default function CallScreen() {
     cameraOffRef.current = next;
     setCameraOff(next);
 
-    if (groupMedia.current) {
-      const updatedStream = await groupMedia.current.setCameraOff(next);
-      if (updatedStream) {
-        localRef.current = updatedStream;
-        setLocal(updatedStream);
-      }
-    } else if (localRef.current) {
+    if (mirotalkUrl && mirotalkWebView.current) {
+      mirotalkWebView.current.injectJavaScript(`
+        try { (document.getElementById('videoBtn') || document.getElementById('initVideoBtn'))?.click(); } catch(e) {}
+        true;
+      `);
+    }
+
+    if (localRef.current) {
       const videoTracks = localRef.current.getVideoTracks();
       if (videoTracks.length === 0 && !next) {
         try {
@@ -519,9 +540,11 @@ export default function CallScreen() {
   };
 
   const flipCamera = () => {
-    if (groupMedia.current) {
-      groupMedia.current.flipCamera();
-      return;
+    if (mirotalkUrl && mirotalkWebView.current) {
+      mirotalkWebView.current.injectJavaScript(`
+        try { document.getElementById('swapCameraBtn')?.click(); } catch(e) {}
+        true;
+      `);
     }
     const videoTrack = localRef.current?.getVideoTracks()[0];
     if (videoTrack && typeof (videoTrack as any)._switchCamera === 'function') {
@@ -542,12 +565,26 @@ export default function CallScreen() {
   };
 
   const endCall = () => {
-    ending.current = true;
-    void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
-    InCallManager.setForceSpeakerphoneOn(false);
-    InCallManager.stop();
-    if (callId) void getRealtimeSocket().then(s => s.emit('call:leave', callId));
-    router.back();
+    if (mirotalkUrl && mirotalkWebView.current) {
+      mirotalkWebView.current.injectJavaScript(`
+        try { document.getElementById('exitBtn')?.click(); } catch(e) {}
+        true;
+      `);
+    }
+    if (closeRef.current) {
+      closeRef.current(true);
+    } else {
+      ending.current = true;
+      void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
+      InCallManager.setForceSpeakerphoneOn(false);
+      InCallManager.stop();
+      if (callId) {
+        const socket = getActiveSocket();
+        if (socket?.connected) socket.emit('call:leave', callId);
+        else void getRealtimeSocket().then(live => live.emit('call:leave', callId)).catch(() => {});
+      }
+      safeExit();
+    }
   };
 
   const videoTracks = groupTracks.filter(track => track.kind === 'video');
@@ -600,6 +637,25 @@ export default function CallScreen() {
                 <Text style={styles.audioCallTimer}>{status === 'Connected' ? (remote ? 'Camera off' : 'Connecting video…') : status}</Text>
               </View>
             )
+          ) : isGroup && mirotalkUrl ? (
+            // Group Video Call with MiroTalk service (wrapped in clean native stage)
+            <View style={StyleSheet.absoluteFill}>
+              <WebView
+                ref={mirotalkWebView}
+                source={{ uri: mirotalkUrl }}
+                javaScriptEnabled
+                domStorageEnabled
+                mediaPlaybackRequiresUserAction={false}
+                injectedJavaScript={`
+                  const hideStyle = document.createElement('style');
+                  hideStyle.innerHTML = '#bottomButtons, #header, header, .navbar, .footer, #controlAudio, #controlVideo, #exitBtn, #chatRoom, #whiteboard, .swal2-container, .modal { display: none !important; } body { background: #0A0E14 !important; }';
+                  document.head.appendChild(hideStyle);
+                  true;
+                `}
+                onError={() => setStatus('Could not connect to group call.')}
+                style={{ flex: 1, backgroundColor: '#0A0E14' }}
+              />
+            </View>
           ) : participantIds.length > 0 ? (
             // Group Video Call: Dynamic full-screen grid
             <View style={styles.fullGridContainer}>
@@ -667,6 +723,17 @@ export default function CallScreen() {
            AUDIO CALL SMART GRID / CENTERING
            ======================================================== */
         <View style={styles.audioStage}>
+          {mirotalkUrl ? (
+            <WebView
+              ref={mirotalkWebView}
+              source={{ uri: mirotalkUrl }}
+              javaScriptEnabled
+              domStorageEnabled
+              mediaPlaybackRequiresUserAction={false}
+              onError={() => setStatus('Could not connect to group call.')}
+              style={{ position: 'absolute', width: 2, height: 2, opacity: 0.01 }}
+            />
+          ) : null}
           {participantIds.length > 1 ? (
             // Group Audio Grid (WhatsApp style full tiles)
             <View style={styles.fullGridContainer}>
