@@ -150,7 +150,17 @@ socialRoutes.get('/social/bundle', run(async (_request, response) => {
 
 socialRoutes.get('/calls/ice', run(async (_request, response) => {
   const iceServers: { urls: string | string[]; username?: string; credential?: string }[] = [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302', env.stunUrl] },
+    {
+      urls: [
+        'stun:stun.l.google.com:19302',
+        'stun:stun1.l.google.com:19302',
+        'stun:stun2.l.google.com:19302',
+        'stun:stun3.l.google.com:19302',
+        'stun:stun4.l.google.com:19302',
+        'stun:stun.cloudflare.com:3478',
+        env.stunUrl,
+      ].filter(Boolean),
+    },
   ];
   if (env.turnUrl && env.turnSharedSecret) {
     const username = `${Math.floor(Date.now() / 1000) + 3600}:${response.locals.userId}`;

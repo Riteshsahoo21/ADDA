@@ -7,7 +7,7 @@ import { isBlockedPair } from '../social/safety.js';
 export type CallTarget = { kind: 'direct' | 'group'; id: string };
 export type CallMedia = 'audio' | 'video';
 export type CallInfo = { id: string; target: CallTarget; media: CallMedia; callerId: string; callerName: string; members: string[]; joined: string[]; expiresAt: number };
-type Call = CallInfo & { timer: ReturnType<typeof setTimeout>; declined: Set<string> };
+type Call = CallInfo & { timer: ReturnType<typeof setTimeout>; declined: Set<string>; pendingSignals: Map<string, Array<{ from: string; signal: unknown }>> };
 type Ack<T> = (result: { ok: true; value: T } | { ok: false; error: string }) => void;
 
 const calls = new Map<string, Call>();
@@ -66,6 +66,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
       const call: Call = {
         id, target, media: input.media, callerId: selfId, callerName: socket.data.name as string,
         members, joined: [selfId], declined: new Set(), expiresAt,
+        pendingSignals: new Map(),
         timer: setTimeout(() => {
           const current = calls.get(id);
           if (current && current.target.kind === 'direct' && current.joined.length === 1) closeCall(io, current, 'No answer');
@@ -94,20 +95,38 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     if (call.joined.length > 1) clearTimeout(call.timer);
     ack?.({ ok: true, value: publicCall(call) });
     io.to(call.members.map(userRoom)).emit('call:participant-joined', { callId, userId: selfId, joined: call.joined });
+
+    // Deliver any signals queued while this peer was connecting
+    const queued = call.pendingSignals.get(selfId);
+    if (queued && queued.length > 0) {
+      call.pendingSignals.delete(selfId);
+      for (const item of queued) {
+        io.to(userRoom(selfId)).emit('call:signal', { callId: call.id, from: item.from, signal: item.signal });
+      }
+    }
   });
   socket.on('call:ready', (callId: unknown) => {
     const call = typeof callId === 'string' ? calls.get(callId) : undefined;
     if (!call || call.target.kind !== 'direct' || !call.joined.includes(selfId)) return;
-    const otherId = call.joined.find(id => id !== selfId);
-    if (otherId) io.to(userRoom(otherId)).emit('call:ready', { callId, from: selfId });
+    const otherId = call.members.find(id => id !== selfId);
+    if (otherId && call.joined.includes(otherId)) {
+      io.to(userRoom(otherId)).emit('call:ready', { callId, from: selfId });
+    }
   });
   socket.on('call:signal', (input: unknown) => {
     if (!input || typeof input !== 'object' || !('callId' in input) || !('to' in input) || !('signal' in input) ||
       typeof input.callId !== 'string' || typeof input.to !== 'string') return;
     const call = calls.get(input.callId);
-    if (!call || call.target.kind !== 'direct' || !call.joined.includes(selfId) || !call.joined.includes(input.to)) return;
+    if (!call || call.target.kind !== 'direct' || !call.joined.includes(selfId) || !call.members.includes(input.to)) return;
     if (JSON.stringify(input.signal).length > 65_536) return;
-    io.to(userRoom(input.to)).emit('call:signal', { callId: input.callId, from: selfId, signal: input.signal });
+
+    if (call.joined.includes(input.to)) {
+      io.to(userRoom(input.to)).emit('call:signal', { callId: input.callId, from: selfId, signal: input.signal });
+    } else {
+      // Buffer early ICE candidates or offer until recipient finishes joining
+      if (!call.pendingSignals.has(input.to)) call.pendingSignals.set(input.to, []);
+      call.pendingSignals.get(input.to)!.push({ from: selfId, signal: input.signal });
+    }
   });
   socket.on('call:leave', (callId: unknown) => {
     const call = typeof callId === 'string' ? calls.get(callId) : undefined;

@@ -32,7 +32,7 @@ import {
   RTCPeerConnection,
   RTCSessionDescription,
   RTCView,
-  type MediaStream,
+  MediaStream,
 } from 'react-native-webrtc';
 import InCallManager from 'react-native-incall-manager';
 import { WebView } from 'react-native-webview';
@@ -306,11 +306,16 @@ export default function CallScreen() {
 
     const sendSignal = (to: string, signal: Signal) => socket?.emit('call:signal', { callId, to, signal });
 
+    let otherPeerId: string | null = null;
+
     const startOffer = async (peerId: string) => {
       if (!pc.current || offered.current || pc.current.signalingState !== 'stable') return;
       offered.current = true;
       try {
-        const offer = await pc.current.createOffer();
+        const offer = await pc.current.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: (currentCall?.media ?? paramMedia) === 'video',
+        });
         await pc.current.setLocalDescription(offer);
         sendSignal(peerId, { type: 'offer', sdp: offer.sdp ?? '' });
         clearConnectionTimer();
@@ -325,25 +330,45 @@ export default function CallScreen() {
       if (!pc.current) { pendingSignals.current.push(event); return; }
       try {
         if ('candidate' in event.signal) {
-          const candidate = new RTCIceCandidate(event.signal.candidate);
-          if (pc.current.remoteDescription) await pc.current.addIceCandidate(candidate);
-          else pendingCandidates.current.push(candidate);
+          const candData = event.signal.candidate;
+          if (candData && typeof candData === 'object') {
+            try {
+              const candidate = new RTCIceCandidate(candData as any);
+              if (pc.current.remoteDescription) {
+                await pc.current.addIceCandidate(candidate).catch(() => {});
+              } else {
+                pendingCandidates.current.push(candidate);
+              }
+            } catch {}
+          }
           return;
         }
         if (applyingDescription) return;
-        if (event.signal.type === 'answer' && pc.current.signalingState !== 'have-local-offer') return;
-        if (event.signal.type === 'offer' && (pc.current.signalingState !== 'stable' || answeredOffer)) return;
-        applyingDescription = true;
-        try {
-          await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal));
-          for (const candidate of pendingCandidates.current.splice(0)) await pc.current.addIceCandidate(candidate);
-          if (event.signal.type === 'offer') {
+        if (event.signal.type === 'answer') {
+          if (pc.current.signalingState !== 'have-local-offer') return;
+          applyingDescription = true;
+          try {
+            await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal));
+            for (const candidate of pendingCandidates.current.splice(0)) {
+              await pc.current.addIceCandidate(candidate).catch(() => {});
+            }
+          } finally { applyingDescription = false; }
+          return;
+        }
+        if (event.signal.type === 'offer') {
+          applyingDescription = true;
+          try {
+            await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal));
+            for (const candidate of pendingCandidates.current.splice(0)) {
+              await pc.current.addIceCandidate(candidate).catch(() => {});
+            }
             const answer = await pc.current.createAnswer();
             await pc.current.setLocalDescription(answer);
             answeredOffer = true;
             sendSignal(event.from, { type: 'answer', sdp: answer.sdp ?? '' });
-          }
-        } finally { applyingDescription = false; }
+          } finally { applyingDescription = false; }
+          return;
+        }
       } catch (error) {
         if (active && pc.current?.connectionState !== 'connected') {
           setStatus(error instanceof Error ? error.message : 'Could not connect media.');
@@ -353,22 +378,19 @@ export default function CallScreen() {
 
     const onJoined = (event: { callId: string; userId: string }) => {
       if (event.callId === callId && isCaller) {
-        // Joining only means the call screen opened. Wait until the other
-        // phone has acquired media and created its peer connection.
-        if (pc.current) socket?.emit('call:ready', callId);
+        const peer = otherPeerId || event.userId;
+        if (pc.current && peer && peer !== selfId) {
+          void startOffer(peer);
+        }
       }
     };
 
     const onReady = (event: { callId: string; from: string }) => {
       if (event.callId !== callId) return;
-      if (isCaller === null) {
-        readyPeer.current = event.from;
-      } else if (!isCaller) {
-        // Reply to a caller probe only when this phone can accept an offer.
-        if (pc.current) socket?.emit('call:ready', callId);
-      } else {
-        readyPeer.current = event.from;
+      if (isCaller) {
         if (pc.current) void startOffer(event.from);
+      } else {
+        if (pc.current) socket?.emit('call:ready', callId);
       }
     };
 
@@ -394,6 +416,8 @@ export default function CallScreen() {
         void dismissCallNotification(joined.id);
         if (joined.target.kind === 'direct') selfId = (await socialApi<OwnProfile>('/me')).id;
         isCaller = joined.target.kind === 'direct' ? joined.callerId === selfId : role === 'caller';
+        otherPeerId = joined.members.find(id => id !== selfId) || (isCaller ? joined.target.id : joined.callerId);
+
         if (joined.media === 'video') {
           setCameraOff(false);
           cameraOffRef.current = false;
@@ -411,8 +435,8 @@ export default function CallScreen() {
           return;
         }
 
-        const config = await socialApi<{ iceServers: { urls: string; username?: string; credential?: string }[] }>('/calls/ice');
-        const stream = await mediaDevices.getUserMedia({ audio: true, video: joined.media === 'video' });
+        const config = await socialApi<{ iceServers: { urls: string | string[]; username?: string; credential?: string }[] }>('/calls/ice');
+        const stream = await mediaDevices.getUserMedia({ audio: true, video: joined.media === 'video' || paramMedia === 'video' });
         if (!active) { stream.getTracks().forEach(track => track.stop()); return; }
         stream.getAudioTracks().forEach(track => { track.enabled = !mutedRef.current; });
         stream.getVideoTracks().forEach(track => { track.enabled = !cameraOffRef.current; });
@@ -423,25 +447,46 @@ export default function CallScreen() {
         pc.current = peer;
         stream.getTracks().forEach(track => peer.addTrack(track, stream));
 
-        const listen = peer as unknown as { addEventListener: (type: string, listener: (event: { candidate?: RTCIceCandidate; streams?: MediaStream[] }) => void) => void };
+        const listen = peer as unknown as { addEventListener: (type: string, listener: (event: any) => void) => void };
         listen.addEventListener('icecandidate', event => {
-          if (event.candidate) sendSignal(isCaller ? joined.target.id : joined.callerId, { candidate: event.candidate.toJSON() });
+          if (event.candidate && otherPeerId) {
+            const cand = typeof event.candidate.toJSON === 'function' ? event.candidate.toJSON() : event.candidate;
+            sendSignal(otherPeerId, { candidate: cand });
+          }
         });
-        listen.addEventListener('track', event => {
+        listen.addEventListener('track', (event: any) => {
           const s = event.streams?.[0];
-          if (s && active) setRemote(s);
+          if (s && active) {
+            setRemote(s);
+          } else if (event.track && active) {
+            setRemote(prev => {
+              if (prev) {
+                try { prev.addTrack(event.track); } catch {}
+                return prev;
+              }
+              const newStream = new MediaStream();
+              newStream.addTrack(event.track);
+              return newStream;
+            });
+          }
         });
+
         let disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null;
-        listen.addEventListener('connectionstatechange', () => {
+        const onConnStateChange = () => {
           if (!active || ending.current) return;
-          if (peer.connectionState === 'connected') {
+          const conn = peer.connectionState;
+          const ice = peer.iceConnectionState;
+          if (conn === 'connected' || ice === 'connected' || ice === 'completed') {
             clearConnectionTimer();
             if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
             setStatus('Connected');
-          } else if (peer.connectionState === 'failed') {
+            setTimeout(() => {
+              applyCallAudioRoute(speakerOnRef.current);
+            }, 150);
+          } else if (conn === 'failed' || ice === 'failed') {
             if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
             setStatus('Connection failed.');
-          } else if (peer.connectionState === 'disconnected') {
+          } else if (conn === 'disconnected' || ice === 'disconnected') {
             if (!disconnectGraceTimer) {
               disconnectGraceTimer = setTimeout(() => {
                 disconnectGraceTimer = null;
@@ -450,18 +495,20 @@ export default function CallScreen() {
                 setStatus('Reconnecting…');
               }, 600);
             }
-          } else if (peer.connectionState === 'closed') {
-            if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
-          } else {
-            setStatus('Connecting…');
           }
-        });
+        };
+        listen.addEventListener('connectionstatechange', onConnStateChange);
+        listen.addEventListener('iceconnectionstatechange', onConnStateChange);
 
         for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
-        if (isCaller && readyPeer.current) {
-          void startOffer(readyPeer.current);
+
+        if (isCaller) {
+          setStatus('Calling…');
+          if (otherPeerId) {
+            void startOffer(otherPeerId);
+          }
         } else {
-          setStatus(isCaller ? 'Calling…' : 'Connecting…');
+          setStatus('Connecting…');
           socket.emit('call:ready', callId);
         }
       } catch (error) {

@@ -6,7 +6,8 @@
 - Back up `release/adda-upload.jks` and `.play-signing.properties` together in a secure location. They are ignored by Git. Do not send them in chat or commit them.
 - For a new machine, restore both files, update the keystore path in `.play-signing.properties`, then build again. Never generate a second key for the same Play listing without completing Google's upload-key reset process.
 - Get the upload key SHA-1 with `keytool -list -v -keystore release/adda-upload.jks -alias adda-upload`. Register it for Android OAuth. After the first Play upload, also register the **Play App Signing** SHA-1 from Play Console; Google re-signs delivered APKs.
-- Current upload certificate SHA-1: `21:D2:D4:BB:32:34:AA:1C:03:71:A8:67:E3:DB:E2:2D:DF:48:D1:B1`. Check it against the bundle before registering it.
+- Current upload certificate SHA-1: `23:A7:7D:F5:E2:2B:AD:3C:AE:B6:1C:3F:75:FB:2C:34:F7:94:0B:80`
+- Current upload certificate SHA-256: `B3:92:FF:E1:DA:F1:05:E3:E1:08:36:D3:A7:85:01:3F:8D:E9:66:5A:6A:5A:72:9F:69:9F:10:6C:D3:04:5A:F4`
 
 ## Required before public release
 
