@@ -529,8 +529,9 @@ async function sendEncryptedContent(
     changed();
 
     // 2. Encrypt in-memory using TweetNaCl (3ms)
-    // For groups, always fetch fresh keys so all members and their current devices are included
-    const keyList = prefetchedKeys ?? await getOrFetchKeys(target, target.kind === 'group');
+    // Key caching: Direct chats cache 30m, group chats cache 30s.
+    // Never force fresh HTTP fetch on every send - uses cached keys in RAM for 0ms encryption!
+    const keyList = prefetchedKeys ?? await getOrFetchKeys(target, false);
     await pinKeys(keyList.devices);
 
     const contentKey = nacl.randomBytes(nacl.secretbox.keyLength);
@@ -560,24 +561,44 @@ async function sendEncryptedContent(
 
     // 3. Emit directly over persistent WebSocket (Single Gray Tick ✓)
     const live = await getRealtimeSocket(me.deviceId);
-    live.emit('chat:send_instant', {
-      messageId,
-      senderDeviceId: me.deviceId,
-      senderPublicKey: me.publicKey,
-      target,
-      ciphertext,
-      nonce: bytesToBase64(nonce),
-      keys,
-      mediaId: attachedMediaId,
-      mentions: effectiveMentions && effectiveMentions.length > 0 ? effectiveMentions : undefined
-    }, async (ack: any) => {
-      if (ack?.ok) {
-        await withDbLock(() => me.db.runAsync("UPDATE message SET status = 'sent' WHERE id = ? AND status = 'queued'", messageId));
-        changed();
-      }
-    });
 
-    return message;
+    return await new Promise<LocalMessage>((resolve) => {
+      let settled = false;
+      const fallbackTimer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve(message);
+        }
+      }, 1500);
+
+      live.emit('chat:send_instant', {
+        messageId,
+        senderDeviceId: me.deviceId,
+        senderPublicKey: me.publicKey,
+        target,
+        ciphertext,
+        nonce: bytesToBase64(nonce),
+        keys,
+        mediaId: attachedMediaId,
+        mentions: effectiveMentions && effectiveMentions.length > 0 ? effectiveMentions : undefined
+      }, async (ack: any) => {
+        if (ack?.ok) {
+          await withDbLock(() => me.db.runAsync("UPDATE message SET status = 'sent' WHERE id = ? AND status = 'queued'", messageId));
+          changed();
+          if (!settled) {
+            settled = true;
+            clearTimeout(fallbackTimer);
+            resolve({ ...message, status: 'sent' });
+          }
+        } else {
+          if (!settled) {
+            settled = true;
+            clearTimeout(fallbackTimer);
+            resolve(message);
+          }
+        }
+      });
+    });
   } finally {
     inFlightMessages.delete(messageId);
   }
@@ -750,7 +771,7 @@ export async function receiveDirectEnvelope(envelope: Envelope): Promise<boolean
   });
   if (!saved) return false;
 
-  const receipt = { messageId: envelope.messageId, recipientDeviceId: me.deviceId };
+  const receipt = { messageId: envelope.messageId, recipientDeviceId: me.deviceId, senderId: envelope.senderId };
   const live = await getRealtimeSocket(me.deviceId).catch(() => null);
   if (live?.connected) {
     const accepted = await new Promise<boolean>(resolve => {

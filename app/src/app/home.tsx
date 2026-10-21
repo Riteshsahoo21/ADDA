@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import Svg, { Defs, LinearGradient, Stop, Rect } from 'react-native-svg';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
 import { Check, CirclePlus, Compass, DoorOpen, EllipsisVertical, Globe, Lock, MessageCircle, MessageSquare, Minus, Phone, Plus, QrCode, RefreshCw, Search, Shield, Sparkles, UserPlus, Users, UsersRound, Video, X } from 'lucide-react-native';
@@ -31,12 +32,61 @@ const avatars: { body: AvatarBody; label: string; tagline: string }[] = [
 type Sheet = 'add' | 'group' | 'menu' | null;
 type RoomKind = 'loft' | 'tea' | 'beach' | 'roof';
 
-const THEMES: { id: RoomKind; title: string; subtitle: string; emoji: string; color: string }[] = [
-  { id: 'tea', title: 'Chai Shop', subtitle: 'Roadside adda with warm tea & bench talks', emoji: '☕', color: '#B26E3A' },
-  { id: 'beach', title: 'Sunset Beach', subtitle: 'Sunset shores, ocean breeze & waves', emoji: '🏖️', color: '#F38D68' },
-  { id: 'loft', title: 'Lounge Loft', subtitle: 'Modern apartment lounge & sofas', emoji: '🏢', color: '#277A55' },
-  { id: 'roof', title: 'School Rooftop', subtitle: 'Open sky rooftop overlooking the city', emoji: '🏫', color: '#5C6BC0' },
-];
+export interface RoomThemeItem {
+  id: RoomKind;
+  title: string;
+  subtitle: string;
+  tagline: string;
+  badge: string;
+  emoji: string;
+  color: string;
+  image: any;
+}
+
+const ROOM_MAPS: Record<RoomKind, RoomThemeItem> = {
+  tea: {
+    id: 'tea',
+    title: 'Chai Tapri Adda',
+    subtitle: 'Cutting chai, bench talks & street buzz',
+    tagline: 'Cutting chai, bench talks & street buzz',
+    badge: '☕ Live Tapri',
+    emoji: '☕',
+    color: '#D97706',
+    image: require('../../assets/images/rooms/tea.jpg'),
+  },
+  beach: {
+    id: 'beach',
+    title: 'Goa Sunset Coast',
+    subtitle: 'Golden hour breeze, shack tunes & ocean waves',
+    tagline: 'Golden hour breeze, shack tunes & ocean waves',
+    badge: '🌅 Golden Hour',
+    emoji: '🏖️',
+    color: '#F97316',
+    image: require('../../assets/images/rooms/beach.jpg'),
+  },
+  loft: {
+    id: 'loft',
+    title: 'Urban Penthouse',
+    subtitle: 'Metropolitan skyline & plush velvet lounge',
+    tagline: 'Metropolitan skyline & plush velvet lounge',
+    badge: '✨ Luxury Lounge',
+    emoji: '🏢',
+    color: '#10B981',
+    image: require('../../assets/images/rooms/loft.jpg'),
+  },
+  roof: {
+    id: 'roof',
+    title: 'Stargazer Rooftop',
+    subtitle: 'Twilight breeze, fairy lights & city terrace',
+    tagline: 'Twilight breeze, fairy lights & city terrace',
+    badge: '🌃 Twilight Adda',
+    emoji: '🏫',
+    color: '#6366F1',
+    image: require('../../assets/images/rooms/roof.jpg'),
+  },
+};
+
+const THEMES: RoomThemeItem[] = [ROOM_MAPS.tea, ROOM_MAPS.beach, ROOM_MAPS.loft, ROOM_MAPS.roof];
 
 export default function HomeScreen() {
   const { username, logout, avatarStyle, setAvatarStyle } = useSession();
@@ -812,8 +862,8 @@ export default function HomeScreen() {
 
         {roomsSubTab === 'create' && (
           <>
-            <Text style={styles.pageTitle}>Create a Server</Text>
-            <Text style={styles.pageCopy}>Pick a map environment to launch a live public or private server instance.</Text>
+            <Text style={styles.pageTitle}>Create 3D Adda</Text>
+            <Text style={styles.pageCopy}>Pick a virtual map to launch a real-time hangout space for your friends.</Text>
 
             <View style={styles.themeList}>
               {THEMES.map(theme => {
@@ -822,30 +872,71 @@ export default function HomeScreen() {
                   <Pressable
                     key={theme.id}
                     onPress={() => setSelectedTheme(theme.id)}
-                    style={[styles.themeCard, isSelected && styles.themeCardSelected]}
+                    style={[
+                      styles.roomMapCard,
+                      isSelected && [styles.roomMapCardSelected, { borderColor: theme.color }],
+                    ]}
                   >
-                    <View style={[styles.themeCardEmojiBox, { backgroundColor: theme.color + '22' }]}>
-                      <Text style={{ fontSize: 26 }}>{theme.emoji}</Text>
+                    <Image source={theme.image} style={styles.roomMapCardBg} resizeMode="cover" />
+                    <Svg height="100%" width="100%" style={StyleSheet.absoluteFill}>
+                      <Defs>
+                        <LinearGradient id={`grad_${theme.id}`} x1="0" y1="0" x2="0" y2="1">
+                          <Stop offset="0" stopColor="#000000" stopOpacity="0.25" />
+                          <Stop offset="0.45" stopColor="#000000" stopOpacity="0.5" />
+                          <Stop offset="1" stopColor="#040907" stopOpacity="0.94" />
+                        </LinearGradient>
+                      </Defs>
+                      <Rect x="0" y="0" width="100%" height="100%" fill={`url(#grad_${theme.id})`} />
+                    </Svg>
+
+                    {/* Top Row: Vibe badge & Selection pill */}
+                    <View style={styles.roomMapTopRow}>
+                      <View style={[styles.roomVibePill, { borderColor: theme.color + '99' }]}>
+                        <Text style={styles.roomVibeText}>{theme.badge}</Text>
+                      </View>
+                      <View style={[
+                        styles.roomSelectPill,
+                        isSelected ? [styles.roomSelectPillActive, { backgroundColor: theme.color }] : styles.roomSelectPillInactive
+                      ]}>
+                        {isSelected ? (
+                          <View style={styles.roomSelectCheckRow}>
+                            <Check size={12} strokeWidth={3} color="#FFFFFF" />
+                            <Text style={styles.roomSelectTextActive}>SELECTED</Text>
+                          </View>
+                        ) : (
+                          <Text style={styles.roomSelectTextInactive}>TAP TO SELECT</Text>
+                        )}
+                      </View>
                     </View>
-                    <View style={styles.fill}>
-                      <Text style={[styles.cardTitle, isSelected && { color: colors.primaryDark }]}>{theme.title}</Text>
-                      <Text style={styles.cardSub}>{theme.subtitle}</Text>
-                    </View>
-                    <View style={[styles.themeCardRadio, isSelected && styles.themeCardRadioSelected]}>
-                      {isSelected && <View style={styles.themeCardRadioDot} />}
+
+                    {/* Bottom Row: Title, 3D Badge, and Tagline */}
+                    <View style={styles.roomMapBottomContent}>
+                      <View style={styles.roomMapTitleRow}>
+                        <Text style={styles.roomMapTitle}>{theme.title}</Text>
+                        <View style={styles.room3DBadge}>
+                          <Sparkles size={11} color="#34D399" />
+                          <Text style={styles.room3DBadgeText}>3D SPACE</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.roomMapTagline} numberOfLines={1}>{theme.tagline}</Text>
                     </View>
                   </Pressable>
                 );
               })}
             </View>
 
-            <Pressable
-              onPress={() => handleOpenCreateModal(selectedTheme)}
-              style={styles.launchServerButton}
-            >
-              <CirclePlus size={20} color="#FFFFFF" />
-              <Text style={styles.launchServerButtonText}>CONFIGURE & CREATE SERVER</Text>
-            </Pressable>
+            {(() => {
+              const activeTheme = THEMES.find(t => t.id === selectedTheme) || THEMES[0];
+              return (
+                <Pressable
+                  onPress={() => handleOpenCreateModal(selectedTheme)}
+                  style={[styles.launchServerButton, { backgroundColor: activeTheme.color }]}
+                >
+                  <CirclePlus size={20} color="#FFFFFF" strokeWidth={2.4} />
+                  <Text style={styles.launchServerButtonText}>LAUNCH {activeTheme.title.toUpperCase()}</Text>
+                </Pressable>
+              );
+            })()}
           </>
         )}
 
@@ -878,36 +969,41 @@ export default function HomeScreen() {
             )}
 
             {!loadingPublicRooms && publicRooms.length > 0 && (
-              <View style={{ gap: 12, marginBottom: 20 }}>
+              <View style={{ gap: 14, marginBottom: 20 }}>
                 {publicRooms.map(server => {
                   const theme = THEMES.find(t => t.id === server.roomKind) || THEMES[0];
                   const maxCap = server.maxPlayers || 10;
                   const isFull = server.peerCount >= maxCap;
                   return (
-                    <View key={server.id} style={styles.serverCard}>
-                      <View style={styles.serverCardHeader}>
-                        <View style={[styles.roomIcon, { backgroundColor: theme.color + '22', width: 44, height: 44, borderRadius: 12 }]}>
-                          <Text style={{ fontSize: 22 }}>{theme.emoji}</Text>
-                        </View>
-                        <View style={{ flex: 1, marginLeft: 12 }}>
-                          <Text style={styles.serverCardTitle} numberOfLines={1}>{server.name}</Text>
-                          <Text style={styles.serverCardHost}>Hosted by {server.creatorName}</Text>
-                        </View>
-                        <View style={[styles.peerCountBadge, isFull && { backgroundColor: '#FEE2E2' }]}>
-                          <View style={[styles.onlineDot, isFull && { backgroundColor: '#EF4444' }]} />
-                          <Text style={[styles.peerCountText, isFull && { color: '#B91C1C', fontWeight: '800' }]}>
-                            {server.peerCount}/{maxCap} {isFull ? 'FULL' : 'online'}
-                          </Text>
+                    <View key={server.id} style={styles.serverCardModern}>
+                      <View style={styles.serverCardThumbWrap}>
+                        <Image source={theme.image} style={styles.serverCardThumb} resizeMode="cover" />
+                        <View style={[styles.serverVibeTag, { backgroundColor: theme.color }]}>
+                          <Text style={styles.serverVibeTagText}>{theme.emoji}</Text>
                         </View>
                       </View>
-                      <Pressable
-                        disabled={isFull}
-                        onPress={() => handleJoinServer(server)}
-                        style={[styles.serverJoinButton, isFull && { backgroundColor: '#94A3B8', opacity: 0.85 }]}
-                      >
-                        <DoorOpen size={17} color="#FFFFFF" />
-                        <Text style={styles.serverJoinButtonText}>{isFull ? 'SERVER FULL' : 'JOIN SERVER'}</Text>
-                      </Pressable>
+                      <View style={styles.serverCardBody}>
+                        <View style={styles.serverCardHeaderRow}>
+                          <View style={{ flex: 1, paddingRight: 6 }}>
+                            <Text style={styles.serverCardTitle} numberOfLines={1}>{server.name}</Text>
+                            <Text style={styles.serverCardHost}>by @{server.creatorName} • {theme.title}</Text>
+                          </View>
+                          <View style={[styles.peerCountBadge, isFull && { backgroundColor: '#FEE2E2' }]}>
+                            <View style={[styles.onlineDot, isFull && { backgroundColor: '#EF4444' }]} />
+                            <Text style={[styles.peerCountText, isFull && { color: '#B91C1C' }]}>
+                              {server.peerCount}/{maxCap}
+                            </Text>
+                          </View>
+                        </View>
+                        <Pressable
+                          disabled={isFull}
+                          onPress={() => handleJoinServer(server)}
+                          style={[styles.serverJoinButton, isFull ? { backgroundColor: '#94A3B8' } : { backgroundColor: theme.color }]}
+                        >
+                          <DoorOpen size={16} color="#FFFFFF" />
+                          <Text style={styles.serverJoinButtonText}>{isFull ? 'SERVER FULL' : 'JOIN ADDA'}</Text>
+                        </Pressable>
+                      </View>
                     </View>
                   );
                 })}
@@ -1293,13 +1389,23 @@ export default function HomeScreen() {
 
           <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
             {/* Selected Theme Header */}
-            <View style={styles.modalThemeHeader}>
-              <Text style={{ fontSize: 28 }}>{THEMES.find(t => t.id === selectedTheme)?.emoji}</Text>
-              <View style={{ flex: 1, marginLeft: 10 }}>
-                <Text style={styles.cardTitle}>{THEMES.find(t => t.id === selectedTheme)?.title}</Text>
-                <Text style={styles.cardSub}>{THEMES.find(t => t.id === selectedTheme)?.subtitle}</Text>
-              </View>
-            </View>
+            {(() => {
+              const currentTheme = THEMES.find(t => t.id === selectedTheme) || THEMES[0];
+              return (
+                <View style={styles.modalThemeHeaderModern}>
+                  <Image source={currentTheme.image} style={styles.modalThemeThumb} resizeMode="cover" />
+                  <View style={{ flex: 1, marginLeft: 12 }}>
+                    <View style={[styles.modalThemeBadge, { backgroundColor: currentTheme.color + '22' }]}>
+                      <Text style={[styles.modalThemeBadgeText, { color: currentTheme.color }]}>
+                        {currentTheme.badge}
+                      </Text>
+                    </View>
+                    <Text style={styles.modalThemeTitle}>{currentTheme.title}</Text>
+                    <Text style={styles.modalThemeSub}>{currentTheme.tagline}</Text>
+                  </View>
+                </View>
+              );
+            })()}
 
             {/* Privacy Mode Selector */}
             <Text style={styles.fieldLabel}>SERVER TYPE</Text>
@@ -1630,9 +1736,9 @@ const styles = StyleSheet.create({
   sentBadgeText: { color: '#25D366', fontSize: 12, fontWeight: '700' },
 
   // Rooms Tab Navigation
-  roomsTabBar: { flexDirection: 'row', backgroundColor: colors.surfaceRaised, borderRadius: 14, padding: 4, marginBottom: 16 },
-  roomsTabBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10 },
-  roomsTabBtnActive: { backgroundColor: colors.primary },
+  roomsTabBar: { flexDirection: 'row', backgroundColor: colors.surfaceRaised, borderRadius: 16, padding: 4, marginBottom: 18, borderWidth: 1, borderColor: colors.border },
+  roomsTabBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 11, borderRadius: 12 },
+  roomsTabBtnActive: { backgroundColor: colors.primary, elevation: 2 },
   roomsTabBtnText: { fontSize: 13, fontWeight: '700', color: colors.text },
   roomsTabBtnTextActive: { color: '#FFFFFF' },
   serverCountBadge: { backgroundColor: colors.surface, paddingHorizontal: 7, paddingVertical: 1, borderRadius: 10, marginLeft: 2 },
@@ -1640,31 +1746,244 @@ const styles = StyleSheet.create({
   serverCountBadgeText: { fontSize: 11, fontWeight: '800', color: colors.primaryDark },
   serverCountBadgeTextActive: { color: '#FFFFFF' },
 
-  // Themes
-  themeList: { gap: 12, marginBottom: 20 },
-  themeCard: { flexDirection: 'row', alignItems: 'center', padding: 14, backgroundColor: colors.surface, borderWidth: 1.5, borderColor: colors.border, borderRadius: 18 },
-  themeCardSelected: { borderColor: colors.primary, backgroundColor: colors.primarySoft },
-  themeCardEmojiBox: { width: 50, height: 50, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-  themeCardRadio: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
-  themeCardRadioSelected: { borderColor: colors.primary },
-  themeCardRadioDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: colors.primary },
-  launchServerButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: colors.primary, borderRadius: 16, paddingVertical: 16, marginBottom: 24, elevation: 2 },
-  launchServerButtonText: { color: '#FFFFFF', fontSize: 15, fontWeight: '900', letterSpacing: 0.5 },
+  // Themes / 3D Room Cards
+  themeList: { gap: 16, marginBottom: 22 },
+  roomMapCard: {
+    height: 195,
+    borderRadius: 22,
+    overflow: 'hidden',
+    position: 'relative',
+    borderWidth: 2,
+    borderColor: 'rgba(0, 0, 0, 0.08)',
+    backgroundColor: '#0F172A',
+    elevation: 3,
+  },
+  roomMapCardSelected: {
+    borderWidth: 2.5,
+    elevation: 8,
+  },
+  roomMapCardBg: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    width: '100%',
+    height: '100%',
+  },
+  roomMapTopRow: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 14,
+    zIndex: 2,
+  },
+  roomVibePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(15, 23, 42, 0.72)',
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 20,
+  },
+  roomVibeText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  roomSelectPill: {
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  roomSelectPillActive: {
+    elevation: 4,
+  },
+  roomSelectPillInactive: {
+    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
+  },
+  roomSelectCheckRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  roomSelectTextActive: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  roomSelectTextInactive: {
+    color: 'rgba(255, 255, 255, 0.8)',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  roomMapBottomContent: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    paddingHorizontal: 16,
+    paddingBottom: 14,
+    zIndex: 2,
+  },
+  roomMapTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  roomMapTitle: {
+    color: '#FFFFFF',
+    fontSize: 19,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+    textShadowColor: 'rgba(0, 0, 0, 0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  room3DBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(16, 185, 129, 0.25)',
+    borderWidth: 1,
+    borderColor: '#10B981',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  room3DBadgeText: {
+    color: '#6EE7B7',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  roomMapTagline: {
+    color: 'rgba(255, 255, 255, 0.85)',
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 4,
+    textShadowColor: 'rgba(0, 0, 0, 0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  launchServerButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderRadius: 18,
+    paddingVertical: 16,
+    marginBottom: 26,
+    elevation: 3,
+  },
+  launchServerButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
 
-  // Join Server Cards
+  // Active Servers (Join SubTab)
   refreshIconBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center' },
-  serverCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, padding: 14, gap: 12 },
-  serverCardHeader: { flexDirection: 'row', alignItems: 'center' },
+  serverCardModern: {
+    backgroundColor: colors.surface,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    borderRadius: 18,
+    padding: 12,
+    flexDirection: 'row',
+    gap: 12,
+    alignItems: 'center',
+    elevation: 1,
+  },
+  serverCardThumbWrap: {
+    width: 76,
+    height: 76,
+    borderRadius: 14,
+    overflow: 'hidden',
+    position: 'relative',
+    backgroundColor: '#0F172A',
+  },
+  serverCardThumb: {
+    width: '100%',
+    height: '100%',
+  },
+  serverVibeTag: {
+    position: 'absolute',
+    top: 4,
+    left: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  serverVibeTagText: {
+    fontSize: 11,
+  },
+  serverCardBody: {
+    flex: 1,
+    gap: 8,
+  },
+  serverCardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   serverCardTitle: { color: colors.text, fontSize: 16, fontWeight: '800' },
-  serverCardHost: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  serverCardHost: { color: colors.muted, fontSize: 11, marginTop: 2, fontWeight: '500' },
   peerCountBadge: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#DCFCE7', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
   onlineDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#22C55E' },
   peerCountText: { color: '#15803D', fontSize: 11, fontWeight: '800' },
-  serverJoinButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: '#25D366', borderRadius: 12, paddingVertical: 11 },
-  serverJoinButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
+  serverJoinButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderRadius: 12, paddingVertical: 10 },
+  serverJoinButtonText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800', letterSpacing: 0.3 },
 
-  // Create Server Modal
-  modalThemeHeader: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceRaised, padding: 12, borderRadius: 14, marginBottom: 16 },
+  // Create Server Modal Header
+  modalThemeHeaderModern: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surfaceRaised,
+    padding: 12,
+    borderRadius: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  modalThemeThumb: {
+    width: 60,
+    height: 60,
+    borderRadius: 12,
+  },
+  modalThemeBadge: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    marginBottom: 3,
+  },
+  modalThemeBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  modalThemeTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: colors.text,
+  },
+  modalThemeSub: {
+    fontSize: 11,
+    color: colors.muted,
+    marginTop: 2,
+  },
   privacyToggleRow: { flexDirection: 'row', gap: 10, marginBottom: 16 },
   privacyOption: { flex: 1, backgroundColor: colors.surfaceRaised, borderWidth: 1.5, borderColor: colors.border, borderRadius: 14, padding: 12, alignItems: 'center', gap: 4 },
   privacyOptionSelected: { borderColor: colors.primary, backgroundColor: colors.primarySoft },

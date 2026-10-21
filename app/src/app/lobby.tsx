@@ -14,10 +14,10 @@ const avatarLabels: Record<AvatarBody, string> = AVATAR_NAMES;
 const avatarList: AvatarBody[] = ['photo_boy', 'uncle', 'man', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman'];
 
 const THEME_NAMES: Record<string, { label: string; emoji: string; color: string; desc: string }> = {
-  tea: { label: 'Chai Shop', emoji: '☕', color: '#B26E3A', desc: 'Roadside adda with warm tea and bench talks' },
-  beach: { label: 'Sunset Beach', emoji: '🏖️', color: '#F38D68', desc: 'Sunset shores, shacks & ocean waves' },
-  loft: { label: 'Lounge Loft', emoji: '🏢', color: '#277A55', desc: 'Cozy modern apartment lounge' },
-  roof: { label: 'School Rooftop', emoji: '🏫', color: '#5C6BC0', desc: 'Open sky school rooftop overlooking the city' },
+  tea: { label: 'Chai Tapri Adda', emoji: '☕', color: '#D97706', desc: 'Cutting chai, bench talks & street buzz' },
+  beach: { label: 'Goa Sunset Coast', emoji: '🏖️', color: '#F97316', desc: 'Golden hour breeze, shack tunes & ocean waves' },
+  loft: { label: 'Urban Penthouse', emoji: '🏢', color: '#10B981', desc: 'Metropolitan skyline & plush velvet lounge' },
+  roof: { label: 'Stargazer Rooftop', emoji: '🏫', color: '#6366F1', desc: 'Twilight breeze, fairy lights & city terrace' },
 };
 
 export default function LobbyScreen() {

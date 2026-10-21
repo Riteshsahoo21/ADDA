@@ -1013,7 +1013,13 @@ export default function ConversationScreen() {
     // 3. BACKGROUND ENCRYPTION & PERSISTENCE (Non-blocking)
     void sendEncryptedMessage(target, body, myName, messageId, currentReply, currentMentions)
       .then(sent => {
-        setMessages(current => current.map(item => item.id === messageId ? sent : item));
+        setMessages(current => current.map(item => {
+          if (item.id !== messageId) return item;
+          const rank: Record<string, number> = { queued: 0, sent: 1, delivered: 2, read: 3 };
+          const currentRank = rank[item.status] ?? 0;
+          const newRank = rank[sent.status] ?? 0;
+          return newRank > currentRank ? { ...item, status: sent.status } : item;
+        }));
       })
       .catch(cause => {
         console.warn('Send error:', cause);
@@ -1077,7 +1083,13 @@ export default function ConversationScreen() {
     void (async () => {
       try {
         const sent = await sendEncryptedMedia(target, asset.uri, mediaKind, mimeType, myName, messageId, currentReply, currentMentions);
-        setMessages(current => current.map(item => item.id === messageId ? sent : item));
+        setMessages(current => current.map(item => {
+          if (item.id !== messageId) return item;
+          const rank: Record<string, number> = { queued: 0, sent: 1, delivered: 2, read: 3 };
+          const currentRank = rank[item.status] ?? 0;
+          const newRank = rank[sent.status] ?? 0;
+          return newRank > currentRank ? { ...item, status: sent.status } : item;
+        }));
         SoundEffects.playSent();
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : 'Could not share encrypted media.');
