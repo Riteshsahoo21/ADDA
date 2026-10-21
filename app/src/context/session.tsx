@@ -29,6 +29,12 @@ const SessionContext = createContext<Session | null>(null);
 const SAVED_USER_KEY = 'adda_current_username';
 const SAVED_USER_ID_KEY = 'adda_current_user_id';
 export let notificationNavigationOccurred = false;
+export function hasNotificationNavigationOccurred(): boolean {
+  return notificationNavigationOccurred;
+}
+export function setNotificationNavigationOccurred(value: boolean) {
+  notificationNavigationOccurred = value;
+}
 
 export function SessionProvider({ children }: PropsWithChildren) {
   const [username, setUsername] = useState<string | null>(null);
@@ -187,7 +193,6 @@ export function SessionProvider({ children }: PropsWithChildren) {
   }, [incomingCall]);
 
   useEffect(() => {
-    if (!username) return;
     void registerCallNotifications().catch(error => console.warn('Call notifications unavailable:', error));
     const openCall = (response: Notifications.NotificationResponse) => {
       const data = response.notification.request.content.data;
@@ -247,6 +252,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
       if (openedNotificationCall.current === data.callId) return;
       openedNotificationCall.current = data.callId;
       notificationNavigationOccurred = true;
+      setNotificationNavigationOccurred(true);
       setIncomingCall(null);
       void Notifications.clearLastNotificationResponseAsync();
       router.replace({
@@ -263,6 +269,11 @@ export function SessionProvider({ children }: PropsWithChildren) {
     const subscription = Notifications.addNotificationResponseReceivedListener(openCall);
     const receiveSubscription = Notifications.addNotificationReceivedListener(notification => {
       const data = notification.request.content.data;
+      if (data?.kind === 'call' && typeof data.callId === 'string' && !data.isOngoing) {
+        try {
+          InCallManager.startRingtone('_DEFAULT_', [0, 500, 200, 500], 'default', 45);
+        } catch {}
+      }
       if (data?.kind === 'chat') {
         if (typeof data.envelope === 'string' && data.envelope.length > 0) {
           try {
@@ -280,7 +291,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
       subscription.remove();
       receiveSubscription.remove();
     };
-  }, [username]);
+  }, []);
 
   const answerCall = () => {
     const call = incomingCall;

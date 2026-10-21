@@ -41,10 +41,6 @@ export async function sendCallPush(userIds: string[], call: { id: string; caller
     const body = isGroup ? `${call.callerName} started a group ${call.media} call` : `Incoming ${call.media} call`;
     const response = await getMessaging().sendEachForMulticast({
       tokens: batch,
-      notification: {
-        title,
-        body,
-      },
       data: {
         kind: 'call',
         callId: call.id,
@@ -64,13 +60,6 @@ export async function sendCallPush(userIds: string[], call: { id: string; caller
       android: {
         priority: 'high',
         ttl: 45_000,
-        notification: {
-          channelId: 'adda_calls',
-          priority: 'max',
-          sound: 'default',
-          tag: call.id,
-          clickAction: 'incoming_call',
-        },
       },
     });
     if (response.failureCount) {

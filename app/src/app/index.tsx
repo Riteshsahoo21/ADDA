@@ -6,7 +6,7 @@ import { router } from 'expo-router';
 import * as Notifications from 'expo-notifications';
 import { AddaLogo } from '@/components/ui/AddaLogo';
 import { colors } from '@/constants/theme';
-import { useSession, notificationNavigationOccurred } from '@/context/session';
+import { useSession, hasNotificationNavigationOccurred } from '@/context/session';
 
 export default function WelcomeScreen() {
   const { username, isRestoring } = useSession();
@@ -32,7 +32,7 @@ export default function WelcomeScreen() {
   }, [progress]);
 
   useEffect(() => {
-    if (isRestoring || handledNotification || notificationNavigationOccurred) return;
+    if (isRestoring || handledNotification || hasNotificationNavigationOccurred()) return;
 
     let navigationTimer: ReturnType<typeof setTimeout> | undefined;
     const animDuration = username ? 600 : 1800;
@@ -47,7 +47,7 @@ export default function WelcomeScreen() {
       if (finished) {
         setPercent(100);
         navigationTimer = setTimeout(async () => {
-          if (notificationNavigationOccurred) return;
+          if (hasNotificationNavigationOccurred()) return;
           const last = await Notifications.getLastNotificationResponseAsync().catch(() => null);
           const data = last?.notification?.request?.content?.data;
           if (data?.kind === 'chat' || data?.kind === 'call' || data?.kind === 'room_invite') {
