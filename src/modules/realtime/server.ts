@@ -47,6 +47,7 @@ function chatRateAllowed(userId: string): boolean {
   return bucket.count <= 60;
 }
 const userRoom = (id: string) => `user:${id}`;
+const deviceRoom = (id: string) => `device:${id}`;
 const chatRoom = ({ kind, id }: ChatTarget) => `chat:${kind}:${id}`;
 const validTarget = (value: unknown): value is ChatTarget =>
   !!value && typeof value === 'object' && 'kind' in value && 'id' in value &&
@@ -194,6 +195,7 @@ export function attachRealtime(httpServer: HttpServer): Server {
     const selfId = socket.data.userId as string;
     const selfDeviceId = socket.data.deviceId as string | undefined;
     socket.join(userRoom(selfId));
+    if (selfDeviceId) socket.join(deviceRoom(selfDeviceId));
 
     attachCallHandlers(io!, socket);
     attachRoomHandlers(io!, socket);
@@ -205,7 +207,10 @@ export function attachRealtime(httpServer: HttpServer): Server {
     // Allow client to trigger explicit spool drain upon device initialization or reconnect
     socket.on('chat:drain_spool', (data?: { deviceId?: string }) => {
       const devId = data?.deviceId || selfDeviceId || (socket.data.deviceId as string | undefined);
-      if (data?.deviceId) socket.data.deviceId = data.deviceId;
+      if (data?.deviceId) {
+        socket.data.deviceId = data.deviceId;
+        socket.join(deviceRoom(data.deviceId));
+      }
       void drainOfflineSpool(socket, selfId, devId);
     });
 
@@ -435,7 +440,11 @@ export function attachRealtime(httpServer: HttpServer): Server {
         }
 
         for (const { userId, envelope } of onlineEnvelopes) {
-          io!.to(userRoom(userId)).emit('chat:envelope', envelope);
+          if (envelope.recipientDeviceId && io!.sockets.adapter.rooms.has(deviceRoom(envelope.recipientDeviceId))) {
+            io!.to(deviceRoom(envelope.recipientDeviceId)).emit('chat:envelope', envelope);
+          } else {
+            io!.to(userRoom(userId)).emit('chat:envelope', envelope);
+          }
         }
         ack?.({ ok: true, timestamp: createdAt });
 
