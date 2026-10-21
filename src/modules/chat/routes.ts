@@ -66,7 +66,17 @@ chatRoutes.post('/devices', run(async (request, response) => {
       await pool.query('UPDATE chat_device SET "publicKey" = $1, "revokedAt" = NULL WHERE id = $2', [publicKey, deviceId]);
     }
   } else {
-    await pool.query('UPDATE chat_device SET "revokedAt" = now() WHERE "userId" = $1 AND id <> $2 AND "revokedAt" IS NULL', [response.locals.userId, deviceId]);
+    // Keep multiple devices active (support multi-phone / multi-device). Only cap if excessive (> 10)
+    await pool.query(
+      `UPDATE chat_device SET "revokedAt" = now()
+       WHERE id IN (
+         SELECT id FROM chat_device
+         WHERE "userId" = $1 AND "revokedAt" IS NULL
+         ORDER BY "createdAt" DESC
+         OFFSET 9
+       )`,
+      [response.locals.userId]
+    );
     await pool.query('INSERT INTO chat_device (id, "userId", "publicKey") VALUES ($1, $2, $3)', [deviceId, response.locals.userId, publicKey]);
   }
   invalidateUserDeviceCache(response.locals.userId);
@@ -159,7 +169,8 @@ chatRoutes.get('/media/:id/download', run(async (request, response) => {
 
 chatRoutes.post('/delivery-ack', run(async (request, response) => {
   const { messageId, senderId } = request.body ?? {};
-  if (typeof messageId !== 'string' || typeof senderId !== 'string') {
+  if (typeof messageId !== 'string' || !messageId || messageId.length > 100 ||
+    typeof senderId !== 'string' || !senderId || senderId.length > 100) {
     response.status(400).json({ error: 'Invalid delivery ack.' });
     return;
   }
@@ -170,7 +181,9 @@ chatRoutes.post('/delivery-ack', run(async (request, response) => {
 
 chatRoutes.post('/read-ack', run(async (request, response) => {
   const { messageIds, senderId } = request.body ?? {};
-  if (!Array.isArray(messageIds) || typeof senderId !== 'string' || messageIds.length === 0) {
+  if (!Array.isArray(messageIds) || messageIds.length === 0 || messageIds.length > 100 ||
+    !messageIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 100) ||
+    typeof senderId !== 'string' || !senderId || senderId.length > 100) {
     response.status(400).json({ error: 'Invalid read ack.' });
     return;
   }
