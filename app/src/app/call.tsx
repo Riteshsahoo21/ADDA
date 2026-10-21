@@ -492,6 +492,7 @@ export default function CallScreen() {
       if (role !== 'caller') {
         // Callee replies with ready only when this phone's pc is created
         if (pc.current) socket?.emit('call:ready', callId);
+        else readyPeer.current = event.from;
       } else {
         // Caller saves callee id and initiates offer!
         readyPeer.current = event.from;
@@ -539,7 +540,9 @@ export default function CallScreen() {
 
         isGroup = joined.target.kind === 'group';
         role = (paramRole as 'caller' | 'callee') || (joined.callerId === selfId ? 'caller' : 'callee');
-        targetPeerId = role === 'caller' ? joined.target.id : joined.callerId;
+        targetPeerId = role === 'caller'
+          ? (joined.members.find(m => m !== selfId) || joined.target.id)
+          : joined.callerId;
 
         const wantVideo = joined.media === 'video' || paramMedia === 'video';
         if (wantVideo) {
@@ -639,11 +642,25 @@ export default function CallScreen() {
         // Drain any signals received while acquiring media
         for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
 
-        if (role === 'caller' && readyPeer.current) {
-          void startOffer(readyPeer.current);
+        if (role === 'caller') {
+          if (readyPeer.current) {
+            void startOffer(readyPeer.current);
+          } else {
+            setStatus('Calling…');
+            socket.emit('call:ready', callId);
+            setTimeout(() => {
+              if (active && pc.current && !offered.current && targetPeerId) {
+                console.log('[Call] Initiating offer via fallback to', targetPeerId);
+                void startOffer(targetPeerId);
+              }
+            }, 2500);
+          }
         } else {
-          setStatus(role === 'caller' ? 'Calling…' : 'Connecting…');
+          setStatus('Connecting…');
           socket.emit('call:ready', callId);
+          if (readyPeer.current) {
+            socket.emit('call:ready', callId);
+          }
         }
       } catch (error) {
         if (active) setStatus(error instanceof Error ? error.message : 'Call failed.');

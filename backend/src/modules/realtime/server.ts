@@ -170,7 +170,7 @@ async function drainOfflineSpool(socket: Socket, userId: string, deviceId?: stri
 export function attachRealtime(httpServer: HttpServer): Server {
   io = new Server(httpServer, {
     cors: { origin: env.corsOrigins, credentials: true },
-    maxHttpBufferSize: 65_536,
+    maxHttpBufferSize: 10_000_000,
   });
 
   io.use(async (socket, next) => {

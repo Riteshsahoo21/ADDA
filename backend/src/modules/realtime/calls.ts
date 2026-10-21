@@ -88,6 +88,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     } catch (error) { ack?.({ ok: false, error: error instanceof Error ? error.message : 'Could not find call.' }); }
   });
   socket.on('call:join', (callId: unknown, ack?: Ack<CallInfo>) => {
+    console.log(`[ADDA Call Server] call:join from user ${selfId} for callId=${callId}`);
     const call = typeof callId === 'string' ? calls.get(callId) : undefined;
     if (!call || !call.members.includes(selfId)) { ack?.({ ok: false, error: 'Call has ended.' }); return; }
     const newlyJoined = !call.joined.includes(selfId);
@@ -107,6 +108,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     }
   });
   socket.on('call:ready', (callId: unknown) => {
+    console.log(`[ADDA Call Server] call:ready from user ${selfId} for callId=${callId}`);
     const call = typeof callId === 'string' ? calls.get(callId) : undefined;
     if (!call || !call.joined.includes(selfId)) return;
     if (call.target.kind === 'direct') {
@@ -123,15 +125,17 @@ export function attachCallHandlers(io: Server, socket: Socket) {
       typeof input.callId !== 'string' || typeof input.to !== 'string') return;
     const call = calls.get(input.callId);
     if (!call || !call.joined.includes(selfId) || !call.members.includes(input.to)) return;
-    if (JSON.stringify(input.signal).length > 65_536) return;
+    const sigType = (input as any).signal?.type || ('candidate' in (input as any).signal ? 'candidate' : 'unknown');
+    console.log(`[ADDA Call Server] call:signal from ${selfId} to ${(input as any).to} (type=${sigType})`);
+    if (JSON.stringify(input.signal).length > 1_000_000) return;
 
     if (call.joined.includes(input.to)) {
       io.to(userRoom(input.to)).emit('call:signal', { callId: input.callId, from: selfId, signal: input.signal });
-    } else if (call.target.kind === 'direct') {
+    } else {
       // Buffer early ICE candidates or offer until recipient finishes joining
       if (!call.pendingSignals.has(input.to)) call.pendingSignals.set(input.to, []);
       const queue = call.pendingSignals.get(input.to)!;
-      if (queue.length < 64) queue.push({ from: selfId, signal: input.signal });
+      if (queue.length < 128) queue.push({ from: selfId, signal: input.signal });
     }
   });
   socket.on('call:leave', (callId: unknown) => {

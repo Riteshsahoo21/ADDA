@@ -473,7 +473,9 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
   socket.on('room:signal', (input: { to?: string; signal?: unknown }) => {
     const shardId = socket.data.roomId as string | undefined;
     if (!shardId || !input?.to || !input?.signal) return;
-    if (JSON.stringify(input.signal).length > 65_536) return;
+    const sigType = (input.signal as any)?.type || ('candidate' in (input.signal as any) ? 'candidate' : 'unknown');
+    console.log(`[ADDA Room Server] room:signal from user ${userId} to ${input.to} (${sigType})`);
+    if (JSON.stringify(input.signal).length > 1_000_000) return;
     const targetSocketId = [...io.sockets.adapter.rooms.get(channel(shardId)) ?? []]
       .find(id => peers.get(id)?.userId === input.to);
     if (targetSocketId) {
@@ -484,6 +486,7 @@ export function attachRoomHandlers(io: Server, socket: Socket) {
   socket.on('room:voice-ready', () => {
     const shardId = socket.data.roomId as string | undefined;
     if (!shardId) return;
+    console.log(`[ADDA Room Server] room:voice-ready from user ${userId} in ${shardId}`);
     socket.to(channel(shardId)).emit('room:voice-ready', { from: userId });
   });
 

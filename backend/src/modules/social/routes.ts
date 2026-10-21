@@ -163,9 +163,14 @@ socialRoutes.get('/calls/ice', run(async (_request, response) => {
     },
   ];
   if (env.turnUrl && env.turnSharedSecret) {
-    const username = `${Math.floor(Date.now() / 1000) + 3600}:${response.locals.userId}`;
+    const username = `${Math.floor(Date.now() / 1000) + 86400}:${response.locals.userId}`;
     const credential = createHmac('sha1', env.turnSharedSecret).update(username).digest('base64');
-    iceServers.push({ urls: env.turnUrl, username, credential });
+    const udpUrl = env.turnUrl;
+    const tcpUrl = env.turnUrl.replace('transport=udp', 'transport=tcp');
+    iceServers.push(
+      { urls: udpUrl, username, credential },
+      { urls: tcpUrl, username, credential },
+    );
   }
   response.json({ iceServers });
 }));

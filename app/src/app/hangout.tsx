@@ -30,13 +30,9 @@ import { socialApi, type ChatGroup, type GroupDetails, type GroupMember, type Pu
 
 const avatarBodies = new Set(['man', 'uncle', 'photo_boy', 'self', 'woman', 'chinese_woman', 'nepali_woman', 'white_top_woman']);
 
-const ROOM_STUN_CONFIG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-  ],
-};
+const DEFAULT_ROOM_ICE_SERVERS = [
+  { urls: ['stun:191.215.37.241:3478', 'stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+];
 
 export default function HangoutScreen() {
   const { username, avatarStyle } = useSession();
@@ -119,11 +115,20 @@ export default function HangoutScreen() {
   const lastMotionSentAt = useRef(0);
   const lastMotionSnapshot = useRef<{ x: number; z: number; r: number; pose: string } | null>(null);
 
+  const roomIceServersRef = useRef<any[]>(DEFAULT_ROOM_ICE_SERVERS);
+  const peersRef = useRef<RoomPeer[]>([]);
+
+  useEffect(() => {
+    void socialApi<{ iceServers: any[] }>('/calls/ice').then(res => {
+      if (res?.iceServers?.length) roomIceServersRef.current = res.iceServers;
+    }).catch(() => {});
+  }, []);
+
   const getOrCreateRoomPeer = useCallback(async (peerUserId: string, isInitiator: boolean) => {
     let peer = roomPeersRef.current.get(peerUserId);
     if (peer) return peer;
 
-    peer = new RTCPeerConnection(ROOM_STUN_CONFIG);
+    peer = new RTCPeerConnection({ iceServers: roomIceServersRef.current });
     roomPeersRef.current.set(peerUserId, peer);
 
     if (localStreamRef.current) {
@@ -262,6 +267,8 @@ export default function HangoutScreen() {
     if (!data?.from || !currentUserId || blockedPeersRef.current.has(data.from)) return;
     if (currentUserId < data.from) {
       void getOrCreateRoomPeer(data.from, true);
+    } else {
+      void getOrCreateRoomPeer(data.from, false);
     }
   }, [currentUserId, getOrCreateRoomPeer]);
 
@@ -360,10 +367,15 @@ export default function HangoutScreen() {
             try { t.enabled = false; } catch {}
           });
         }
+        for (const [, p] of roomPeersRef.current) {
+          stream.getTracks().forEach(track => {
+            try { p.addTrack(track, stream); } catch {}
+          });
+        }
         setVoiceStatus('Voice ready');
         presenceRef.current?.emit('room:voice-ready');
 
-        for (const peer of peers) {
+        for (const peer of peersRef.current) {
           if (peer.userId !== currentUserId && currentUserId < peer.userId && !blockedPeersRef.current.has(peer.userId)) {
             void getOrCreateRoomPeer(peer.userId, true);
           }
@@ -594,8 +606,9 @@ export default function HangoutScreen() {
       });
       setPeers(current => {
         const exists = current.some(item => item.userId === peer.userId);
-        if (!exists) return [...current, peer];
-        return current.map(item => item.userId === peer.userId ? { ...item, ...peer } : item);
+        const next = !exists ? [...current, peer] : current.map(item => item.userId === peer.userId ? { ...item, ...peer } : item);
+        peersRef.current = next;
+        return next;
       });
       latestRemote.current.set(peer.userId, {
         id: peer.userId,
@@ -691,7 +704,9 @@ export default function HangoutScreen() {
           queues.set(peer.userId, [snap]);
           latestRemote.current.set(peer.userId, snap);
         }
-        setPeers(result.value.peers.filter(peer => !blockedPeersRef.current.has(peer.userId)));
+        const validPeers = result.value.peers.filter(peer => !blockedPeersRef.current.has(peer.userId));
+        peersRef.current = validPeers;
+        setPeers(validPeers);
         setMessages(result.value.messages.filter(message => !blockedPeersRef.current.has(message.userId)));
         if (result.value.shardId) setShardId(result.value.shardId);
         if (result.value.ownerId) setRoomOwnerId(result.value.ownerId);
