@@ -18,13 +18,16 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Build outputs
+# Build outputs & signing
 dist/
 backend/dist/
 app/android/
 app/ios/
 app/.expo/
+release/
 app/release/
+*.jks
+*.keystore
 *.apk
 *.aab
 
