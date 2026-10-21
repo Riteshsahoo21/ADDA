@@ -136,7 +136,8 @@ export default function CallScreen() {
       void PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT).catch(() => {});
     }
 
-    InCallManager.start({ media: call?.media === 'video' ? 'video' : 'audio', auto: true });
+    const isVideo = (call?.media ?? paramMedia) === 'video';
+    InCallManager.start({ media: isVideo ? 'video' : 'audio', auto: true });
     InCallManager.setKeepScreenOn(true);
 
     // Initial check for earphones/headsets
@@ -147,7 +148,7 @@ export default function CallScreen() {
       if (hasHeadset) {
         applyCallAudioRoute(false);
       } else {
-        const defaultSpeaker = call?.media === 'video';
+        const defaultSpeaker = isVideo;
         applyCallAudioRoute(defaultSpeaker);
       }
     }).catch(() => {});
@@ -194,7 +195,7 @@ export default function CallScreen() {
       InCallManager.stop();
       MusicService.stopAll();
     };
-  }, [call?.media]);
+  }, []);
 
   // Live call timer
   useEffect(() => {
@@ -331,7 +332,7 @@ export default function CallScreen() {
       try {
         if ('candidate' in event.signal) {
           const candData = event.signal.candidate;
-          if (candData && typeof candData === 'object') {
+          if (candData && typeof candData === 'object' && ('candidate' in candData ? candData.candidate !== '' : true)) {
             try {
               const candidate = new RTCIceCandidate(candData as any);
               if (pc.current.remoteDescription) {
@@ -343,9 +344,15 @@ export default function CallScreen() {
           }
           return;
         }
-        if (applyingDescription) return;
+        if (applyingDescription) {
+          setTimeout(() => { void onSignal(event); }, 100);
+          return;
+        }
         if (event.signal.type === 'answer') {
-          if (pc.current.signalingState !== 'have-local-offer') return;
+          if (pc.current.signalingState !== 'have-local-offer') {
+            setTimeout(() => { void onSignal(event); }, 100);
+            return;
+          }
           applyingDescription = true;
           try {
             await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal));
@@ -356,6 +363,10 @@ export default function CallScreen() {
           return;
         }
         if (event.signal.type === 'offer') {
+          if (pc.current.signalingState !== 'stable') {
+            setTimeout(() => { void onSignal(event); }, 100);
+            return;
+          }
           applyingDescription = true;
           try {
             await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal));
@@ -436,7 +447,25 @@ export default function CallScreen() {
         }
 
         const config = await socialApi<{ iceServers: { urls: string | string[]; username?: string; credential?: string }[] }>('/calls/ice');
-        const stream = await mediaDevices.getUserMedia({ audio: true, video: joined.media === 'video' || paramMedia === 'video' });
+        const wantVideo = joined.media === 'video' || paramMedia === 'video';
+        if (Platform.OS === 'android') {
+          const perms: any[] = [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
+          if (wantVideo) perms.push(PermissionsAndroid.PERMISSIONS.CAMERA);
+          await PermissionsAndroid.requestMultiple(perms).catch(() => {});
+        }
+
+        let stream: MediaStream;
+        try {
+          stream = await mediaDevices.getUserMedia({ audio: true, video: wantVideo });
+        } catch (mediaErr) {
+          if (wantVideo) {
+            stream = await mediaDevices.getUserMedia({ audio: true, video: false });
+            setCameraOff(true);
+            cameraOffRef.current = true;
+          } else {
+            throw mediaErr;
+          }
+        }
         if (!active) { stream.getTracks().forEach(track => track.stop()); return; }
         stream.getAudioTracks().forEach(track => { track.enabled = !mutedRef.current; });
         stream.getVideoTracks().forEach(track => { track.enabled = !cameraOffRef.current; });
@@ -455,18 +484,14 @@ export default function CallScreen() {
           }
         });
         listen.addEventListener('track', (event: any) => {
+          if (!active) return;
           const s = event.streams?.[0];
-          if (s && active) {
-            setRemote(s);
-          } else if (event.track && active) {
+          if (s) {
+            setRemote(new MediaStream(s.getTracks()));
+          } else if (event.track) {
             setRemote(prev => {
-              if (prev) {
-                try { prev.addTrack(event.track); } catch {}
-                return prev;
-              }
-              const newStream = new MediaStream();
-              newStream.addTrack(event.track);
-              return newStream;
+              const currentTracks = prev ? prev.getTracks().filter(t => t.id !== event.track.id) : [];
+              return new MediaStream([...currentTracks, event.track]);
             });
           }
         });
