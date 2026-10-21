@@ -77,6 +77,7 @@ export default function CallScreen() {
   const [isHeadsetConnected, setIsHeadsetConnected] = useState(false);
   const [routeToast, setRouteToast] = useState<string | null>(null);
   const [userNames, setUserNames] = useState<Record<string, string>>({});
+  const [selfUserId, setSelfUserId] = useState('');
 
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mutedRef = useRef(false);
@@ -278,6 +279,7 @@ export default function CallScreen() {
     let role: 'caller' | 'callee' = (paramRole as 'caller' | 'callee') || 'callee';
     let targetPeerId: string = '';
     let isGroup = false;
+    const groupReadyReplies = new Set<string>();
 
     const close = (leave: boolean) => {
       if (ending.current) return;
@@ -369,9 +371,15 @@ export default function CallScreen() {
     // Signal Dispatcher (Handles both 1:1 and Group mesh signals)
     const onSignal = async (event: { callId: string; from: string; signal: Signal }) => {
       if (event.callId !== callId || ending.current) return;
+      // call:join can replay buffered signaling before profile and camera setup finish.
+      if (!currentCall || !localRef.current) {
+        pendingSignals.current.push(event);
+        return;
+      }
 
       if (isGroup) {
         // Group Mesh Signaling
+        try {
         const config = await socialApi<{ iceServers: any[] }>('/calls/ice').catch(() => ({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }));
         if ('candidate' in event.signal) {
           const candidate = new RTCIceCandidate(event.signal.candidate as any);
@@ -409,6 +417,9 @@ export default function CallScreen() {
             for (const c of pending) await peer.addIceCandidate(c).catch(() => {});
           }
           return;
+        }
+        } catch (error) {
+          if (active) setStatus(error instanceof Error ? error.message : 'Could not connect group media.');
         }
         return;
       }
@@ -449,7 +460,7 @@ export default function CallScreen() {
     const onJoined = (event: { callId: string; userId: string }) => {
       if (event.callId !== callId) return;
       if (isGroup) {
-        if (event.userId !== selfId && selfId < event.userId) {
+        if (localRef.current && event.userId !== selfId && selfId < event.userId) {
           void socialApi<{ iceServers: any[] }>('/calls/ice')
             .catch(() => ({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }))
             .then(config => getOrCreateGroupPeer(event.userId, config.iceServers, true));
@@ -466,10 +477,14 @@ export default function CallScreen() {
     const onReady = (event: { callId: string; from: string }) => {
       if (event.callId !== callId) return;
       if (isGroup) {
-        if (event.from !== selfId && selfId < event.from && !groupPeers.current.has(event.from)) {
+        if (localRef.current && event.from !== selfId && selfId < event.from && !groupPeers.current.has(event.from)) {
           void socialApi<{ iceServers: any[] }>('/calls/ice')
             .catch(() => ({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }))
             .then(config => getOrCreateGroupPeer(event.from, config.iceServers, true));
+        } else if (localRef.current && selfId > event.from && !groupReadyReplies.has(event.from)) {
+          // The lower-ID peer may have received our first ready before its camera was ready.
+          groupReadyReplies.add(event.from);
+          socket?.emit('call:ready', callId);
         }
         return;
       }
@@ -497,6 +512,7 @@ export default function CallScreen() {
           groupPeers.current.delete(event.userId);
         }
         setGroupTracks(prev => prev.filter(t => t.userId !== event.userId));
+        groupReadyReplies.delete(event.userId);
         return;
       }
       if (event.userId !== selfId) close(false);
@@ -519,6 +535,7 @@ export default function CallScreen() {
 
         const me = await socialApi<OwnProfile>('/me').catch(() => null);
         selfId = me?.id || '';
+        setSelfUserId(selfId);
 
         isGroup = joined.target.kind === 'group';
         role = (paramRole as 'caller' | 'callee') || (joined.callerId === selfId ? 'caller' : 'callee');
@@ -569,12 +586,13 @@ export default function CallScreen() {
         }));
 
         if (isGroup) {
-          // In Group Call: status is Connected, emit ready to all group participants
-          setStatus('Connected');
+          // Process offers and ICE that arrived while media was starting.
+          for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
+          setStatus('Waiting for others…');
           socket.emit('call:ready', callId);
 
-          // For any member already in the group whose ID is > selfId, offer to them
-          for (const memberId of joined.members) {
+          // Offer only to peers already in the call. Invited members are not yet connected.
+          for (const memberId of joined.joined) {
             if (memberId !== selfId && selfId < memberId) {
               void getOrCreateGroupPeer(memberId, config.iceServers, true);
             }
@@ -738,7 +756,7 @@ export default function CallScreen() {
   const isGroup = call?.target.kind === 'group' || groupTracks.length > 0;
   const isDirect1on1Video = !isGroup && isVideoCall;
   const displayName = name || (isGroup ? 'Group Call' : 'ADDA Call');
-  const participantIds = Array.from(new Set(groupTracks.map(t => t.userId)));
+  const participantIds = Array.from(new Set([...groupTracks.map(t => t.userId), ...(isGroup && selfUserId ? [selfUserId] : [])]));
 
   // Compute WhatsApp-style smart responsive grid tile dimensions
   const getGridTileStyle = (index: number, total: number) => {
@@ -755,7 +773,9 @@ export default function CallScreen() {
     if (total === 4) {
       return styles.tileQuarter;
     }
-    return styles.tileSixth;
+    if (total <= 6) return styles.tileSixth;
+    if (total <= 8) return styles.tileEighth;
+    return styles.tileTenth;
   };
 
   return (
@@ -782,12 +802,14 @@ export default function CallScreen() {
             // Group Video Call: Dynamic WhatsApp full-screen responsive grid
             <View style={styles.fullGridContainer}>
               {participantIds.map((userId, idx) => {
+                const ownTile = userId === selfUserId;
                 const userVideo = videoTracks.find(t => t.userId === userId);
-                const participantName = userNames[userId] || `User ${userId.slice(0, 4)}`;
+                const tileStream = ownTile ? local : userVideo?.stream;
+                const participantName = ownTile ? 'You' : userNames[userId] || `User ${userId.slice(0, 4)}`;
                 return (
                   <View key={userId} style={[styles.gridTile, getGridTileStyle(idx, participantIds.length)]}>
-                    {userVideo ? (
-                      <RTCView streamURL={userVideo.stream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" zOrder={0} />
+                    {tileStream && (ownTile ? !cameraOff : Boolean(userVideo)) ? (
+                      <RTCView streamURL={tileStream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={ownTile} zOrder={0} />
                     ) : (
                       <View style={styles.audioCardAvatarTile}>
                         <View style={styles.audioCardAvatar}>
@@ -824,7 +846,7 @@ export default function CallScreen() {
           )}
 
           {/* 1:1 or Group Floating PiP Preview (Top-Right) */}
-          {local && (
+          {!isGroup && local && (
             <Pressable onPress={flipCamera} style={[styles.pipContainer, { top: insets.top + 70 }]}>
               {!cameraOff && local.getVideoTracks().length > 0 ? (
                 <RTCView streamURL={local.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={true} zOrder={1} />
@@ -845,11 +867,11 @@ export default function CallScreen() {
            AUDIO CALL SMART GRID / CENTERING
            ======================================================== */
         <View style={styles.audioStage}>
-          {participantIds.length > 1 ? (
+          {isGroup && participantIds.length > 0 ? (
             // Group Audio Grid (WhatsApp style full tiles)
             <View style={styles.fullGridContainer}>
               {participantIds.map((userId, idx) => {
-                const participantName = userNames[userId] || `User ${userId.slice(0, 4)}`;
+                const participantName = userId === selfUserId ? 'You' : userNames[userId] || `User ${userId.slice(0, 4)}`;
                 return (
                   <View key={userId} style={[styles.audioGridTile, getGridTileStyle(idx, participantIds.length)]}>
                     <View style={styles.audioCardAvatar}>
@@ -884,10 +906,10 @@ export default function CallScreen() {
           ======================================================== */}
       <View style={[styles.topHeader, { top: insets.top + 10 }]}>
         <View style={styles.headerInfoPill}>
-          <View style={styles.encryptedRow}>
+          {!isGroup && <View style={styles.encryptedRow}>
             <Lock size={12} color="#34D399" style={{ marginRight: 4 }} />
             <Text style={styles.encryptedText}>End-to-end encrypted</Text>
-          </View>
+          </View>}
           <Text style={styles.headerTitle} numberOfLines={1}>{displayName}</Text>
           <Text style={styles.headerSubtitle}>
             {status === 'Connected'
@@ -1007,6 +1029,14 @@ const styles = StyleSheet.create({
   tileSixth: {
     width: '50%',
     height: '33.33%',
+  },
+  tileEighth: {
+    width: '50%',
+    height: '25%',
+  },
+  tileTenth: {
+    width: '50%',
+    height: '20%',
   },
   tileBadge: {
     position: 'absolute',

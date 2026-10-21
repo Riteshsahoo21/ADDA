@@ -21,7 +21,7 @@ const userRoom = (id: string) => `user:${id}`;
 const safeTarget = (value: unknown): value is CallTarget =>
   !!value && typeof value === 'object' && 'kind' in value && 'id' in value &&
   (value.kind === 'direct' || value.kind === 'group') && typeof value.id === 'string' && value.id.length > 0 && value.id.length < 100;
-const publicCall = ({ timer: _timer, declined: _declined, ...call }: Call): CallInfo => call;
+const publicCall = ({ timer: _timer, declined: _declined, pendingSignals: _pendingSignals, ...call }: Call): CallInfo => call;
 
 async function getMembers(target: CallTarget, callerId: string): Promise<string[]> {
   if (target.kind === 'direct') {
@@ -126,10 +126,11 @@ export function attachCallHandlers(io: Server, socket: Socket) {
 
     if (call.joined.includes(input.to)) {
       io.to(userRoom(input.to)).emit('call:signal', { callId: input.callId, from: selfId, signal: input.signal });
-    } else {
+    } else if (call.target.kind === 'direct') {
       // Buffer early ICE candidates or offer until recipient finishes joining
       if (!call.pendingSignals.has(input.to)) call.pendingSignals.set(input.to, []);
-      call.pendingSignals.get(input.to)!.push({ from: selfId, signal: input.signal });
+      const queue = call.pendingSignals.get(input.to)!;
+      if (queue.length < 64) queue.push({ from: selfId, signal: input.signal });
     }
   });
   socket.on('call:leave', (callId: unknown) => {
