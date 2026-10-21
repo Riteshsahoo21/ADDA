@@ -832,7 +832,7 @@ async function flushPendingReadReceipts(me: NonNullable<typeof active>): Promise
   for (const [senderId, ids] of bySender) {
     for (let offset = 0; offset < ids.length; offset += 100) {
       const messageIds = ids.slice(offset, offset + 100);
-      const body = { messageIds, senderId };
+      const body = { messageIds, senderId, recipientDeviceId: me.deviceId };
       let accepted = false;
       if (live?.connected) {
         accepted = await new Promise<boolean>(resolve => {

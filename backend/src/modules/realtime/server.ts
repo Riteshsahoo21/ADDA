@@ -396,45 +396,39 @@ export function attachRealtime(httpServer: HttpServer): Server {
           ]);
         }
 
-        // Persist before acknowledging or forwarding. An online recipient can disconnect
-        // at any moment; the encrypted spool must already exist for reconnect delivery.
-        await (async () => {
+        // One atomic database round trip saves the sent ID and every encrypted
+        // recipient envelope before we notify phones or confirm the send.
+        const persistSql = `
+          WITH sent AS (
+            INSERT INTO chat_sent_id ("messageId", "senderId", kind, "targetId")
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT DO NOTHING RETURNING "messageId"
+          )
+          INSERT INTO chat_spool (
+            "messageId", "senderId", "senderDeviceId", "recipientId", "recipientDeviceId",
+            kind, "targetId", ciphertext, nonce, "wrappedKey", "wrapNonce",
+            "senderPublicKey", "senderName", "createdAt"
+          )
+          SELECT pending.* FROM UNNEST(
+            $5::text[], $6::text[], $7::text[], $8::text[], $9::text[],
+            $10::text[], $11::text[], $12::text[], $13::text[], $14::text[],
+            $15::text[], $16::text[], $17::text[], $18::timestamptz[]
+          ) AS pending
+          WHERE EXISTS (SELECT 1 FROM sent)
+        `;
+        const persistParams = [
+          messageId, selfId, target.kind, target.id,
+          ...Array.from({ length: 14 }, (_, index) => spoolRows.map(row => row[index])),
+        ];
+        if (mediaId) {
           const client = await pool.connect();
           try {
             await client.query('BEGIN');
+            await client.query(persistSql, persistParams);
             await client.query(
-              `INSERT INTO chat_sent_id ("messageId", "senderId", kind, "targetId")
-               VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-              [messageId, selfId, target.kind, target.id]
+              'UPDATE chat_media SET "messageId" = $1 WHERE id = $2 AND "ownerId" = $3',
+              [messageId, mediaId, selfId]
             );
-
-            if (mediaId) {
-              await client.query(
-                'UPDATE chat_media SET "messageId" = $1 WHERE id = $2 AND "ownerId" = $3',
-                [messageId, mediaId, selfId]
-              ).catch(() => {});
-            }
-
-            if (spoolRows.length > 0) {
-              await client.query(`
-                INSERT INTO chat_spool (
-                  "messageId", "senderId", "senderDeviceId", "recipientId", "recipientDeviceId",
-                  kind, "targetId", ciphertext, nonce, "wrappedKey", "wrapNonce",
-                  "senderPublicKey", "senderName", "createdAt"
-                )
-                SELECT * FROM UNNEST(
-                  $1::text[], $2::text[], $3::text[], $4::text[], $5::text[],
-                  $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[],
-                  $12::text[], $13::text[], $14::timestamptz[]
-                )
-              `, [
-                spoolRows.map(r => r[0]), spoolRows.map(r => r[1]), spoolRows.map(r => r[2]),
-                spoolRows.map(r => r[3]), spoolRows.map(r => r[4]), spoolRows.map(r => r[5]),
-                spoolRows.map(r => r[6]), spoolRows.map(r => r[7]), spoolRows.map(r => r[8]),
-                spoolRows.map(r => r[9]), spoolRows.map(r => r[10]), spoolRows.map(r => r[11]),
-                spoolRows.map(r => r[12]), spoolRows.map(r => r[13]),
-              ]);
-            }
             await client.query('COMMIT');
           } catch (dbErr) {
             await client.query('ROLLBACK').catch(() => {});
@@ -442,21 +436,16 @@ export function attachRealtime(httpServer: HttpServer): Server {
           } finally {
             client.release();
           }
+        } else {
+          await pool.query(persistSql, persistParams);
+        }
 
-          // Send FCM push for offline users
-          if (pushUserIds.size > 0) {
-            void sendEncryptedChatPush(
-              [...pushUserIds],
-              target,
-              socket.data.name || 'ADDA',
-              selfId,
-              undefined,
-              undefined,
-              offlineEnvelopesByUser,
-              mentions
-            ).catch((e) => console.warn('[ADDA] Push send warning:', e));
-          }
-        })();
+        if (pushUserIds.size > 0) {
+          void sendEncryptedChatPush(
+            [...pushUserIds], target, socket.data.name || 'ADDA', selfId,
+            undefined, undefined, offlineEnvelopesByUser, mentions
+          ).catch((error) => console.warn('[ADDA] Push send warning:', error));
+        }
 
         markMessageProcessed(messageId, selfId, createdAt);
         for (const { userId, envelope } of envelopes) {
@@ -475,17 +464,19 @@ export function attachRealtime(httpServer: HttpServer): Server {
     // ========================================================
     // WHATSAPP-GRADE HOT-PATH 2: DELIVERY ACK (Double Gray Tick ✓✓)
     // ========================================================
-    socket.on('chat:ack_delivery', async (data: { messageId: string; senderId: string }, ack?: (result: { ok: boolean }) => void) => {
-      if (!data?.messageId || !data?.senderId) { ack?.({ ok: false }); return; }
-      ack?.({ ok: await processDeliveryAck(data.messageId, selfId, data.senderId) });
+    socket.on('chat:ack_delivery', async (data: { messageId: string; senderId: string; recipientDeviceId: string }, ack?: (result: { ok: boolean }) => void) => {
+      const deviceId = data?.recipientDeviceId || (socket.data.deviceId as string | undefined);
+      if (!data?.messageId || !data?.senderId || !deviceId) { ack?.({ ok: false }); return; }
+      ack?.({ ok: await processDeliveryAck(data.messageId, selfId, data.senderId, deviceId) });
     });
 
     // ========================================================
     // WHATSAPP-GRADE HOT-PATH 3: READ ACK (Double Blue Tick ✓✓)
     // ========================================================
-    socket.on('chat:ack_read', async (data: { messageIds: string[]; senderId: string }, ack?: (result: { ok: boolean }) => void) => {
-      if (!Array.isArray(data?.messageIds) || !data?.senderId || data.messageIds.length === 0) { ack?.({ ok: false }); return; }
-      ack?.({ ok: await processReadAck(data.messageIds, selfId, data.senderId) });
+    socket.on('chat:ack_read', async (data: { messageIds: string[]; senderId: string; recipientDeviceId?: string }, ack?: (result: { ok: boolean }) => void) => {
+      const deviceId = data?.recipientDeviceId || (socket.data.deviceId as string | undefined);
+      if (!Array.isArray(data?.messageIds) || !data?.senderId || !deviceId || data.messageIds.length === 0) { ack?.({ ok: false }); return; }
+      ack?.({ ok: await processReadAck(data.messageIds, selfId, data.senderId, deviceId) });
     });
 
     // ========================================================
@@ -540,13 +531,16 @@ export function attachRealtime(httpServer: HttpServer): Server {
   return io;
 }
 
-export async function processDeliveryAck(messageId: string, recipientId: string, senderId: string): Promise<boolean> {
+export async function processDeliveryAck(messageId: string, recipientId: string, senderId: string, recipientDeviceId: string): Promise<boolean> {
   try {
     const del = await pool.query<{ senderId: string; kind: string; targetId: string }>(
-      'DELETE FROM chat_spool WHERE "messageId" = $1 AND "recipientId" = $2 RETURNING "senderId", kind, "targetId"',
-      [messageId, recipientId]
+      'DELETE FROM chat_spool WHERE "messageId" = $1 AND "recipientId" = $2 AND "recipientDeviceId" = $3 AND "senderId" = $4 RETURNING "senderId", kind, "targetId"',
+      [messageId, recipientId, recipientDeviceId, senderId]
     );
     const row = del.rows[0];
+    // Duplicate receipts are expected when the global and open-chat listeners
+    // both observe the same envelope. Its device copy was already removed.
+    if (!row) return true;
     const isGroup = row ? row.kind === 'group' : false;
 
     if (io) {
@@ -580,9 +574,17 @@ export async function processDeliveryAck(messageId: string, recipientId: string,
   }
 }
 
-export async function processReadAck(messageIds: string[], recipientId: string, senderId: string): Promise<boolean> {
+export async function processReadAck(messageIds: string[], recipientId: string, senderId: string, recipientDeviceId?: string): Promise<boolean> {
   if (messageIds.length === 0) return false;
   try {
+    // Older clients omit the device ID. Keep their pending encrypted copies
+    // rather than deleting another signed-in phone's copy by account ID.
+    if (recipientDeviceId) {
+      await pool.query(
+        'DELETE FROM chat_spool WHERE "messageId" = ANY($1::text[]) AND "recipientId" = $2 AND "recipientDeviceId" = $3 AND "senderId" = $4',
+        [messageIds, recipientId, recipientDeviceId, senderId]
+      );
+    }
     if (io) {
       io.to(userRoom(senderId)).emit('chat:msg_status', {
         messageIds,
@@ -591,10 +593,6 @@ export async function processReadAck(messageIds: string[], recipientId: string, 
       });
     }
 
-    await pool.query(
-      'DELETE FROM chat_spool WHERE "messageId" = ANY($1::text[]) AND "recipientId" = $2',
-      [messageIds, recipientId]
-    );
     return true;
   } catch (err) {
     console.warn('[ADDA Spool] processReadAck error:', err);

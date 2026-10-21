@@ -168,28 +168,27 @@ chatRoutes.get('/media/:id/download', run(async (request, response) => {
 }));
 
 chatRoutes.post('/delivery-ack', run(async (request, response) => {
-  const { messageId, senderId } = request.body ?? {};
+  const { messageId, senderId, recipientDeviceId } = request.body ?? {};
   if (typeof messageId !== 'string' || !messageId || messageId.length > 100 ||
-    typeof senderId !== 'string' || !senderId || senderId.length > 100) {
+    typeof senderId !== 'string' || !senderId || senderId.length > 100 || !validId(recipientDeviceId)) {
     response.status(400).json({ error: 'Invalid delivery ack.' });
     return;
   }
   const selfId = response.locals.userId as string;
-  await processDeliveryAck(messageId, selfId, senderId);
-  response.json({ ok: true });
+  response.json({ ok: await processDeliveryAck(messageId, selfId, senderId, recipientDeviceId) });
 }));
 
 chatRoutes.post('/read-ack', run(async (request, response) => {
-  const { messageIds, senderId } = request.body ?? {};
+  const { messageIds, senderId, recipientDeviceId } = request.body ?? {};
   if (!Array.isArray(messageIds) || messageIds.length === 0 || messageIds.length > 100 ||
     !messageIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 100) ||
-    typeof senderId !== 'string' || !senderId || senderId.length > 100) {
+    typeof senderId !== 'string' || !senderId || senderId.length > 100 ||
+    (recipientDeviceId != null && !validId(recipientDeviceId))) {
     response.status(400).json({ error: 'Invalid read ack.' });
     return;
   }
   const selfId = response.locals.userId as string;
-  await processReadAck(messageIds, selfId, senderId);
-  response.json({ ok: true });
+  response.json({ ok: await processReadAck(messageIds, selfId, senderId, recipientDeviceId) });
 }));
 
 export async function retryDeliveredMediaCleanup(): Promise<void> {
