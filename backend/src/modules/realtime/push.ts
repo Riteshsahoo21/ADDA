@@ -37,11 +37,13 @@ export async function sendCallPush(userIds: string[], call: { id: string; caller
   const isGroup = call.target.kind === 'group';
   for (let start = 0; start < tokens.length; start += 500) {
     const batch = tokens.slice(start, start + 500);
+    const title = isGroup ? `Group ${call.media} call` : `${call.callerName} is calling`;
+    const body = isGroup ? `${call.callerName} started a group ${call.media} call` : `Incoming ${call.media} call`;
     const response = await getMessaging().sendEachForMulticast({
       tokens: batch,
       notification: {
-        title: isGroup ? `Group ${call.media} call` : `${call.callerName} is calling`,
-        body: isGroup ? `${call.callerName} started a group ${call.media} call` : `Incoming ${call.media} call`,
+        title,
+        body,
       },
       data: {
         kind: 'call',
@@ -51,6 +53,13 @@ export async function sendCallPush(userIds: string[], call: { id: string; caller
         chatKind: call.target.kind,
         chatId: call.target.id,
         categoryId: 'incoming_call',
+        categoryIdentifier: 'incoming_call',
+        title,
+        body,
+        message: body,
+        channelId: 'adda_calls',
+        sound: 'default',
+        priority: 'max',
       },
       android: {
         priority: 'high',

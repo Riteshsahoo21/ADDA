@@ -107,17 +107,21 @@ export function attachCallHandlers(io: Server, socket: Socket) {
   });
   socket.on('call:ready', (callId: unknown) => {
     const call = typeof callId === 'string' ? calls.get(callId) : undefined;
-    if (!call || call.target.kind !== 'direct' || !call.joined.includes(selfId)) return;
-    const otherId = call.members.find(id => id !== selfId);
-    if (otherId && call.joined.includes(otherId)) {
-      io.to(userRoom(otherId)).emit('call:ready', { callId, from: selfId });
+    if (!call || !call.joined.includes(selfId)) return;
+    if (call.target.kind === 'direct') {
+      const otherId = call.joined.find(id => id !== selfId);
+      if (otherId) io.to(userRoom(otherId)).emit('call:ready', { callId, from: selfId });
+    } else {
+      for (const otherId of call.joined) {
+        if (otherId !== selfId) io.to(userRoom(otherId)).emit('call:ready', { callId, from: selfId });
+      }
     }
   });
   socket.on('call:signal', (input: unknown) => {
     if (!input || typeof input !== 'object' || !('callId' in input) || !('to' in input) || !('signal' in input) ||
       typeof input.callId !== 'string' || typeof input.to !== 'string') return;
     const call = calls.get(input.callId);
-    if (!call || call.target.kind !== 'direct' || !call.joined.includes(selfId) || !call.members.includes(input.to)) return;
+    if (!call || !call.joined.includes(selfId) || !call.members.includes(input.to)) return;
     if (JSON.stringify(input.signal).length > 65_536) return;
 
     if (call.joined.includes(input.to)) {
