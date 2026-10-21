@@ -22,7 +22,6 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "firebase-admin": "^14.5.0",
-    "mediasoup": "^3.30.0",
     "pg": "^8.13.1",
     "socket.io": "^4.8.4"
   },

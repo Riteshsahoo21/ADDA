@@ -31,4 +31,9 @@ export const env = {
   r2Bucket: process.env.R2_BUCKET?.trim() || '',
   r2AccessKeyId: process.env.R2_ACCESS_KEY_ID?.trim() || '',
   r2SecretAccessKey: process.env.R2_SECRET_ACCESS_KEY?.trim() || '',
+  mirotalkInternalUrl: process.env.MIROTALK_INTERNAL_URL?.trim() || '',
+  mirotalkPublicUrl: process.env.MIROTALK_PUBLIC_URL?.trim() || '',
+  mirotalkApiKey: process.env.MIROTALK_API_KEY?.trim() || '',
+  mirotalkHostUser: process.env.MIROTALK_HOST_USER?.trim() || '',
+  mirotalkHostPassword: process.env.MIROTALK_HOST_PASSWORD?.trim() || '',
 };

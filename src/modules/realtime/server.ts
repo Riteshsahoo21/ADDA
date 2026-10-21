@@ -4,7 +4,6 @@ import { auth } from '../auth/auth.js';
 import { env } from '../../config/env.js';
 import { pool } from '../../db/pool.js';
 import { attachCallHandlers } from './calls.js';
-import { attachMediaHandlers } from './media.js';
 import { attachRoomHandlers } from './rooms.js';
 import { attachPushHandlers, sendEncryptedChatPush } from './push.js';
 import { getCachedGroupMembers, getRecipientDevices, invalidateUserDeviceCache } from './cache.js';
@@ -197,7 +196,6 @@ export function attachRealtime(httpServer: HttpServer): Server {
     socket.join(userRoom(selfId));
 
     attachCallHandlers(io!, socket);
-    attachMediaHandlers(io!, socket);
     attachRoomHandlers(io!, socket);
     attachPushHandlers(socket);
 

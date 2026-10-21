@@ -5,10 +5,10 @@ import { pool } from '../../db/pool.js';
 import { ensureProfile, validUsername } from './profile.js';
 import { getCachedSocialBundle, setCachedSocialBundle, invalidateSocialBundleCache } from './cache.js';
 import { publishFriendUpdate, publishGroupUpdate, publishGroupRoomUpdate, getIO, publishPublicRoomsUpdate } from '../realtime/server.js';
-import { groupRoomOwners, getShardPeerCount, deleteGroupRoomInstance } from '../realtime/rooms.js';
+import { groupRoomOwners, getShardPeerCount, deleteGroupRoomInstance, channel } from '../realtime/rooms.js';
+import { canJoinCallMedia, callMediaKind } from '../realtime/calls.js';
 import { sendRoomInvitePush } from '../realtime/push.js';
 import { getCachedGroupMembers, invalidateGroupMembersCache } from '../realtime/cache.js';
-import { closeMediaSession } from '../realtime/media.js';
 import { env } from '../../config/env.js';
 import { deleteAccount } from './account-deletion.js';
 import { hasAcceptedPolicy, isBlockedPair, POLICY_VERSION } from './safety.js';
@@ -58,6 +58,46 @@ const run = (handler: RequestHandler): RequestHandler => (request, response, nex
 };
 
 socialRoutes.use(authenticated);
+
+// The API key and host credentials never leave this server. A short-lived
+// MiroTalk URL is issued only to a user already present in an ADDA call/room.
+socialRoutes.post('/mirotalk/join', run(async (request, response) => {
+  const userId = response.locals.userId as string;
+  const { kind, id } = request.body ?? {};
+  if ((kind !== 'call' && kind !== 'room') || typeof id !== 'string' || id.length < 1 || id.length > 120) {
+    response.status(400).json({ error: 'Invalid meeting.' }); return;
+  }
+  if (!env.mirotalkInternalUrl || !env.mirotalkPublicUrl || !env.mirotalkApiKey || !env.mirotalkHostUser || !env.mirotalkHostPassword) {
+    response.status(503).json({ error: 'Meeting service is unavailable.' }); return;
+  }
+  const allowed = kind === 'call'
+    ? canJoinCallMedia(id, userId)
+    : [...(getIO()?.sockets.adapter.rooms.get(channel(id)) ?? [])]
+      .some(socketId => getIO()?.sockets.sockets.get(socketId)?.data.userId === userId);
+  if (!allowed) { response.status(403).json({ error: 'Join the ADDA call or room first.' }); return; }
+  const meeting = `adda-${kind}-${Buffer.from(id).toString('base64url')}`;
+  const query = {
+    room: meeting,
+    name: userId,
+    audio: true,
+    video: kind === 'call' && callMediaKind(id) === 'video',
+    chat: false,
+    notify: false,
+    token: { username: env.mirotalkHostUser, password: env.mirotalkHostPassword, presenter: false, expire: '15m' },
+  };
+  const upstream = await fetch(new URL('/api/v1/join', env.mirotalkInternalUrl), {
+    method: 'POST',
+    headers: { authorization: env.mirotalkApiKey, 'content-type': 'application/json' },
+    body: JSON.stringify(query),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!upstream.ok) { response.status(502).json({ error: 'Meeting service rejected the request.' }); return; }
+  const payload = await upstream.json() as { join?: string };
+  if (!payload.join) { response.status(502).json({ error: 'Meeting service returned no link.' }); return; }
+  const join = new URL(payload.join);
+  const publicUrl = new URL(env.mirotalkPublicUrl);
+  response.json({ url: `${publicUrl.origin}${join.pathname}${join.search}${kind === 'room' ? '&addaBridge=room' : ''}` });
+}));
 
 socialRoutes.get('/social/bundle', run(async (_request, response) => {
   const userId = response.locals.userId;
@@ -966,8 +1006,6 @@ socialRoutes.delete('/groups/:id/rooms/active', run(async (request, response) =>
   }
 
   await pool.query('UPDATE "group_room" SET "isActive" = false, "updatedAt" = now() WHERE id = $1', [room.id]);
-  void closeMediaSession(`group:${groupId}`).catch(() => {});
-  void closeMediaSession(`room:${room.id}`).catch(() => {});
   const membersRes = await pool.query<{ userId: string }>('SELECT "userId" FROM "chat_group_member" WHERE "groupId" = $1', [groupId]);
   publishGroupRoomUpdate(membersRes.rows.map(r => r.userId), { groupId, active: false });
 

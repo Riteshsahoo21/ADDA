@@ -3,7 +3,6 @@ import type { Server, Socket } from 'socket.io';
 import { pool } from '../../db/pool.js';
 import { sendRoomInvitePush } from './push.js';
 import { publishGroupRoomUpdate, publishPublicRoomsUpdate } from './server.js';
-import { closeMediaSession } from './media.js';
 
 export type RoomKind = 'loft' | 'roof' | 'tea' | 'beach';
 export type AvatarBody = 'man' | 'uncle' | 'photo_boy' | 'self' | 'woman' | 'chinese_woman' | 'nepali_woman' | 'white_top_woman';
@@ -79,12 +78,6 @@ export async function deleteGroupRoomInstance(io: Server, shardId: string, group
 
   io.emit('room:public_closed', { shardId, roomId: effectiveRoomId });
   publishPublicRoomsUpdate();
-
-  try {
-    await closeMediaSession(shardId);
-  } catch (err) {
-    console.warn(`[rooms] Error closing media session for ${shardId}:`, err);
-  }
 }
 
 export function scheduleRoomInactivity(io: Server, shardId: string, groupId?: string, roomId?: string) {

@@ -6,19 +6,22 @@ import { isBlockedPair } from '../social/safety.js';
 
 export type CallTarget = { kind: 'direct' | 'group'; id: string };
 export type CallMedia = 'audio' | 'video';
-export type CallInfo = { id: string; target: CallTarget; media: CallMedia; callerId: string; callerName: string; members: string[]; joined: string[]; expiresAt: number; usingRelay: boolean };
-type Call = CallInfo & { timer: ReturnType<typeof setTimeout> };
+export type CallInfo = { id: string; target: CallTarget; media: CallMedia; callerId: string; callerName: string; members: string[]; joined: string[]; expiresAt: number };
+type Call = CallInfo & { timer: ReturnType<typeof setTimeout>; declined: Set<string> };
 type Ack<T> = (result: { ok: true; value: T } | { ok: false; error: string }) => void;
 
 const calls = new Map<string, Call>();
 export function canJoinCallMedia(callId: string, userId: string): boolean {
   return calls.get(callId)?.joined.includes(userId) ?? false;
 }
+export function callMediaKind(callId: string): CallMedia | undefined {
+  return calls.get(callId)?.media;
+}
 const userRoom = (id: string) => `user:${id}`;
 const safeTarget = (value: unknown): value is CallTarget =>
   !!value && typeof value === 'object' && 'kind' in value && 'id' in value &&
   (value.kind === 'direct' || value.kind === 'group') && typeof value.id === 'string' && value.id.length > 0 && value.id.length < 100;
-const publicCall = ({ timer: _timer, ...call }: Call): CallInfo => call;
+const publicCall = ({ timer: _timer, declined: _declined, ...call }: Call): CallInfo => call;
 
 async function getMembers(target: CallTarget, callerId: string): Promise<string[]> {
   if (target.kind === 'direct') {
@@ -46,7 +49,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     ack?.({
       ok: true,
       value: [...calls.values()]
-        .filter(call => call.members.includes(selfId) && !call.joined.includes(selfId) && (call.target.kind === 'group' ? call.joined.length > 0 : call.expiresAt > Date.now()))
+        .filter(call => call.members.includes(selfId) && !call.joined.includes(selfId) && !call.declined.has(selfId) && (call.target.kind === 'group' ? call.joined.length > 0 : call.expiresAt > Date.now()))
         .map(publicCall),
     });
   });
@@ -62,7 +65,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
       const expiresAt = target.kind === 'group' ? Date.now() + 86400_000 : Date.now() + 45_000;
       const call: Call = {
         id, target, media: input.media, callerId: selfId, callerName: socket.data.name as string,
-        members, joined: [selfId], expiresAt, usingRelay: false,
+        members, joined: [selfId], declined: new Set(), expiresAt,
         timer: setTimeout(() => {
           const current = calls.get(id);
           if (current && current.target.kind === 'direct' && current.joined.length === 1) closeCall(io, current, 'No answer');
@@ -87,6 +90,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     if (!call || !call.members.includes(selfId)) { ack?.({ ok: false, error: 'Call has ended.' }); return; }
     const newlyJoined = !call.joined.includes(selfId);
     if (newlyJoined) call.joined.push(selfId);
+    call.declined.delete(selfId);
     if (call.joined.length > 1) clearTimeout(call.timer);
     ack?.({ ok: true, value: publicCall(call) });
     io.to(call.members.map(userRoom)).emit('call:participant-joined', { callId, userId: selfId, joined: call.joined });
@@ -105,12 +109,6 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     if (JSON.stringify(input.signal).length > 65_536) return;
     io.to(userRoom(input.to)).emit('call:signal', { callId: input.callId, from: selfId, signal: input.signal });
   });
-  socket.on('call:relay', (callId: unknown) => {
-    const call = typeof callId === 'string' ? calls.get(callId) : undefined;
-    if (!call || call.target.kind !== 'direct' || !call.joined.includes(selfId)) return;
-    if (!call.usingRelay) call.usingRelay = true;
-    io.to(call.joined.map(userRoom)).emit('call:relay', { callId: call.id });
-  });
   socket.on('call:leave', (callId: unknown) => {
     const call = typeof callId === 'string' ? calls.get(callId) : undefined;
     if (!call || !call.joined.includes(selfId)) return;
@@ -122,7 +120,10 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     const call = typeof callId === 'string' ? calls.get(callId) : undefined;
     if (!call || !call.members.includes(selfId) || call.joined.includes(selfId)) return;
     if (call.target.kind === 'direct') closeCall(io, call, 'Declined');
-    else io.to(userRoom(call.callerId)).emit('call:declined', { callId, userId: selfId });
+    else {
+      call.declined.add(selfId);
+      io.to(userRoom(call.callerId)).emit('call:declined', { callId, userId: selfId });
+    }
   });
   socket.on('disconnect', () => {
     setTimeout(() => {
@@ -135,6 +136,6 @@ export function attachCallHandlers(io: Server, socket: Socket) {
           if (call.target.kind === 'direct' || call.joined.length === 0) closeCall(io, call, 'Disconnected');
         }
       });
-    }, 5000);
+    }, 1500);
   });
 }
