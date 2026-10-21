@@ -82,6 +82,7 @@ import {
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { TypingDots } from '@/components/ui/TypingDots';
 import { ChatWallpaper, type ChatWallpaperTheme } from '@/components/ui/ChatWallpaper';
+import { SoundEffects } from '@/audio/SoundEffects';
 
 type ViewerState = {
   uri: string;
@@ -624,8 +625,22 @@ export default function ConversationScreen() {
     const revision = typingRevision;
 
     const onEnvelope = (envelope: Envelope) => {
+      const myId = selfId || getActiveUserId() || getCachedProfile()?.id || '';
+      const isTargetMatch =
+        envelope.kind === target.kind &&
+        (target.kind === 'group'
+          ? envelope.targetId === target.id
+          : envelope.senderId === target.id);
+
+      const isIncoming = isTargetMatch && !!envelope.senderId && envelope.senderId !== myId;
+
       void receiveDirectEnvelope(envelope)
-        .then(() => markChatRead(target))
+        .then(() => {
+          if (isIncoming) {
+            SoundEffects.playReceived();
+          }
+          return markChatRead(target);
+        })
         .catch(() => {});
     };
 
@@ -968,6 +983,7 @@ export default function ConversationScreen() {
 
     try {
       await sendEncryptedMessage(target, body, myName, messageId, currentReply, currentMentions);
+      SoundEffects.playSent();
     } catch (cause) {
       console.warn('Send error:', cause);
       setError(cause instanceof Error ? cause.message : 'Could not send message.');
@@ -1031,6 +1047,7 @@ export default function ConversationScreen() {
       try {
         const sent = await sendEncryptedMedia(target, asset.uri, mediaKind, mimeType, myName, messageId, currentReply, currentMentions);
         setMessages(current => current.map(item => item.id === messageId ? sent : item));
+        SoundEffects.playSent();
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : 'Could not share encrypted media.');
       } finally {

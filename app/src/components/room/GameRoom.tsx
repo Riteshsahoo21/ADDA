@@ -23,6 +23,7 @@ import { AvatarStyle, type AvatarBody } from '@/three/player/avatarStyle';
 import type { PlayerSnapshot, RoomMotionSnapshot, RoomPeer, RoomPose } from '@/lib/rooms';
 import { createVintageRadio } from '@/three/environment/vintageRadio';
 import { MusicService } from '@/audio/MusicService';
+import { SoundEffects } from '@/audio/SoundEffects';
 
 const STICK_SIZE = 110;
 const STICK_TRAVEL = 37;
@@ -983,6 +984,9 @@ export function GameRoom({
             playing?.fadeOut(0.15);
             wanted.reset().fadeIn(0.15).play();
             playing = wanted;
+          }
+          if (walking && jumpHeight < 0.05 && seatPhase === 'free') {
+            SoundEffects.playFootstep(running);
           }
           mixer?.update(delta);
           const pose: RoomPose = seatPhase === 'entering' ? 'sit_enter'

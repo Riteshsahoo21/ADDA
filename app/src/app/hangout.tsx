@@ -24,6 +24,7 @@ import { getRealtimeSocket } from '@/lib/realtime';
 import { deleteCurrentRoom, inviteGroupToRoom, inviteToRoom, kickRoomPeer, sendRoomMessage, type PlayerSnapshot, type RoomJoin, type RoomMessage, type RoomMotionSnapshot, type RoomPeer } from '@/lib/rooms';
 import { MusicHubModal } from '@/components/music/MusicHubModal';
 import { MusicService } from '@/audio/MusicService';
+import { SoundEffects } from '@/audio/SoundEffects';
 import { getActiveUserId, sendEncryptedMessage, type RoomCardPayload } from '@/lib/encrypted-chat';
 import { socialApi, type ChatGroup, type GroupDetails, type GroupMember, type PublicProfile, type SocialBundle } from '@/lib/social-api';
 
@@ -65,6 +66,10 @@ export default function HangoutScreen() {
   const [voiceEpoch, setVoiceEpoch] = useState(0);
   const [nearbySpeakers, setNearbySpeakers] = useState(0);
   const [chatOpen, setChatOpen] = useState(false);
+  const chatOpenRef = useRef(chatOpen);
+  useEffect(() => {
+    chatOpenRef.current = chatOpen;
+  }, [chatOpen]);
   const [playersOpen, setPlayersOpen] = useState(false);
   const [roomMenuOpen, setRoomMenuOpen] = useState(false);
   const [musicModalOpen, setMusicModalOpen] = useState(false);
@@ -614,7 +619,12 @@ export default function HangoutScreen() {
       closePeer(userId);
     };
     const onMessage = (message: RoomMessage) => {
-      if (!blockedPeersRef.current.has(message.userId)) setMessages(current => [...current, message].slice(-50));
+      if (!blockedPeersRef.current.has(message.userId)) {
+        setMessages(current => [...current, message].slice(-50));
+        if (message.userId !== currentUserId && chatOpenRef.current) {
+          SoundEffects.playReceived();
+        }
+      }
     };
     const onRadioSync = (radio: { enabled?: boolean; trackIndex?: number }) => {
       if (typeof radio?.enabled === 'boolean' && radio.enabled !== MusicService.state.radioEnabled) {
@@ -903,8 +913,14 @@ export default function HangoutScreen() {
   const sendMessage = async () => {
     const body = chatText.trim();
     if (!body) return;
-    try { await sendRoomMessage(body); setChatText(''); setChatError(''); }
-    catch (error) { setChatError(error instanceof Error ? error.message : 'Could not send message.'); }
+    try {
+      await sendRoomMessage(body);
+      SoundEffects.playSent();
+      setChatText('');
+      setChatError('');
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : 'Could not send message.');
+    }
   };
   if (!username) return null;
 
