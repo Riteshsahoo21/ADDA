@@ -42,8 +42,11 @@ export async function getRealtimeSocket(deviceId?: string): Promise<Socket> {
   if (socket && socketToken === token) {
     if (currentDeviceId && (socket.auth as any)?.deviceId !== currentDeviceId) {
       socket.auth = { token, deviceId: currentDeviceId };
-      socket.disconnect();
-      socket.connect();
+      if (socket.connected) {
+        socket.emit('chat:drain_spool', { deviceId: currentDeviceId });
+      } else {
+        socket.connect();
+      }
       return waitConnected(socket);
     }
     if (!socket.connected) socket.connect();

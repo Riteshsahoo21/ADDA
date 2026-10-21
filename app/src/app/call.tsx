@@ -666,7 +666,7 @@ export default function CallScreen() {
       pendingGroupCandidates.current.clear();
       localRef.current?.getTracks().forEach(track => track.stop()); localRef.current = null;
     };
-  }, [callId, paramRole]);
+  }, [callId]);
 
   const toggleMute = () => {
     const next = !mutedRef.current;

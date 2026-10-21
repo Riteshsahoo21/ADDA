@@ -449,11 +449,10 @@ export function attachRealtime(httpServer: HttpServer): Server {
 
         markMessageProcessed(messageId, selfId, createdAt);
         for (const { userId, envelope } of envelopes) {
-          if (envelope.recipientDeviceId && io!.sockets.adapter.rooms.has(deviceRoom(envelope.recipientDeviceId))) {
-            io!.to(deviceRoom(envelope.recipientDeviceId)).emit('chat:envelope', envelope);
-          } else {
-            io!.to(userRoom(userId)).emit('chat:envelope', envelope);
-          }
+          // Send to every connection for this account. A stale device-room
+          // membership must not divert an envelope away from the active phone.
+          // Each phone ignores envelopes addressed to another device.
+          io!.to(userRoom(userId)).emit('chat:envelope', envelope);
         }
         ack?.({ ok: true, timestamp: createdAt });
       } catch (err: any) {

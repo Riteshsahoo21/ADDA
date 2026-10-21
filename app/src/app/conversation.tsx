@@ -65,6 +65,7 @@ import {
   mediaFromBody,
   roomCardFromBody,
   onChatChanged,
+  currentChatDeviceId,
   openEncryptedMedia,
   prefetchChatKeys,
   receiveDirectEnvelope,
@@ -79,6 +80,7 @@ import {
   type QuotedReply,
   type RoomCardPayload,
 } from '@/lib/encrypted-chat';
+import { getActiveSocket } from '@/lib/realtime';
 import { callRequest, type CallInfo, type CallMedia } from '@/lib/calls';
 import { TypingDots } from '@/components/ui/TypingDots';
 import { ChatWallpaper, type ChatWallpaperTheme } from '@/components/ui/ChatWallpaper';
@@ -615,6 +617,12 @@ export default function ConversationScreen() {
       void markChatRead(target);
       void getRealtimeSocket().then(live => live.emit('chat:drain_spool')).catch(() => {});
     }
+    const recoveryTimer = setInterval(() => {
+      const live = getActiveSocket();
+      const deviceId = currentChatDeviceId();
+      if (target && deviceId && live?.connected) live.emit('chat:drain_spool', { deviceId });
+    }, 20_000);
+    return () => clearInterval(recoveryTimer);
   }, [load, target, checkActiveGroupCall]));
 
   useEffect(() => onChatChanged(() => {

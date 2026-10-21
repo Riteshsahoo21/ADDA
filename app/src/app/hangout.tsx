@@ -150,7 +150,7 @@ export default function HangoutScreen() {
         remoteStreamsRef.current.set(peerUserId, stream);
         const other = latestRemote.current.get(peerUserId);
         const myPos = positionRef.current;
-        const dist = other ? Math.hypot(other.x - myPos.x, other.z - myPos.z) : 999;
+        const dist = other ? Math.hypot(other.x - myPos.x, other.z - myPos.z) : 0;
         const isMuted = speakerMutedRef.current || mutedPeersRef.current.has(peerUserId) || blockedPeersRef.current.has(peerUserId) || dist > 15;
         stream.getAudioTracks().forEach((t: any) => {
           try { t.enabled = !isMuted; } catch {}
@@ -320,7 +320,7 @@ export default function HangoutScreen() {
       let audible = 0;
       for (const [id, stream] of remoteStreamsRef.current) {
         const other = latestRemote.current.get(id);
-        const distance = other ? Math.hypot(other.x - snapshot.x, other.z - snapshot.z) : 999;
+        const distance = other ? Math.hypot(other.x - snapshot.x, other.z - snapshot.z) : 0;
         const isMuted = speakerMutedRef.current || mutedPeersRef.current.has(id) || blockedPeersRef.current.has(id) || distance > 15;
         try {
           stream.getAudioTracks().forEach((track: any) => {
@@ -597,6 +597,15 @@ export default function HangoutScreen() {
         if (!exists) return [...current, peer];
         return current.map(item => item.userId === peer.userId ? { ...item, ...peer } : item);
       });
+      latestRemote.current.set(peer.userId, {
+        id: peer.userId,
+        x: peer.x,
+        y: peer.y ?? 0,
+        z: peer.z,
+        r: peer.yaw,
+        pose: peer.pose ?? 'idle',
+        time: Date.now(),
+      });
       setInvitedIds(current => {
         if (!current.has(peer.userId)) return current;
         const next = new Set(current);
@@ -670,7 +679,7 @@ export default function HangoutScreen() {
         }
         queues.clear();
         for (const peer of result.value.peers) {
-          queues.set(peer.userId, [{
+          const snap = {
             id: peer.userId,
             x: peer.x,
             y: peer.y ?? 0,
@@ -678,7 +687,9 @@ export default function HangoutScreen() {
             r: peer.yaw,
             pose: peer.pose ?? 'idle',
             time: Date.now(),
-          }]);
+          };
+          queues.set(peer.userId, [snap]);
+          latestRemote.current.set(peer.userId, snap);
         }
         setPeers(result.value.peers.filter(peer => !blockedPeersRef.current.has(peer.userId)));
         setMessages(result.value.messages.filter(message => !blockedPeersRef.current.has(message.userId)));

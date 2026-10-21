@@ -244,6 +244,8 @@ export function SessionProvider({ children }: PropsWithChildren) {
       if (data?.isOngoing) {
         void Notifications.clearLastNotificationResponseAsync();
         void Notifications.dismissNotificationAsync('adda_active_call_notification').catch(() => {});
+        if (openedNotificationCall.current === data.callId) return;
+        openedNotificationCall.current = data.callId;
         router.push({ pathname: '/call', params: { callId: data.callId, role: data.role || 'callee', name: data.name || 'ADDA call', media: (data as any)?.media || 'audio' } } as unknown as Href);
         return;
       }

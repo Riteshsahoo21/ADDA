@@ -38,6 +38,7 @@ async function getMembers(target: CallTarget, callerId: string): Promise<string[
 }
 
 function closeCall(io: Server, call: Call, reason: string) {
+  console.log(`[ADDA Call Server] closeCall: id=${call.id} reason="${reason}" members=${call.members.join(',')} joined=${call.joined.join(',')}`);
   clearTimeout(call.timer);
   calls.delete(call.id);
   io.to(call.members.map(userRoom)).emit('call:ended', { callId: call.id, target: call.target, reason });
@@ -134,6 +135,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     }
   });
   socket.on('call:leave', (callId: unknown) => {
+    console.log(`[ADDA Call Server] call:leave from user ${selfId} (socket ${socket.id}) for callId=${callId}`);
     const call = typeof callId === 'string' ? calls.get(callId) : undefined;
     if (!call || !call.joined.includes(selfId)) return;
     call.joined = call.joined.filter(id => id !== selfId);
@@ -141,6 +143,7 @@ export function attachCallHandlers(io: Server, socket: Socket) {
     if (call.target.kind === 'direct' || call.joined.length === 0) closeCall(io, call, 'Call ended');
   });
   socket.on('call:decline', (callId: unknown) => {
+    console.log(`[ADDA Call Server] call:decline from user ${selfId} (socket ${socket.id}) for callId=${callId}`);
     const call = typeof callId === 'string' ? calls.get(callId) : undefined;
     if (!call || !call.members.includes(selfId) || call.joined.includes(selfId)) return;
     if (call.target.kind === 'direct') closeCall(io, call, 'Declined');
@@ -149,17 +152,20 @@ export function attachCallHandlers(io: Server, socket: Socket) {
       io.to(userRoom(call.callerId)).emit('call:declined', { callId, userId: selfId });
     }
   });
-  socket.on('disconnect', () => {
+  socket.on('disconnect', (reason: string) => {
+    console.log(`[ADDA Call Server] socket ${socket.id} (user ${selfId}) disconnected: ${reason}. Waiting 20s for mobile reconnect.`);
     setTimeout(() => {
       void io.in(userRoom(selfId)).fetchSockets().then(online => {
+        console.log(`[ADDA Call Server] disconnect timeout check for user ${selfId}: onlineSockets=${online.length}`);
         if (online.length) return;
         for (const call of [...calls.values()]) {
           if (!call.joined.includes(selfId)) continue;
+          console.log(`[ADDA Call Server] user ${selfId} absent after 20s; leaving call ${call.id}`);
           call.joined = call.joined.filter(id => id !== selfId);
           io.to(call.members.map(userRoom)).emit('call:participant-left', { callId: call.id, userId: selfId, joined: call.joined });
           if (call.target.kind === 'direct' || call.joined.length === 0) closeCall(io, call, 'Disconnected');
         }
       });
-    }, 1500);
+    }, 20_000);
   });
 }
