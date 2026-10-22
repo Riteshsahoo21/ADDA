@@ -14,7 +14,7 @@ import {
   RTCIceCandidate,
   RTCPeerConnection,
   RTCSessionDescription,
-  type MediaStream,
+  MediaStream,
 } from 'react-native-webrtc';
 import { RoomKind } from '@/three/environment/createGameScene';
 import { colors } from '@/constants/theme';
@@ -102,6 +102,7 @@ export default function HangoutScreen() {
   const roomPeersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteStreamsRef = useRef<Map<string, MediaStream>>(new Map());
   const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidate[]>>(new Map());
+  const pendingVoiceSignalsRef = useRef<Array<{ from: string; signal: any }>>([]);
   const latestRemote = useRef(new Map<string, PlayerSnapshot>());
   const volumeSentAt = useRef(0);
   const micMutedRef = useRef(false);
@@ -141,33 +142,39 @@ export default function HangoutScreen() {
       });
     }
 
-    const listen = peer as unknown as { addEventListener: (type: string, listener: any) => void };
-    listen.addEventListener('icecandidate', (event: any) => {
+    (peer as any).onicecandidate = (event: any) => {
       if (event.candidate) {
         const cand = typeof event.candidate.toJSON === 'function' ? event.candidate.toJSON() : event.candidate;
         presenceRef.current?.emit('room:signal', { to: peerUserId, signal: { candidate: cand } });
       }
-    });
+    };
 
-    listen.addEventListener('track', (event: any) => {
-      const stream = event.streams?.[0];
-      if (stream) {
-        remoteStreamsRef.current.set(peerUserId, stream);
-        const other = latestRemote.current.get(peerUserId);
-        const myPos = positionRef.current;
-        const dist = other ? Math.hypot(other.x - myPos.x, other.z - myPos.z) : 0;
-        const isMuted = speakerMutedRef.current || mutedPeersRef.current.has(peerUserId) || blockedPeersRef.current.has(peerUserId) || dist > 15;
-        stream.getAudioTracks().forEach((t: any) => {
-          try { t.enabled = !isMuted; } catch {}
-        });
-      }
-    });
+    (peer as any).ontrack = (event: any) => {
+      const incomingTracks = event.streams?.[0]?.getTracks() ?? (event.track ? [event.track] : []);
+      if (!incomingTracks.length) return;
+      const stream = event.streams?.[0] ?? new MediaStream(incomingTracks);
+      remoteStreamsRef.current.set(peerUserId, stream);
+      const other = latestRemote.current.get(peerUserId);
+      const myPos = positionRef.current;
+      const dist = other ? Math.hypot(other.x - myPos.x, other.z - myPos.z) : 0;
+      const isMuted = speakerMutedRef.current || mutedPeersRef.current.has(peerUserId) || blockedPeersRef.current.has(peerUserId) || dist > 15;
+      stream.getAudioTracks().forEach((t: any) => {
+        try { t.enabled = !isMuted; } catch {}
+      });
+    };
 
-    listen.addEventListener('connectionstatechange', () => {
-      if (peer!.connectionState === 'connected') {
+    const onRoomConnChange = () => {
+      const conn = peer!.connectionState;
+      const ice = peer!.iceConnectionState;
+      if (conn === 'connected' || ice === 'connected' || ice === 'completed') {
         setVoiceStatus('Nearby voice on');
       }
-    });
+    };
+    (peer as any).onconnectionstatechange = onRoomConnChange;
+    (peer as any).oniceconnectionstatechange = onRoomConnChange;
+    const listen = peer as unknown as { addEventListener: (type: string, listener: any) => void };
+    listen.addEventListener('connectionstatechange', onRoomConnChange);
+    listen.addEventListener('iceconnectionstatechange', onRoomConnChange);
 
     if (isInitiator) {
       try {
@@ -216,11 +223,15 @@ export default function HangoutScreen() {
     try {
       const { from, signal } = event;
       if (!from || !signal || blockedPeersRef.current.has(from)) return;
+      if (!localStreamRef.current) {
+        if (pendingVoiceSignalsRef.current.length < 128) pendingVoiceSignalsRef.current.push(event);
+        return;
+      }
 
       if (signal.candidate) {
         const candidate = new RTCIceCandidate(signal.candidate);
         const peer = roomPeersRef.current.get(from);
-        if (peer && peer.remoteDescription) {
+        if (peer && peer.remoteDescription && peer.localDescription) {
           await peer.addIceCandidate(candidate).catch(() => {});
         } else {
           if (!pendingIceCandidatesRef.current.has(from)) pendingIceCandidatesRef.current.set(from, []);
@@ -236,15 +247,17 @@ export default function HangoutScreen() {
         }
         if (!peer) return;
         await peer.setRemoteDescription(new RTCSessionDescription(signal));
-        const pending = pendingIceCandidatesRef.current.get(from) || [];
-        pendingIceCandidatesRef.current.delete(from);
-        for (const c of pending) await peer.addIceCandidate(c).catch(() => {});
         const answer = await peer.createAnswer();
         await peer.setLocalDescription(answer);
         presenceRef.current?.emit('room:signal', {
           to: from,
           signal: { type: 'answer', sdp: answer.sdp ?? '' },
         });
+
+        // Drain pending candidates only after local description (answer) is set
+        const pending = pendingIceCandidatesRef.current.get(from) || [];
+        pendingIceCandidatesRef.current.delete(from);
+        for (const c of pending) await peer.addIceCandidate(c).catch(() => {});
         return;
       }
 
@@ -264,7 +277,7 @@ export default function HangoutScreen() {
   }, [getOrCreateRoomPeer]);
 
   const onVoiceReady = useCallback((data: { from: string }) => {
-    if (!data?.from || !currentUserId || blockedPeersRef.current.has(data.from)) return;
+    if (!data?.from || !currentUserId || !localStreamRef.current || blockedPeersRef.current.has(data.from)) return;
     if (currentUserId < data.from) {
       void getOrCreateRoomPeer(data.from, true);
     } else {
@@ -354,7 +367,7 @@ export default function HangoutScreen() {
     let active = true;
 
     void mediaDevices.getUserMedia({ audio: true, video: false })
-      .then(stream => {
+      .then(async stream => {
         if (!active) {
           stream.getTracks().forEach((t: any) => {
             try { t.stop(); } catch {}
@@ -373,6 +386,7 @@ export default function HangoutScreen() {
           });
         }
         setVoiceStatus('Voice ready');
+        for (const signal of pendingVoiceSignalsRef.current.splice(0)) await onRoomSignal(signal);
         presenceRef.current?.emit('room:voice-ready');
 
         for (const peer of peersRef.current) {
@@ -395,6 +409,7 @@ export default function HangoutScreen() {
       roomPeersRef.current.clear();
       remoteStreamsRef.current.clear();
       pendingIceCandidatesRef.current.clear();
+      pendingVoiceSignalsRef.current = [];
       latestRemote.current.clear();
 
       if (localStreamRef.current) {
@@ -404,7 +419,7 @@ export default function HangoutScreen() {
         localStreamRef.current = null;
       }
     };
-  }, [username, focused, shardId, currentUserId, getOrCreateRoomPeer, closePeer]);
+  }, [username, focused, shardId, currentUserId, getOrCreateRoomPeer, closePeer, onRoomSignal]);
 
 
   const showRouteToast = useCallback((msg: string) => {
@@ -807,10 +822,12 @@ export default function HangoutScreen() {
       void PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT).catch(() => {});
     }
 
-    // 2. Ensure speakerphone is active for room spatial audio without stealing exclusive voice call focus
+    // Start Android's communication audio session before routing WebRTC voice.
     try {
+      InCallManager.start({ media: 'audio', auto: true });
       InCallManager.setForceSpeakerphoneOn(true);
       InCallManager.setSpeakerphoneOn(true);
+      void InCallManager.chooseAudioRoute('SPEAKER_PHONE');
     } catch (e) {
       console.warn('[ADDA Hangout] speaker route error:', e);
     }

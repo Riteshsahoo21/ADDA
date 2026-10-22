@@ -5,6 +5,10 @@ import * as SecureStore from 'expo-secure-store';
 export const API_BASE_URL =
   process.env.EXPO_PUBLIC_API_URL || 'https://api.ritzla.in';
 
+// Legal pages use the public web host; API/auth traffic stays on api.ritzla.in.
+export const LEGAL_BASE_URL =
+  process.env.EXPO_PUBLIC_LEGAL_URL || 'https://meet.ritzla.in';
+
 const ACCESS_TOKEN_KEY = 'adda_bearer_session_v2';
 const LEGACY_TOKEN_KEY = 'adda_jwt_access_token';
 const REFRESH_TOKEN_KEY = 'adda_jwt_refresh_token';

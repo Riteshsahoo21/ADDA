@@ -1,13 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  AppState,
   DeviceEventEmitter,
   PermissionsAndroid,
   Platform,
   Pressable,
   StyleSheet,
   Text,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -43,7 +41,6 @@ import { dismissCallNotification } from '@/lib/push-notifications';
 import { MusicService } from '@/audio/MusicService';
 
 type Signal = { type: 'offer' | 'answer'; sdp: string } | { candidate: any };
-type RemoteTrack = { id: string; kind: 'audio' | 'video'; stream: MediaStream; userId: string };
 const ONGOING_CALL_NOTIF_ID = 'adda_active_call_notification';
 
 function formatDuration(sec: number): string {
@@ -56,7 +53,6 @@ export default function CallScreen() {
   useKeepAwake();
 
   const insets = useSafeAreaInsets();
-  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const { callId, role: paramRole, name, media: paramMedia } = useLocalSearchParams<{
     callId?: string;
     role?: string;
@@ -69,8 +65,7 @@ export default function CallScreen() {
   const [status, setStatus] = useState(callId ? 'Connecting…' : 'Call unavailable.');
   const [callDuration, setCallDuration] = useState(0);
   const [local, setLocal] = useState<MediaStream | null>(null);
-  const [remote, setRemote] = useState<MediaStream | null>(null);
-  const [groupTracks, setGroupTracks] = useState<RemoteTrack[]>([]);
+  const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(initialCameraOff);
   const [speakerOn, setSpeakerOn] = useState(true);
@@ -79,22 +74,22 @@ export default function CallScreen() {
   const [userNames, setUserNames] = useState<Record<string, string>>({});
   const [selfUserId, setSelfUserId] = useState('');
 
+  const activeRef = useRef(true);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mutedRef = useRef(false);
   const cameraOffRef = useRef(initialCameraOff);
   const speakerOnRef = useRef(true);
-  const isBluetoothRef = useRef(false);
   const isHeadsetConnectedRef = useRef(false);
-  const pc = useRef<RTCPeerConnection | null>(null);
-  const groupPeers = useRef<Map<string, RTCPeerConnection>>(new Map());
-  const pendingGroupCandidates = useRef<Map<string, RTCIceCandidate[]>>(new Map());
+
+  // WebRTC references
+  const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const pendingCandidatesRef = useRef<Map<string, RTCIceCandidate[]>>(new Map());
   const localRef = useRef<MediaStream | null>(null);
-  const pendingCandidates = useRef<RTCIceCandidate[]>([]);
-  const pendingSignals = useRef<{ callId: string; from: string; signal: Signal }[]>([]);
-  const offered = useRef(false);
-  const ending = useRef(false);
-  const readyPeer = useRef<string | null>(null);
+  const endingRef = useRef(false);
   const closeRef = useRef<((leave: boolean) => void) | null>(null);
+  const iceServersRef = useRef<any[]>([
+    { urls: ['stun:stun.l.google.com:19302', 'stun:191.215.37.241:3478'] },
+  ]);
 
   const safeExit = () => {
     if (router.canGoBack()) router.back();
@@ -107,7 +102,7 @@ export default function CallScreen() {
     toastTimer.current = setTimeout(() => setRouteToast(null), 2500);
   };
 
-  const applyCallAudioRoute = (forceSpeaker: boolean) => {
+  const applyAudioRoute = (forceSpeaker: boolean) => {
     speakerOnRef.current = forceSpeaker;
     setSpeakerOn(forceSpeaker);
     if (forceSpeaker) {
@@ -116,10 +111,7 @@ export default function CallScreen() {
       void InCallManager.chooseAudioRoute('SPEAKER_PHONE');
     } else {
       InCallManager.setSpeakerphoneOn(false);
-      if (isBluetoothRef.current) {
-        InCallManager.setForceSpeakerphoneOn(null as any);
-        void InCallManager.chooseAudioRoute('BLUETOOTH');
-      } else if (isHeadsetConnectedRef.current) {
+      if (isHeadsetConnectedRef.current) {
         InCallManager.setForceSpeakerphoneOn(null as any);
         void InCallManager.chooseAudioRoute('WIRED_HEADSET');
       } else {
@@ -129,89 +121,51 @@ export default function CallScreen() {
     }
   };
 
-  // InCallManager audio session management
+  // InCallManager audio management
   useEffect(() => {
+    activeRef.current = true;
     MusicService.stopAll();
     try { InCallManager.stopRingtone(); } catch {}
-
-    if (Platform.OS === 'android' && Number(Platform.Version) >= 31) {
-      void PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT).catch(() => {});
-    }
 
     const isVideo = (call?.media ?? paramMedia) === 'video';
     InCallManager.start({ media: isVideo ? 'video' : 'audio', auto: true });
     InCallManager.setKeepScreenOn(true);
 
     void InCallManager.getIsWiredHeadsetPluggedIn().then(({ isWiredHeadsetPluggedIn }) => {
-      const hasHeadset = Boolean(isWiredHeadsetPluggedIn);
-      setIsHeadsetConnected(hasHeadset);
-      isHeadsetConnectedRef.current = hasHeadset;
-      if (hasHeadset) {
-        applyCallAudioRoute(false);
-      } else {
-        applyCallAudioRoute(isVideo);
-      }
-    }).catch(() => {});
-
-    const audioDeviceSub = DeviceEventEmitter.addListener('onAudioDeviceChanged', (data: { selectedAudioDevice?: string; availableAudioDeviceList?: string }) => {
-      let hasBt = false;
-      let hasWired = false;
-      if (data?.availableAudioDeviceList) {
-        try {
-          const list = JSON.parse(data.availableAudioDeviceList) as string[];
-          hasBt = list.includes('BLUETOOTH');
-          hasWired = list.includes('WIRED_HEADSET');
-          isBluetoothRef.current = hasBt;
-          setIsHeadsetConnected(hasBt || hasWired);
-          isHeadsetConnectedRef.current = hasBt || hasWired;
-        } catch {}
-      }
-      void InCallManager.getIsWiredHeadsetPluggedIn().then(({ isWiredHeadsetPluggedIn }) => {
-        const plugged = Boolean(isWiredHeadsetPluggedIn) || hasBt;
-        setIsHeadsetConnected(plugged);
-        isHeadsetConnectedRef.current = plugged;
-        if (plugged && speakerOnRef.current) {
-          applyCallAudioRoute(false);
-          showRouteToast(hasBt ? '🎧 Wireless Earphones Connected' : '🎧 Earphones Audio Active');
-        }
-      }).catch(() => {});
-    });
-
-    const headsetSub = DeviceEventEmitter.addListener('WiredHeadset', (data: { isPlugged?: boolean }) => {
-      const plugged = Boolean(data?.isPlugged);
+      const plugged = Boolean(isWiredHeadsetPluggedIn);
       setIsHeadsetConnected(plugged);
       isHeadsetConnectedRef.current = plugged;
-      if (plugged && speakerOnRef.current) {
-        applyCallAudioRoute(false);
-        showRouteToast('🎧 Earphones Audio Active');
-      }
+      applyAudioRoute(!plugged && isVideo);
+    }).catch(() => {});
+
+    const audioSub = DeviceEventEmitter.addListener('onAudioDeviceChanged', (data: any) => {
+      const list = data?.availableAudioDeviceList ? String(data.availableAudioDeviceList) : '';
+      const hasHeadset = list.includes('WIRED_HEADSET') || list.includes('BLUETOOTH');
+      setIsHeadsetConnected(hasHeadset);
+      isHeadsetConnectedRef.current = hasHeadset;
     });
 
     return () => {
-      headsetSub.remove();
-      audioDeviceSub.remove();
+      activeRef.current = false;
+      audioSub.remove();
       InCallManager.setForceSpeakerphoneOn(false);
       InCallManager.stop();
       MusicService.stopAll();
     };
   }, []);
 
-  // Live call timer
+  // Duration timer
   useEffect(() => {
     if (status !== 'Connected') return;
-    const interval = setInterval(() => {
-      setCallDuration(prev => prev + 1);
-    }, 1000);
+    const interval = setInterval(() => setCallDuration(prev => prev + 1), 1000);
     return () => clearInterval(interval);
   }, [status]);
 
-  // Fetch participant display names for group call tiles
+  // Load participant names
   useEffect(() => {
     if (!callId) return;
     void socialApi<OwnProfile>('/me').then(me => {
-      if (me?.id && me?.name) {
-        setUserNames(prev => ({ ...prev, [me.id]: me.name }));
-      }
+      if (me?.id && me?.name) setUserNames(prev => ({ ...prev, [me.id]: me.name }));
     }).catch(() => {});
 
     if (call?.target.kind === 'group') {
@@ -233,490 +187,294 @@ export default function CallScreen() {
     }
   }, [callId, call?.target.id, call?.target.kind]);
 
-  // Keep in call when minimized and show active notification
+  // Main WebRTC Lifecycle
   useEffect(() => {
     if (!callId) return;
-    const displayName = name || (call?.target.kind === 'group' ? 'ADDA Group Call' : 'ADDA Call');
-
-    const sub = AppState.addEventListener('change', async nextState => {
-      if (nextState === 'background' || nextState === 'inactive') {
-        await Notifications.scheduleNotificationAsync({
-          identifier: ONGOING_CALL_NOTIF_ID,
-          content: {
-            title: `📞 ${call?.media === 'video' ? 'Video Call' : 'Voice Call'} • ${displayName}`,
-            body: status === 'Connected' ? `Call active (${formatDuration(callDuration)}) • Tap to return` : 'Call in progress • Tap to return',
-            sticky: true,
-            autoDismiss: false,
-            priority: Notifications.AndroidNotificationPriority.HIGH,
-            data: {
-              kind: 'call',
-              callId,
-              role: paramRole || 'callee',
-              name: displayName,
-              isOngoing: true,
-            },
-          },
-          trigger: null,
-        }).catch(() => {});
-      } else if (nextState === 'active') {
-        await Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
-      }
-    });
-
-    return () => {
-      sub.remove();
-      void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
-    };
-  }, [callId, name, paramRole, call, status, callDuration]);
-
-  // WebRTC Call logic
-  useEffect(() => {
-    if (!callId) return;
-    let active = true;
     let socket: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
-    let currentCall: CallInfo | null = null;
-    let selfId: string = '';
-    let role: 'caller' | 'callee' = (paramRole as 'caller' | 'callee') || 'callee';
-    let targetPeerId: string = '';
-    let isGroup = false;
-    const groupReadyReplies = new Set<string>();
+    let myUserId = '';
+    const earlySignals: Array<{ from: string; signal: Signal }> = [];
 
-    const close = (leave: boolean) => {
-      if (ending.current) return;
-      ending.current = true;
+    const closeCall = (leave: boolean) => {
+      if (endingRef.current) return;
+      endingRef.current = true;
+      activeRef.current = false;
       void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
-      InCallManager.stop();
       if (leave) {
-        const s = socket ?? getActiveSocket();
-        if (s?.connected) s.emit('call:leave', callId);
-        else void getRealtimeSocket().then(live => live.emit('call:leave', callId)).catch(() => {});
+        (socket ?? getActiveSocket())?.emit('call:leave', callId);
       }
-      pc.current?.close(); pc.current = null;
-      groupPeers.current.forEach(p => p.close());
-      groupPeers.current.clear();
-      pendingGroupCandidates.current.clear();
-      localRef.current?.getTracks().forEach(track => track.stop()); localRef.current = null;
-      if (active) safeExit();
+      peersRef.current.forEach(p => p.close());
+      peersRef.current.clear();
+      pendingCandidatesRef.current.clear();
+      localRef.current?.getTracks().forEach(t => t.stop());
+      localRef.current = null;
+      safeExit();
     };
-    closeRef.current = close;
+    closeRef.current = closeCall;
 
-    const sendSignal = (to: string, signal: Signal) => socket?.emit('call:signal', { callId, to, signal });
-
-    // 1:1 Offer Creator (ONLY called when peer is confirmed ready)
-    const startOffer = async (peerId: string) => {
-      if (!pc.current || offered.current || pc.current.signalingState !== 'stable') return;
-      offered.current = true;
-      try {
-        const offer = await pc.current.createOffer();
-        await pc.current.setLocalDescription(offer);
-        sendSignal(peerId, { type: 'offer', sdp: offer.sdp ?? '' });
-      } catch (error) {
-        offered.current = false;
-        if (active) setStatus(error instanceof Error ? error.message : 'Could not start media.');
-      }
+    const sendSignal = (to: string, signal: Signal) => {
+      socket?.emit('call:signal', { callId, to, signal });
     };
 
-    // Helper: Create peer connection for a group participant
-    const getOrCreateGroupPeer = async (peerUserId: string, iceServers: any[], isInitiator: boolean) => {
-      let peer = groupPeers.current.get(peerUserId);
+    // Helper: Create peer connection for target user
+    const getOrCreatePeer = (peerId: string, iceServers: any[], isInitiator: boolean) => {
+      let peer = peersRef.current.get(peerId);
       if (peer) return peer;
 
       peer = new RTCPeerConnection({ iceServers });
-      groupPeers.current.set(peerUserId, peer);
+      peersRef.current.set(peerId, peer);
 
+      // Attach existing local tracks
       if (localRef.current) {
         localRef.current.getTracks().forEach(track => {
-          peer!.addTrack(track, localRef.current!);
+          try { peer!.addTrack(track, localRef.current!); } catch {}
         });
       }
 
-      const listen = peer as unknown as { addEventListener: (type: string, listener: any) => void };
-      listen.addEventListener('icecandidate', (event: any) => {
-        if (event.candidate) {
+      // 1. ICE Candidate dispatch
+      (peer as any).onicecandidate = (event: any) => {
+        if (event.candidate && event.candidate.candidate) {
           const cand = typeof event.candidate.toJSON === 'function' ? event.candidate.toJSON() : event.candidate;
-          sendSignal(peerUserId, { candidate: cand });
+          sendSignal(peerId, { candidate: cand });
         }
-      });
+      };
 
-      listen.addEventListener('track', (event: any) => {
-        const s = event.streams?.[0];
-        if (s && active) {
-          setGroupTracks(prev => {
-            const existing = prev.filter(t => t.userId !== peerUserId || t.kind !== event.track.kind);
-            return [...existing, { id: event.track.id, kind: event.track.kind as 'audio' | 'video', stream: new MediaStream(s.getTracks()), userId: peerUserId }];
-          });
-        } else if (event.track && active) {
-          setGroupTracks(prev => {
-            const existing = prev.filter(t => t.userId !== peerUserId || t.kind !== event.track.kind);
-            return [...existing, { id: event.track.id, kind: event.track.kind as 'audio' | 'video', stream: new MediaStream([event.track]), userId: peerUserId }];
+      // 2. Track reception - use native stream directly
+      (peer as any).ontrack = (event: any) => {
+        if (!activeRef.current) return;
+        const remoteStream = event.streams?.[0] || (peer as any)._remoteStreams?.values()?.next()?.value;
+        if (remoteStream) {
+          setRemoteStreams(prev => {
+            const next = new Map(prev);
+            next.set(peerId, remoteStream);
+            return next;
           });
         }
-      });
+      };
 
-      const onGroupConnChange = () => {
-        if (!active || ending.current) return;
+      // 3. Connection state handling
+      const handleConnChange = () => {
+        if (!activeRef.current || endingRef.current) return;
         const conn = peer!.connectionState;
         const ice = peer!.iceConnectionState;
         if (conn === 'connected' || ice === 'connected' || ice === 'completed') {
           setStatus('Connected');
+          applyAudioRoute(speakerOnRef.current);
+        } else if (conn === 'failed' || ice === 'failed') {
+          const anyConnected = Array.from(peersRef.current.values()).some(
+            p => p.connectionState === 'connected' || p.iceConnectionState === 'connected'
+          );
+          if (!anyConnected) setStatus('Connection failed.');
         }
       };
-      listen.addEventListener('connectionstatechange', onGroupConnChange);
-      listen.addEventListener('iceconnectionstatechange', onGroupConnChange);
+      (peer as any).onconnectionstatechange = handleConnChange;
+      (peer as any).oniceconnectionstatechange = handleConnChange;
 
+      // 4. Initiator offer creation
       if (isInitiator) {
-        try {
-          const offer = await peer.createOffer();
-          await peer.setLocalDescription(offer);
-          sendSignal(peerUserId, { type: 'offer', sdp: offer.sdp ?? '' });
-        } catch (err) {
-          console.warn('[Call] Group offer failed for peer:', peerUserId, err);
-        }
+        void (async () => {
+          try {
+            const offer = await peer!.createOffer();
+            await peer!.setLocalDescription(offer);
+            sendSignal(peerId, { type: 'offer', sdp: offer.sdp ?? '' });
+          } catch (err) {
+            console.warn('[Call] Offer failed for peer:', peerId, err);
+          }
+        })();
       }
 
       return peer;
     };
 
-    // Signal Dispatcher (Handles both 1:1 and Group mesh signals)
-    const onSignal = async (event: { callId: string; from: string; signal: Signal }) => {
-      if (event.callId !== callId || ending.current) return;
-      // call:join can replay buffered signaling before profile and camera setup finish.
-      if (!currentCall || !localRef.current) {
-        pendingSignals.current.push(event);
-        return;
-      }
-
-      if (isGroup) {
-        // Group Mesh Signaling
-        try {
-        const config = await socialApi<{ iceServers: any[] }>('/calls/ice').catch(() => ({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }));
-        if ('candidate' in event.signal) {
-          const candidate = new RTCIceCandidate(event.signal.candidate as any);
-          const peer = groupPeers.current.get(event.from);
-          if (peer && peer.remoteDescription) {
+    const handleSignal = async (from: string, signal: Signal, iceServers: any[]) => {
+      try {
+        // ICE candidate
+        if ('candidate' in signal) {
+          if (!signal.candidate || !signal.candidate.candidate) return;
+          const candidate = new RTCIceCandidate(signal.candidate);
+          const peer = peersRef.current.get(from);
+          if (peer && peer.remoteDescription && peer.localDescription) {
             await peer.addIceCandidate(candidate).catch(() => {});
           } else {
-            if (!pendingGroupCandidates.current.has(event.from)) pendingGroupCandidates.current.set(event.from, []);
-            pendingGroupCandidates.current.get(event.from)!.push(candidate);
+            if (!pendingCandidatesRef.current.has(from)) pendingCandidatesRef.current.set(from, []);
+            pendingCandidatesRef.current.get(from)!.push(candidate);
           }
           return;
         }
 
-        if (event.signal.type === 'offer') {
-          let peer = groupPeers.current.get(event.from);
+        // Offer
+        if (signal.type === 'offer') {
+          let peer = peersRef.current.get(from);
           if (!peer) {
-            peer = await getOrCreateGroupPeer(event.from, config.iceServers, false);
+            peer = getOrCreatePeer(from, iceServers, false);
           }
-          await peer.setRemoteDescription(new RTCSessionDescription(event.signal as any));
-          const pending = pendingGroupCandidates.current.get(event.from) || [];
-          pendingGroupCandidates.current.delete(event.from);
-          for (const c of pending) await peer.addIceCandidate(c).catch(() => {});
+          await peer.setRemoteDescription(new RTCSessionDescription(signal as any));
           const answer = await peer.createAnswer();
           await peer.setLocalDescription(answer);
-          sendSignal(event.from, { type: 'answer', sdp: answer.sdp ?? '' });
+          sendSignal(from, { type: 'answer', sdp: answer.sdp ?? '' });
+
+          // Drain pending candidates AFTER local answer is set
+          const pending = pendingCandidatesRef.current.get(from) || [];
+          pendingCandidatesRef.current.delete(from);
+          for (const c of pending) await peer.addIceCandidate(c).catch(() => {});
           return;
         }
 
-        if (event.signal.type === 'answer') {
-          const peer = groupPeers.current.get(event.from);
+        // Answer
+        if (signal.type === 'answer') {
+          const peer = peersRef.current.get(from);
           if (peer && peer.signalingState === 'have-local-offer') {
-            await peer.setRemoteDescription(new RTCSessionDescription(event.signal as any));
-            const pending = pendingGroupCandidates.current.get(event.from) || [];
-            pendingGroupCandidates.current.delete(event.from);
+            await peer.setRemoteDescription(new RTCSessionDescription(signal as any));
+            const pending = pendingCandidatesRef.current.get(from) || [];
+            pendingCandidatesRef.current.delete(from);
             for (const c of pending) await peer.addIceCandidate(c).catch(() => {});
           }
           return;
         }
-        } catch (error) {
-          if (active) setStatus(error instanceof Error ? error.message : 'Could not connect group media.');
-        }
-        return;
+      } catch (err) {
+        console.warn('[Call] Signal processing error:', err);
       }
-
-      // 1:1 Direct Call Signaling (Exact a2cdbdc flow)
-      if (!pc.current) {
-        pendingSignals.current.push(event);
-        return;
-      }
-      try {
-        if ('candidate' in event.signal) {
-          const candidate = new RTCIceCandidate(event.signal.candidate as any);
-          if (pc.current.remoteDescription) {
-            await pc.current.addIceCandidate(candidate).catch(() => {});
-          } else {
-            pendingCandidates.current.push(candidate);
-          }
-          return;
-        }
-        if (event.signal.type === 'answer' && pc.current.signalingState !== 'have-local-offer') return;
-        if (event.signal.type === 'offer' && pc.current.signalingState !== 'stable') return;
-        await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal as any));
-        for (const candidate of pendingCandidates.current.splice(0)) {
-          await pc.current.addIceCandidate(candidate).catch(() => {});
-        }
-        if (event.signal.type === 'offer') {
-          const answer = await pc.current.createAnswer();
-          await pc.current.setLocalDescription(answer);
-          sendSignal(event.from, { type: 'answer', sdp: answer.sdp ?? '' });
-        }
-      } catch (error) {
-        if (active && pc.current?.connectionState !== 'connected') {
-          setStatus(error instanceof Error ? error.message : 'Could not connect media.');
-        }
-      }
-    };
-
-    const onJoined = (event: { callId: string; userId: string }) => {
-      if (event.callId !== callId) return;
-      if (isGroup) {
-        if (localRef.current && event.userId !== selfId && selfId < event.userId) {
-          void socialApi<{ iceServers: any[] }>('/calls/ice')
-            .catch(() => ({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }))
-            .then(config => getOrCreateGroupPeer(event.userId, config.iceServers, true));
-        }
-        return;
-      }
-      // 1:1: Joining means the other phone opened the call screen.
-      // Ping with ready so the callee responds with its ready once pc is created!
-      if (role === 'caller' && pc.current) {
-        socket?.emit('call:ready', callId);
-      }
-    };
-
-    const onReady = (event: { callId: string; from: string }) => {
-      if (event.callId !== callId) return;
-      if (isGroup) {
-        if (localRef.current && event.from !== selfId && selfId < event.from && !groupPeers.current.has(event.from)) {
-          void socialApi<{ iceServers: any[] }>('/calls/ice')
-            .catch(() => ({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }))
-            .then(config => getOrCreateGroupPeer(event.from, config.iceServers, true));
-        } else if (localRef.current && selfId > event.from && !groupReadyReplies.has(event.from)) {
-          // The lower-ID peer may have received our first ready before its camera was ready.
-          groupReadyReplies.add(event.from);
-          socket?.emit('call:ready', callId);
-        }
-        return;
-      }
-      // 1:1 Ready Handshake
-      if (role !== 'caller') {
-        // Callee replies with ready only when this phone's pc is created
-        if (pc.current) socket?.emit('call:ready', callId);
-        else readyPeer.current = event.from;
-      } else {
-        // Caller saves callee id and initiates offer!
-        readyPeer.current = event.from;
-        if (pc.current) void startOffer(event.from);
-      }
-    };
-
-    const onEnded = (event: { callId: string; reason?: string }) => {
-      if (event.callId === callId) close(false);
-    };
-
-    const onParticipantLeft = (event: { callId: string; userId: string }) => {
-      if (event.callId !== callId) return;
-      if (isGroup) {
-        const peer = groupPeers.current.get(event.userId);
-        if (peer) {
-          peer.close();
-          groupPeers.current.delete(event.userId);
-        }
-        setGroupTracks(prev => prev.filter(t => t.userId !== event.userId));
-        groupReadyReplies.delete(event.userId);
-        return;
-      }
-      if (event.userId !== selfId) close(false);
     };
 
     void (async () => {
       try {
         socket = await getRealtimeSocket();
-        socket.on('call:signal', onSignal);
-        socket.on('call:participant-joined', onJoined);
-        socket.on('call:ready', onReady);
-        socket.on('call:ended', onEnded);
-        socket.on('call:participant-left', onParticipantLeft);
 
+        // Join call on backend
         const joined = await callRequest<CallInfo>('call:join', callId);
-        if (!active) return;
-        currentCall = joined;
+        if (!activeRef.current) return;
         setCall(joined);
         void dismissCallNotification(joined.id);
 
         const me = await socialApi<OwnProfile>('/me').catch(() => null);
-        selfId = me?.id || '';
-        setSelfUserId(selfId);
-
-        isGroup = joined.target.kind === 'group';
-        role = (paramRole as 'caller' | 'callee') || (joined.callerId === selfId ? 'caller' : 'callee');
-        targetPeerId = role === 'caller'
-          ? (joined.members.find(m => m !== selfId) || joined.target.id)
-          : joined.callerId;
+        myUserId = me?.id || '';
+        if (!myUserId) throw new Error('Could not identify user for call.');
+        setSelfUserId(myUserId);
 
         const wantVideo = joined.media === 'video' || paramMedia === 'video';
-        if (wantVideo) {
-          setCameraOff(false);
-          cameraOffRef.current = false;
-        } else if (!paramMedia) {
-          const off = joined.media === 'audio';
-          setCameraOff(off);
-          cameraOffRef.current = off;
-        }
 
-        // Request camera and audio permissions on Android
+        // Permissions: Ensure camera & mic are requested
         if (Platform.OS === 'android') {
-          const perms: any[] = [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
+          const perms = [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
           if (wantVideo) perms.push(PermissionsAndroid.PERMISSIONS.CAMERA);
           await PermissionsAndroid.requestMultiple(perms).catch(() => {});
         }
 
-        // Acquire local media
+        // Acquire local media with standard camera constraints
         let stream: MediaStream;
         try {
-          stream = await mediaDevices.getUserMedia({ audio: true, video: true });
+          stream = await mediaDevices.getUserMedia({
+            audio: true,
+            video: wantVideo ? { facingMode: 'user', frameRate: 30 } : false,
+          });
         } catch {
-          try {
-            stream = await mediaDevices.getUserMedia({ audio: true, video: false });
-            setCameraOff(true);
-            cameraOffRef.current = true;
-          } catch (err) {
-            throw err;
-          }
+          stream = await mediaDevices.getUserMedia({ audio: true, video: false });
+          setCameraOff(true);
+          cameraOffRef.current = true;
         }
-        if (!active) { stream.getTracks().forEach(track => track.stop()); return; }
-        stream.getAudioTracks().forEach(track => { track.enabled = !mutedRef.current; });
-        stream.getVideoTracks().forEach(track => { track.enabled = !cameraOffRef.current; });
+        if (!activeRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
+        stream.getAudioTracks().forEach(t => { t.enabled = !mutedRef.current; });
+        stream.getVideoTracks().forEach(t => { t.enabled = !cameraOffRef.current; });
         localRef.current = stream;
         setLocal(stream);
 
-        const config = await socialApi<{ iceServers: any[] }>('/calls/ice').catch(() => ({
+        // Fetch ICE servers
+        const iceConfig = await socialApi<{ iceServers: any[] }>('/calls/ice').catch(() => ({
           iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: ['stun:stun.l.google.com:19302', 'stun:191.215.37.241:3478'] },
           ],
         }));
+        if (iceConfig?.iceServers?.length) iceServersRef.current = iceConfig.iceServers;
+        const iceServers = iceServersRef.current;
 
-        if (isGroup) {
-          // Process offers and ICE that arrived while media was starting.
-          for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
-          setStatus('Waiting for others…');
-          socket.emit('call:ready', callId);
-
-          // Offer only to peers already in the call. Invited members are not yet connected.
-          for (const memberId of joined.joined) {
-            if (memberId !== selfId && selfId < memberId) {
-              void getOrCreateGroupPeer(memberId, config.iceServers, true);
-            }
-          }
-          return;
+        // Drain any early signals received before media initialization
+        while (earlySignals.length > 0) {
+          const item = earlySignals.shift();
+          if (item) await handleSignal(item.from, item.signal, iceServers);
         }
 
-        // 1:1 Call Setup
-        const peer = new RTCPeerConnection({ iceServers: config.iceServers });
-        pc.current = peer;
-        stream.getTracks().forEach(track => peer.addTrack(track, stream));
+        // Signal listener
+        socket.on('call:signal', async (event: { callId: string; from: string; signal: Signal }) => {
+          if (event.callId !== callId || endingRef.current) return;
+          if (!localRef.current) {
+            earlySignals.push({ from: event.from, signal: event.signal });
+            return;
+          }
+          await handleSignal(event.from, event.signal, iceServers);
+        });
 
-        const listen = peer as unknown as { addEventListener: (type: string, listener: any) => void };
-        listen.addEventListener('icecandidate', (event: any) => {
-          if (event.candidate) {
-            const cand = typeof event.candidate.toJSON === 'function' ? event.candidate.toJSON() : event.candidate;
-            sendSignal(targetPeerId, { candidate: cand });
+        // Peer readiness listener: deterministic initiator rule (myUserId < peerId)
+        socket.on('call:ready', (event: { callId: string; from: string }) => {
+          if (event.callId !== callId || event.from === myUserId) return;
+          if (myUserId < event.from && !peersRef.current.has(event.from)) {
+            getOrCreatePeer(event.from, iceServers, true);
           }
         });
 
-        listen.addEventListener('track', (event: any) => {
-          if (!active) return;
-          const s = event.streams?.[0];
-          if (s) {
-            setRemote(new MediaStream(s.getTracks()));
-          } else if (event.track) {
-            setRemote(prev => {
-              const currentTracks = prev ? prev.getTracks().filter(t => t.id !== event.track.id) : [];
-              return new MediaStream([...currentTracks, event.track]);
+        socket.on('call:participant-joined', (event: { callId: string; userId: string; joined?: string[] }) => {
+          if (event.callId !== callId || event.userId === myUserId) return;
+          if (event.joined) {
+            setCall(prev => prev ? { ...prev, joined: event.joined! } : prev);
+          }
+          if (myUserId < event.userId && !peersRef.current.has(event.userId)) {
+            getOrCreatePeer(event.userId, iceServers, true);
+          }
+        });
+
+        socket.on('call:participant-left', (event: { callId: string; userId: string; joined?: string[] }) => {
+          if (event.callId !== callId) return;
+          if (event.joined) {
+            setCall(prev => prev ? { ...prev, joined: event.joined! } : prev);
+          }
+          if (joined.target.kind === 'group') {
+            const peer = peersRef.current.get(event.userId);
+            if (peer) { peer.close(); peersRef.current.delete(event.userId); }
+            pendingCandidatesRef.current.delete(event.userId);
+            setRemoteStreams(prev => {
+              const next = new Map(prev);
+              next.delete(event.userId);
+              return next;
             });
+          } else if (event.userId !== myUserId) {
+            closeCall(false);
           }
         });
 
-        const on1on1ConnChange = () => {
-          if (!active || ending.current) return;
-          const conn = peer.connectionState;
-          const ice = peer.iceConnectionState;
-          if (conn === 'connected' || ice === 'connected' || ice === 'completed') {
-            setStatus('Connected');
-            setTimeout(() => {
-              applyCallAudioRoute(speakerOnRef.current);
-            }, 100);
-          } else if (conn === 'failed' || ice === 'failed') {
-            setStatus('Connection failed.');
-          } else if (conn === 'disconnected' || ice === 'disconnected') {
-            setStatus('Reconnecting…');
-          } else {
-            setStatus('Connecting…');
-          }
-        };
-        listen.addEventListener('connectionstatechange', on1on1ConnChange);
-        listen.addEventListener('iceconnectionstatechange', on1on1ConnChange);
+        socket.on('call:ended', (event: { callId: string }) => {
+          if (event.callId === callId) closeCall(false);
+        });
 
-        // Drain any signals received while acquiring media
-        for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
+        // Announce ready to peers
+        setStatus(joined.target.kind === 'group' ? 'Waiting for others…' : (paramRole === 'caller' ? 'Calling…' : 'Connecting…'));
+        socket.emit('call:ready', callId);
 
-        if (role === 'caller') {
-          if (readyPeer.current) {
-            void startOffer(readyPeer.current);
-          } else {
-            setStatus('Calling…');
-            socket.emit('call:ready', callId);
-            setTimeout(() => {
-              if (active && pc.current && !offered.current && targetPeerId) {
-                console.log('[Call] Initiating offer via fallback to', targetPeerId);
-                void startOffer(targetPeerId);
-              }
-            }, 2500);
-          }
-        } else {
-          setStatus('Connecting…');
-          socket.emit('call:ready', callId);
-          if (readyPeer.current) {
-            socket.emit('call:ready', callId);
+        // Initiate offers for peers that have already joined where myUserId < peerId
+        for (const memberId of joined.joined) {
+          if (memberId !== myUserId && myUserId < memberId) {
+            getOrCreatePeer(memberId, iceServers, true);
           }
         }
       } catch (error) {
-        if (active) setStatus(error instanceof Error ? error.message : 'Call failed.');
+        if (activeRef.current) setStatus(error instanceof Error ? error.message : 'Call failed.');
       }
     })();
 
     return () => {
-      active = false;
-      socket?.off('call:signal', onSignal);
-      socket?.off('call:participant-joined', onJoined);
-      socket?.off('call:ready', onReady);
-      socket?.off('call:ended', onEnded);
-      socket?.off('call:participant-left', onParticipantLeft);
-      void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
-      InCallManager.stop();
-      if (!ending.current) socket?.emit('call:leave', callId);
-      pc.current?.close(); pc.current = null;
-      groupPeers.current.forEach(p => p.close());
-      groupPeers.current.clear();
-      pendingGroupCandidates.current.clear();
-      localRef.current?.getTracks().forEach(track => track.stop()); localRef.current = null;
+      activeRef.current = false;
+      socket?.off('call:signal');
+      socket?.off('call:ready');
+      socket?.off('call:participant-joined');
+      socket?.off('call:participant-left');
+      socket?.off('call:ended');
+      closeCall(true);
     };
-  }, [callId]);
+  }, [callId, paramRole]);
 
+  // Controls
   const toggleMute = () => {
     const next = !mutedRef.current;
     mutedRef.current = next;
-    localRef.current?.getAudioTracks().forEach(track => { track.enabled = !next; });
+    localRef.current?.getAudioTracks().forEach(t => { t.enabled = !next; });
     setMuted(next);
-
-    // Root fix: when unmuting, WebRTC restarts AudioRecord.
-    // Re-assert route after 100ms so WebRTC does NOT kick audio to loudspeaker!
-    if (!next) {
-      setTimeout(() => {
-        applyCallAudioRoute(speakerOnRef.current);
-      }, 100);
-    }
   };
 
   const toggleCamera = async () => {
@@ -726,132 +484,133 @@ export default function CallScreen() {
 
     if (localRef.current) {
       const videoTracks = localRef.current.getVideoTracks();
+      // If no video track exists yet (call started as audio), acquire camera dynamically!
       if (videoTracks.length === 0 && !next) {
         try {
-          const videoStream = await mediaDevices.getUserMedia({ audio: false, video: true });
-          const track = videoStream.getVideoTracks()[0];
-          if (track) {
-            track.enabled = true;
-            localRef.current.addTrack(track);
-            if (pc.current) pc.current.addTrack(track, localRef.current);
-            groupPeers.current.forEach(peer => peer.addTrack(track, localRef.current!));
-            setLocal(localRef.current);
+          if (Platform.OS === 'android') {
+            await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA).catch(() => {});
           }
-        } catch (err) {
-          console.warn('Failed to enable camera:', err);
+          const videoStream = await mediaDevices.getUserMedia({
+            audio: false,
+            video: { facingMode: 'user', frameRate: 30 },
+          });
+          const vTrack = videoStream.getVideoTracks()[0];
+          if (vTrack) {
+            vTrack.enabled = true;
+            localRef.current.addTrack(vTrack);
+            setLocal(new MediaStream(localRef.current.getTracks()));
+
+            // Send new track to all peers & re-offer
+            peersRef.current.forEach(async (peer, peerId) => {
+              try {
+                peer.addTrack(vTrack, localRef.current!);
+                if (peer.signalingState === 'stable') {
+                  const offer = await peer.createOffer();
+                  await peer.setLocalDescription(offer);
+                  getActiveSocket()?.emit('call:signal', {
+                    callId,
+                    to: peerId,
+                    signal: { type: 'offer', sdp: offer.sdp ?? '' },
+                  });
+                }
+              } catch {}
+            });
+          }
+        } catch {
+          cameraOffRef.current = true;
+          setCameraOff(true);
         }
       } else {
-        videoTracks.forEach(track => { track.enabled = !next; });
+        videoTracks.forEach(t => { t.enabled = !next; });
+        setLocal(new MediaStream(localRef.current.getTracks()));
       }
     }
   };
 
   const flipCamera = () => {
-    const videoTrack = localRef.current?.getVideoTracks()[0];
-    if (videoTrack && typeof (videoTrack as any)._switchCamera === 'function') {
-      (videoTrack as any)._switchCamera();
+    const track = localRef.current?.getVideoTracks()[0];
+    if (track && typeof (track as any)._switchCamera === 'function') {
+      (track as any)._switchCamera();
     }
   };
 
   const toggleSpeaker = () => {
     const next = !speakerOnRef.current;
-    applyCallAudioRoute(next);
-    if (next) {
-      showRouteToast('🔊 Loud Speaker Active');
-    } else if (isHeadsetConnectedRef.current) {
-      showRouteToast('🎧 Earphones Audio Active');
-    } else {
-      showRouteToast('👂 Normal Speaker (Earpiece)');
-    }
+    applyAudioRoute(next);
+    showRouteToast(next ? '🔊 Loud Speaker Active' : isHeadsetConnectedRef.current ? '🎧 Earphones Active' : '👂 Normal Speaker Active');
   };
 
   const endCall = () => {
-    if (closeRef.current) {
-      closeRef.current(true);
-    } else {
-      ending.current = true;
-      void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
-      InCallManager.setForceSpeakerphoneOn(false);
-      InCallManager.stop();
-      if (callId) {
-        const socket = getActiveSocket();
-        if (socket?.connected) socket.emit('call:leave', callId);
-        else void getRealtimeSocket().then(live => live.emit('call:leave', callId)).catch(() => {});
-      }
-      safeExit();
-    }
+    if (closeRef.current) closeRef.current(true);
+    else safeExit();
   };
 
-  const videoTracks = groupTracks.filter(track => track.kind === 'video');
-  const audioTracks = groupTracks.filter(track => track.kind === 'audio');
-  const isVideoCall =
-    call?.media === 'video' ||
-    paramMedia === 'video' ||
-    videoTracks.length > 0 ||
-    (!cameraOff && Boolean(local?.getVideoTracks().length));
-  const isGroup = call?.target.kind === 'group' || groupTracks.length > 0;
-  const isDirect1on1Video = !isGroup && isVideoCall;
+  // Layout calculations
+  const isGroup = call?.target.kind === 'group';
   const displayName = name || (isGroup ? 'Group Call' : 'ADDA Call');
-  const groupMembers = isGroup ? (call?.joined?.length ? call.joined : call?.members || []) : [];
-  const participantIds = isGroup
-    ? Array.from(new Set([selfUserId, ...groupMembers, ...groupTracks.map(t => t.userId)].filter(Boolean)))
-    : [];
+  const isVideoCall = call?.media === 'video' || paramMedia === 'video' || (!cameraOff && Boolean(local?.getVideoTracks().length));
+  const remoteEntries = Array.from(remoteStreams.entries());
+  const firstRemoteStream = remoteEntries[0]?.[1];
+  const participantIds = Array.from(new Set([
+    ...(selfUserId ? [selfUserId] : []),
+    ...(call?.joined ?? []),
+    ...remoteEntries.map(([id]) => id),
+  ]));
 
-  // Compute WhatsApp-style smart responsive grid tile dimensions
-  const getGridTileStyle = (index: number, total: number) => {
-    if (total <= 1) {
-      return styles.tileFull;
-    }
-    if (total === 2) {
-      return styles.tileHalfVertical;
-    }
-    if (total === 3) {
-      if (index === 0) return styles.tileHalfVertical;
-      return styles.tileQuarter;
-    }
-    if (total === 4) {
-      return styles.tileQuarter;
-    }
+  const getGridTileStyle = (idx: number, total: number) => {
+    if (total <= 1) return styles.tileFull;
+    if (total === 2) return styles.tileHalfVertical;
+    if (total <= 4) return styles.tileQuarter;
     if (total <= 6) return styles.tileSixth;
-    if (total <= 8) return styles.tileEighth;
-    return styles.tileTenth;
+    return styles.tileEighth;
   };
 
   return (
     <View style={styles.container}>
-      {/* ========================================================
-          VIDEO CONTENT (1:1 or WhatsApp Smart Adaptive Grid)
-          ======================================================== */}
+      {/* Media Stage */}
       {isVideoCall ? (
         <View style={styles.videoStage}>
-          {isDirect1on1Video ? (
+          {!isGroup ? (
             // 1:1 Video Call
-            remote && remote.getVideoTracks().length > 0 ? (
-              <RTCView streamURL={remote.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" zOrder={0} />
+            firstRemoteStream && firstRemoteStream.getVideoTracks().length > 0 ? (
+              <RTCView streamURL={firstRemoteStream.toURL()} style={styles.fillAbsolute} objectFit="cover" zOrder={0} />
             ) : (
               <View style={styles.audioCenterStage}>
                 <View style={styles.largeAvatarCircle}>
                   <Text style={styles.largeAvatarText}>{displayName[0]?.toUpperCase() || 'A'}</Text>
                 </View>
                 <Text style={styles.audioCallerName}>{displayName}</Text>
-                <Text style={styles.audioCallTimer}>{status === 'Connected' ? (remote ? 'Camera off' : 'Connecting video…') : status}</Text>
+                <Text style={styles.audioCallTimer}>{status === 'Connected' ? (firstRemoteStream ? 'Camera off' : 'Connecting video…') : status}</Text>
               </View>
             )
-          ) : participantIds.length > 0 ? (
-            // Group Video Call: Dynamic WhatsApp full-screen responsive grid
+          ) : (
+            // Group Video Call: WhatsApp adaptive grid
             <View style={styles.fullGridContainer}>
               {participantIds.map((userId, idx) => {
                 const ownTile = userId === selfUserId;
-                const userVideo = videoTracks.find(t => t.userId === userId);
-                const tileStream = ownTile ? local : (userVideo?.stream || groupTracks.find(t => t.userId === userId)?.stream);
+                const tileStream = ownTile ? local : remoteStreams.get(userId);
                 const hasVideo = ownTile
                   ? (!cameraOff && Boolean(local?.getVideoTracks().length))
-                  : Boolean(userVideo && userVideo.stream.getVideoTracks().length > 0);
+                  : Boolean(tileStream && tileStream.getVideoTracks().length > 0);
                 const participantName = ownTile ? 'You' : userNames[userId] || `User ${userId.slice(0, 4)}`;
+
                 return (
-                  <View key={userId} style={[styles.gridTile, getGridTileStyle(idx, participantIds.length)]}>
+                  <View
+                    key={userId}
+                    style={[
+                      styles.gridTile,
+                      getGridTileStyle(idx, participantIds.length),
+                      tileStream && hasVideo ? styles.gridTileVideoActive : null,
+                    ]}
+                  >
                     {tileStream && hasVideo ? (
-                      <RTCView streamURL={tileStream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={ownTile} zOrder={ownTile ? 1 : 0} />
+                      <RTCView
+                        streamURL={tileStream.toURL()}
+                        style={styles.fillAbsolute}
+                        objectFit="cover"
+                        mirror={ownTile}
+                        zOrder={0}
+                      />
                     ) : (
                       <View style={styles.audioCardAvatarTile}>
                         <View style={styles.audioCardAvatar}>
@@ -866,32 +625,19 @@ export default function CallScreen() {
                       </View>
                     )}
                     <View style={styles.tileBadge}>
-                      <Text style={styles.tileBadgeText} numberOfLines={1}>
-                        {participantName}
-                      </Text>
+                      <Text style={styles.tileBadgeText} numberOfLines={1}>{participantName}</Text>
                     </View>
                   </View>
                 );
               })}
             </View>
-          ) : (
-            // Waiting for others to join in group call
-            <View style={styles.audioCenterStage}>
-              <View style={styles.largeAvatarCircle}>
-                <Text style={styles.largeAvatarText}>{displayName[0]?.toUpperCase() || 'A'}</Text>
-              </View>
-              <Text style={styles.audioCallerName}>{displayName}</Text>
-              <Text style={styles.audioCallTimer}>
-                {status === 'Connected' ? 'Waiting for others to join…' : status}
-              </Text>
-            </View>
           )}
 
-          {/* 1:1 or Group Floating PiP Preview (Top-Right) */}
+          {/* 1:1 Floating PiP Preview */}
           {!isGroup && local && (
             <Pressable onPress={flipCamera} style={[styles.pipContainer, { top: insets.top + 70 }]}>
               {!cameraOff && local.getVideoTracks().length > 0 ? (
-                <RTCView streamURL={local.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={true} zOrder={1} />
+                <RTCView streamURL={local.toURL()} style={styles.fillAbsolute} objectFit="cover" mirror zOrder={1} />
               ) : (
                 <View style={styles.pipCameraOffView}>
                   <User size={26} color="#8E9BA8" />
@@ -905,31 +651,23 @@ export default function CallScreen() {
           )}
         </View>
       ) : (
-        /* ========================================================
-           AUDIO CALL SMART GRID / CENTERING
-           ======================================================== */
+        /* Audio Call Stage */
         <View style={styles.audioStage}>
           {isGroup && participantIds.length > 0 ? (
-            // Group Audio Grid (WhatsApp style full tiles)
             <View style={styles.fullGridContainer}>
               {participantIds.map((userId, idx) => {
                 const participantName = userId === selfUserId ? 'You' : userNames[userId] || `User ${userId.slice(0, 4)}`;
                 return (
                   <View key={userId} style={[styles.audioGridTile, getGridTileStyle(idx, participantIds.length)]}>
                     <View style={styles.audioCardAvatar}>
-                      <Text style={styles.audioCardAvatarText}>
-                        {(participantName[0] || 'U').toUpperCase()}
-                      </Text>
+                      <Text style={styles.audioCardAvatarText}>{(participantName[0] || 'U').toUpperCase()}</Text>
                     </View>
-                    <Text style={styles.audioCardName} numberOfLines={1}>
-                      {participantName}
-                    </Text>
+                    <Text style={styles.audioCardName} numberOfLines={1}>{participantName}</Text>
                   </View>
                 );
               })}
             </View>
           ) : (
-            // 1:1 Audio Call Central Display
             <View style={styles.audioCenterStage}>
               <View style={styles.pulseRing}>
                 <View style={styles.largeAvatarCircle}>
@@ -943,15 +681,15 @@ export default function CallScreen() {
         </View>
       )}
 
-      {/* ========================================================
-          TOP HEADER OVERLAY (Call Info, Encrypted Badge, Timer)
-          ======================================================== */}
+      {/* Top Header */}
       <View style={[styles.topHeader, { top: insets.top + 10 }]}>
         <View style={styles.headerInfoPill}>
-          {!isGroup && <View style={styles.encryptedRow}>
-            <Lock size={12} color="#34D399" style={{ marginRight: 4 }} />
-            <Text style={styles.encryptedText}>End-to-end encrypted</Text>
-          </View>}
+          {!isGroup && (
+            <View style={styles.encryptedRow}>
+              <Lock size={12} color="#34D399" style={{ marginRight: 4 }} />
+              <Text style={styles.encryptedText}>End-to-end encrypted</Text>
+            </View>
+          )}
           <Text style={styles.headerTitle} numberOfLines={1}>{displayName}</Text>
           <Text style={styles.headerSubtitle}>
             {status === 'Connected'
@@ -961,9 +699,7 @@ export default function CallScreen() {
         </View>
       </View>
 
-      {/* ========================================================
-          BOTTOM FLOATING ACTION BAR (WhatsApp Call Controls)
-          ======================================================== */}
+      {/* Bottom Floating Control Bar */}
       <View style={[styles.bottomBarContainer, { bottom: Math.max(insets.bottom, 20) + 12 }]}>
         {routeToast && (
           <View style={styles.routeToastPill}>
@@ -971,59 +707,28 @@ export default function CallScreen() {
           </View>
         )}
         <View style={styles.bottomBarPill}>
-          {/* Mute Button */}
-          <Pressable
-            accessibilityLabel={muted ? 'Unmute' : 'Mute'}
-            onPress={toggleMute}
-            style={[styles.controlBtn, muted && styles.controlBtnActiveRed]}
-          >
+          <Pressable onPress={toggleMute} style={[styles.controlBtn, muted && styles.controlBtnActiveRed]}>
             {muted ? <MicOff size={22} color="#FFFFFF" /> : <Mic size={22} color="#FFFFFF" />}
           </Pressable>
 
-          {/* Video Toggle Button (Turn camera on/off - unhide/hide) */}
-          <Pressable
-            accessibilityLabel={cameraOff ? 'Turn camera on' : 'Turn camera off'}
-            onPress={toggleCamera}
-            style={[styles.controlBtn, cameraOff && styles.controlBtnActiveRed]}
-          >
+          <Pressable onPress={toggleCamera} style={[styles.controlBtn, cameraOff && styles.controlBtnActiveRed]}>
             {cameraOff ? <VideoOff size={22} color="#FFFFFF" /> : <Video size={22} color="#FFFFFF" />}
           </Pressable>
 
-          {/* Flip Camera Button (when camera is on) */}
           {!cameraOff && (
-            <Pressable
-              accessibilityLabel="Flip camera"
-              onPress={flipCamera}
-              style={styles.controlBtn}
-            >
+            <Pressable onPress={flipCamera} style={styles.controlBtn}>
               <SwitchCamera size={22} color="#FFFFFF" />
             </Pressable>
           )}
 
-          {/* Speakerphone / Normal Speaker Toggle Button */}
           <Pressable
-            accessibilityLabel={speakerOn ? 'Switch to normal speaker' : 'Switch to loud speaker'}
             onPress={toggleSpeaker}
-            style={[
-              styles.controlBtn,
-              speakerOn ? styles.controlBtnActiveGreen : isHeadsetConnected ? styles.controlBtnActiveCyan : styles.controlBtn,
-            ]}
+            style={[styles.controlBtn, speakerOn ? styles.controlBtnActiveGreen : isHeadsetConnected ? styles.controlBtnActiveCyan : styles.controlBtn]}
           >
-            {speakerOn ? (
-              <Volume2 size={22} color="#FFFFFF" />
-            ) : isHeadsetConnected ? (
-              <Headphones size={22} color="#FFFFFF" />
-            ) : (
-              <Volume1 size={22} color="#FFFFFF" />
-            )}
+            {speakerOn ? <Volume2 size={22} color="#FFFFFF" /> : isHeadsetConnected ? <Headphones size={22} color="#FFFFFF" /> : <Volume1 size={22} color="#FFFFFF" />}
           </Pressable>
 
-          {/* End Call Button */}
-          <Pressable
-            accessibilityLabel="End call"
-            onPress={endCall}
-            style={[styles.controlBtn, styles.hangupBtn]}
-          >
+          <Pressable onPress={endCall} style={[styles.controlBtn, styles.hangupBtn]}>
             <PhoneOff size={24} color="#FFFFFF" />
           </Pressable>
         </View>
@@ -1033,294 +738,54 @@ export default function CallScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0A1711',
-  },
-  videoStage: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: '#0A1711',
-  },
-  audioStage: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: '#0D2018',
-  },
-  fullGridContainer: {
-    ...StyleSheet.absoluteFill,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-  },
-  gridTile: {
-    backgroundColor: '#12251D',
-    overflow: 'hidden',
-    borderColor: '#0A1711',
-    borderWidth: 1.5,
-  },
-  tileFull: {
-    width: '100%',
-    height: '100%',
-  },
-  tileHalfVertical: {
-    width: '100%',
-    height: '50%',
-  },
-  tileQuarter: {
-    width: '50%',
-    height: '50%',
-  },
-  tileSixth: {
-    width: '50%',
-    height: '33.33%',
-  },
-  tileEighth: {
-    width: '50%',
-    height: '25%',
-  },
-  tileTenth: {
-    width: '50%',
-    height: '20%',
-  },
-  tileBadge: {
-    position: 'absolute',
-    left: 10,
-    bottom: 10,
-    backgroundColor: 'rgba(0, 0, 0, 0.65)',
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: 10,
-  },
-  tileBadgeText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '700',
-  },
+  container: { flex: 1, backgroundColor: '#0A1711' },
+  fillAbsolute: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+  videoStage: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'transparent' },
+  audioStage: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#0D2018' },
+  fullGridContainer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, flexDirection: 'row', flexWrap: 'wrap' },
+  gridTile: { backgroundColor: '#12251D', overflow: 'hidden', borderColor: '#0A1711', borderWidth: 1.5 },
+  gridTileVideoActive: { backgroundColor: 'transparent' },
+  tileFull: { width: '100%', height: '100%' },
+  tileHalfVertical: { width: '100%', height: '50%' },
+  tileQuarter: { width: '50%', height: '50%' },
+  tileSixth: { width: '50%', height: '33.33%' },
+  tileEighth: { width: '50%', height: '25%' },
+  tileBadge: { position: 'absolute', left: 10, bottom: 10, backgroundColor: 'rgba(0, 0, 0, 0.65)', paddingHorizontal: 9, paddingVertical: 4, borderRadius: 10, zIndex: 10, elevation: 5 },
+  tileBadgeText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
   pipContainer: {
-    position: 'absolute',
-    right: 16,
-    width: 105,
-    height: 155,
-    borderRadius: 16,
-    borderWidth: 2,
-    borderColor: 'rgba(255, 255, 255, 0.45)',
-    overflow: 'hidden',
-    backgroundColor: '#183327',
-    elevation: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 8,
+    position: 'absolute', right: 16, width: 105, height: 155, borderRadius: 16, borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.45)', overflow: 'hidden', backgroundColor: '#183327', elevation: 15, zIndex: 100,
   },
-  pipBadge: {
-    position: 'absolute',
-    bottom: 6,
-    left: 6,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  pipBadgeText: {
-    color: '#FFFFFF',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  pipCameraOffView: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: '#0F261C',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-  },
-  pipCameraOffText: {
-    color: '#8E9BA8',
-    fontSize: 9,
-    fontWeight: '600',
-  },
-  audioCardAvatarTile: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: '#12251D',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cameraOffPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.55)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
-    marginTop: 6,
-  },
-  cameraOffPillText: {
-    color: '#D1D5DB',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  audioCenterStage: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pulseRing: {
-    width: 150,
-    height: 150,
-    borderRadius: 75,
-    backgroundColor: 'rgba(38, 166, 122, 0.15)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 24,
-  },
-  largeAvatarCircle: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    backgroundColor: '#1C3D2F',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 3,
-    borderColor: '#34D399',
-  },
-  largeAvatarText: {
-    color: '#FFFFFF',
-    fontSize: 54,
-    fontWeight: '700',
-  },
-  audioCallerName: {
-    color: '#FFFFFF',
-    fontSize: 26,
-    fontWeight: '800',
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  audioCallTimer: {
-    color: '#34D399',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  audioGridTile: {
-    backgroundColor: '#142920',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderColor: '#0A1711',
-    borderWidth: 1.5,
-  },
-  audioCardAvatar: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: '#204334',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#34D399',
-    marginBottom: 10,
-  },
-  audioCardAvatarText: {
-    color: '#FFFFFF',
-    fontSize: 30,
-    fontWeight: '700',
-  },
-  audioCardName: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '700',
-    maxWidth: '80%',
-    textAlign: 'center',
-  },
-  topHeader: {
-    position: 'absolute',
-    left: 20,
-    right: 20,
-    alignItems: 'center',
-  },
-  headerInfoPill: {
-    backgroundColor: 'rgba(10, 23, 17, 0.78)',
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  encryptedRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 2,
-  },
-  encryptedText: {
-    color: '#34D399',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  headerTitle: {
-    color: '#FFFFFF',
-    fontSize: 17,
-    fontWeight: '800',
-  },
-  headerSubtitle: {
-    color: 'rgba(255, 255, 255, 0.75)',
-    fontSize: 13,
-    fontWeight: '600',
-    marginTop: 2,
-  },
-  bottomBarContainer: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-  },
-  bottomBarPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(13, 28, 21, 0.92)',
-    borderRadius: 36,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    gap: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.15)',
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 8,
-  },
-  controlBtn: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  controlBtnActiveRed: {
-    backgroundColor: '#EF4444',
-  },
-  controlBtnActiveGreen: {
-    backgroundColor: '#059669',
-  },
-  controlBtnActiveCyan: {
-    backgroundColor: '#0284C7',
-  },
-  hangupBtn: {
-    backgroundColor: '#DC2626',
-    width: 54,
-    height: 54,
-    borderRadius: 27,
-  },
-  routeToastPill: {
-    backgroundColor: 'rgba(10, 23, 17, 0.90)',
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#34D399',
-    alignSelf: 'center',
-  },
-  routeToastText: {
-    color: '#34D399',
-    fontSize: 13,
-    fontWeight: '700',
-  },
+  pipBadge: { position: 'absolute', bottom: 6, left: 6, backgroundColor: 'rgba(0, 0, 0, 0.6)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, zIndex: 10 },
+  pipBadgeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '700' },
+  pipCameraOffView: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#0F261C', alignItems: 'center', justifyContent: 'center', gap: 4 },
+  pipCameraOffText: { color: '#8E9BA8', fontSize: 9, fontWeight: '600' },
+  audioCardAvatarTile: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#12251D', alignItems: 'center', justifyContent: 'center' },
+  cameraOffPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0, 0, 0, 0.55)', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, marginTop: 6 },
+  cameraOffPillText: { color: '#D1D5DB', fontSize: 11, fontWeight: '600' },
+  audioCenterStage: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  pulseRing: { width: 150, height: 150, borderRadius: 75, backgroundColor: 'rgba(38, 166, 122, 0.15)', alignItems: 'center', justifyContent: 'center', marginBottom: 24 },
+  largeAvatarCircle: { width: 120, height: 120, borderRadius: 60, backgroundColor: '#1C3D2F', alignItems: 'center', justifyContent: 'center', borderWidth: 3, borderColor: '#34D399' },
+  largeAvatarText: { color: '#FFFFFF', fontSize: 54, fontWeight: '700' },
+  audioCallerName: { color: '#FFFFFF', fontSize: 26, fontWeight: '800', marginBottom: 8, textAlign: 'center' },
+  audioCallTimer: { color: '#34D399', fontSize: 16, fontWeight: '600' },
+  audioGridTile: { backgroundColor: '#142920', alignItems: 'center', justifyContent: 'center', borderColor: '#0A1711', borderWidth: 1.5 },
+  audioCardAvatar: { width: 72, height: 72, borderRadius: 36, backgroundColor: '#204334', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#34D399', marginBottom: 10 },
+  audioCardAvatarText: { color: '#FFFFFF', fontSize: 30, fontWeight: '700' },
+  audioCardName: { color: '#FFFFFF', fontSize: 14, fontWeight: '700', maxWidth: '80%', textAlign: 'center' },
+  topHeader: { position: 'absolute', left: 20, right: 20, alignItems: 'center', zIndex: 9999, elevation: 30 },
+  headerInfoPill: { backgroundColor: 'rgba(10, 23, 17, 0.78)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8, alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)' },
+  encryptedRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 2 },
+  encryptedText: { color: '#34D399', fontSize: 11, fontWeight: '600' },
+  headerTitle: { color: '#FFFFFF', fontSize: 17, fontWeight: '800', textAlign: 'center' },
+  headerSubtitle: { color: 'rgba(255, 255, 255, 0.75)', fontSize: 13, fontWeight: '600', marginTop: 2 },
+  bottomBarContainer: { position: 'absolute', left: 0, right: 0, alignItems: 'center', zIndex: 9999, elevation: 30 },
+  bottomBarPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(13, 28, 21, 0.92)', borderRadius: 36, paddingHorizontal: 18, paddingVertical: 12, gap: 16, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.15)', elevation: 30 },
+  controlBtn: { width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(255, 255, 255, 0.15)', alignItems: 'center', justifyContent: 'center' },
+  controlBtnActiveRed: { backgroundColor: '#EF4444' },
+  controlBtnActiveGreen: { backgroundColor: '#059669' },
+  controlBtnActiveCyan: { backgroundColor: '#0284C7' },
+  hangupBtn: { backgroundColor: '#DC2626', width: 54, height: 54, borderRadius: 27 },
+  routeToastPill: { backgroundColor: 'rgba(10, 23, 17, 0.90)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8, marginBottom: 12, borderWidth: 1, borderColor: '#34D399', alignSelf: 'center' },
+  routeToastText: { color: '#34D399', fontSize: 13, fontWeight: '700' },
 });

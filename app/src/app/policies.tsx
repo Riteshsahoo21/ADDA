@@ -3,7 +3,7 @@ import { ActivityIndicator, Alert, Linking, Pressable, ScrollView, StyleSheet, T
 import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '@/constants/theme';
-import { API_BASE_URL } from '@/lib/auth-client';
+import { LEGAL_BASE_URL } from '@/lib/auth-client';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
 import { disconnectRealtime, getRealtimeSocket } from '@/lib/realtime';
 import { getCachedProfile, setCachedProfile } from '@/lib/encrypted-chat';
@@ -25,7 +25,7 @@ export default function PoliciesScreen() {
     }).catch(error => Alert.alert('Could not load rules', error instanceof Error ? error.message : 'Please try again.'));
   }, []);
 
-  const open = (path: string) => void Linking.openURL(`${API_BASE_URL}${path}`);
+  const open = (path: string) => void Linking.openURL(`${LEGAL_BASE_URL}${path}`);
   const accept = async () => {
     if (!version || !agreed || busy) return;
     setBusy(true);

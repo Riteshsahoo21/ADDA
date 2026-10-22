@@ -3,7 +3,7 @@ import { FriendQr } from '@/components/ui/FriendQr';
 import { colors } from '@/constants/theme';
 import { useSession } from '@/context/session';
 import { deleteEncryptedChatAccountData, getCachedProfile, setCachedProfile } from '@/lib/encrypted-chat';
-import { API_BASE_URL } from '@/lib/auth-client';
+import { LEGAL_BASE_URL } from '@/lib/auth-client';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
 import { getCachedSocialBundle, updateCachedProfile } from '@/lib/social-cache';
 import * as ImagePicker from 'expo-image-picker';
@@ -362,9 +362,9 @@ export default function ProfileScreen() {
 
         <View style={styles.safetySection}>
           <Text style={styles.qrTitle}>Safety and privacy</Text>
-          <Pressable onPress={() => void Linking.openURL(`${API_BASE_URL}/community-guidelines`)}><Text style={styles.safetyLink}>Community Guidelines</Text></Pressable>
-          <Pressable onPress={() => void Linking.openURL(`${API_BASE_URL}/terms`)}><Text style={styles.safetyLink}>Terms of Use</Text></Pressable>
-          <Pressable onPress={() => void Linking.openURL(`${API_BASE_URL}/privacy`)}><Text style={styles.safetyLink}>Privacy Policy</Text></Pressable>
+          <Pressable onPress={() => void Linking.openURL(`${LEGAL_BASE_URL}/community-guidelines`)}><Text style={styles.safetyLink}>Community Guidelines</Text></Pressable>
+          <Pressable onPress={() => void Linking.openURL(`${LEGAL_BASE_URL}/terms`)}><Text style={styles.safetyLink}>Terms of Use</Text></Pressable>
+          <Pressable onPress={() => void Linking.openURL(`${LEGAL_BASE_URL}/privacy`)}><Text style={styles.safetyLink}>Privacy Policy</Text></Pressable>
           <Text style={styles.safetyCaption}>Blocked users cannot add, message, or call you directly.</Text>
           {blockedUsers.map(item => <View key={item.id} style={styles.blockRow}>
             <Text style={styles.blockName}>@{item.username}</Text>
