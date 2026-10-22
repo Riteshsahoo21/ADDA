@@ -807,11 +807,12 @@ export default function HangoutScreen() {
       void PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT).catch(() => {});
     }
 
-    // 2. Start InCallManager with audio media (room is proximity voice chat, auto starts Bluetooth SCO manager)
+    // 2. Ensure speakerphone is active for room spatial audio without stealing exclusive voice call focus
     try {
-      InCallManager.start({ media: 'audio', auto: true });
+      InCallManager.setForceSpeakerphoneOn(true);
+      InCallManager.setSpeakerphoneOn(true);
     } catch (e) {
-      console.warn('[ADDA Hangout] InCallManager start error:', e);
+      console.warn('[ADDA Hangout] speaker route error:', e);
     }
 
     // Initial check for wired earphones

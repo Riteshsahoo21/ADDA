@@ -31,7 +31,7 @@ import {
   RTCPeerConnection,
   RTCSessionDescription,
   RTCView,
-  type MediaStream,
+  MediaStream,
 } from 'react-native-webrtc';
 import InCallManager from 'react-native-incall-manager';
 import { useKeepAwake } from 'expo-keep-awake';
@@ -343,17 +343,26 @@ export default function CallScreen() {
         if (s && active) {
           setGroupTracks(prev => {
             const existing = prev.filter(t => t.userId !== peerUserId || t.kind !== event.track.kind);
-            return [...existing, { id: event.track.id, kind: event.track.kind as 'audio' | 'video', stream: s, userId: peerUserId }];
+            return [...existing, { id: event.track.id, kind: event.track.kind as 'audio' | 'video', stream: new MediaStream(s.getTracks()), userId: peerUserId }];
+          });
+        } else if (event.track && active) {
+          setGroupTracks(prev => {
+            const existing = prev.filter(t => t.userId !== peerUserId || t.kind !== event.track.kind);
+            return [...existing, { id: event.track.id, kind: event.track.kind as 'audio' | 'video', stream: new MediaStream([event.track]), userId: peerUserId }];
           });
         }
       });
 
-      listen.addEventListener('connectionstatechange', () => {
+      const onGroupConnChange = () => {
         if (!active || ending.current) return;
-        if (peer!.connectionState === 'connected') {
+        const conn = peer!.connectionState;
+        const ice = peer!.iceConnectionState;
+        if (conn === 'connected' || ice === 'connected' || ice === 'completed') {
           setStatus('Connected');
         }
-      });
+      };
+      listen.addEventListener('connectionstatechange', onGroupConnChange);
+      listen.addEventListener('iceconnectionstatechange', onGroupConnChange);
 
       if (isInitiator) {
         try {
@@ -617,27 +626,37 @@ export default function CallScreen() {
         });
 
         listen.addEventListener('track', (event: any) => {
+          if (!active) return;
           const s = event.streams?.[0];
-          if (s && active) {
-            setRemote(s);
+          if (s) {
+            setRemote(new MediaStream(s.getTracks()));
+          } else if (event.track) {
+            setRemote(prev => {
+              const currentTracks = prev ? prev.getTracks().filter(t => t.id !== event.track.id) : [];
+              return new MediaStream([...currentTracks, event.track]);
+            });
           }
         });
 
-        listen.addEventListener('connectionstatechange', () => {
+        const on1on1ConnChange = () => {
           if (!active || ending.current) return;
-          if (peer.connectionState === 'connected') {
+          const conn = peer.connectionState;
+          const ice = peer.iceConnectionState;
+          if (conn === 'connected' || ice === 'connected' || ice === 'completed') {
             setStatus('Connected');
             setTimeout(() => {
               applyCallAudioRoute(speakerOnRef.current);
             }, 100);
-          } else if (peer.connectionState === 'failed') {
+          } else if (conn === 'failed' || ice === 'failed') {
             setStatus('Connection failed.');
-          } else if (peer.connectionState === 'disconnected') {
+          } else if (conn === 'disconnected' || ice === 'disconnected') {
             setStatus('Reconnecting…');
           } else {
             setStatus('Connecting…');
           }
-        });
+        };
+        listen.addEventListener('connectionstatechange', on1on1ConnChange);
+        listen.addEventListener('iceconnectionstatechange', on1on1ConnChange);
 
         // Drain any signals received while acquiring media
         for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
@@ -773,7 +792,10 @@ export default function CallScreen() {
   const isGroup = call?.target.kind === 'group' || groupTracks.length > 0;
   const isDirect1on1Video = !isGroup && isVideoCall;
   const displayName = name || (isGroup ? 'Group Call' : 'ADDA Call');
-  const participantIds = Array.from(new Set([...groupTracks.map(t => t.userId), ...(isGroup && selfUserId ? [selfUserId] : [])]));
+  const groupMembers = isGroup ? (call?.joined?.length ? call.joined : call?.members || []) : [];
+  const participantIds = isGroup
+    ? Array.from(new Set([selfUserId, ...groupMembers, ...groupTracks.map(t => t.userId)].filter(Boolean)))
+    : [];
 
   // Compute WhatsApp-style smart responsive grid tile dimensions
   const getGridTileStyle = (index: number, total: number) => {
@@ -821,12 +843,15 @@ export default function CallScreen() {
               {participantIds.map((userId, idx) => {
                 const ownTile = userId === selfUserId;
                 const userVideo = videoTracks.find(t => t.userId === userId);
-                const tileStream = ownTile ? local : userVideo?.stream;
+                const tileStream = ownTile ? local : (userVideo?.stream || groupTracks.find(t => t.userId === userId)?.stream);
+                const hasVideo = ownTile
+                  ? (!cameraOff && Boolean(local?.getVideoTracks().length))
+                  : Boolean(userVideo && userVideo.stream.getVideoTracks().length > 0);
                 const participantName = ownTile ? 'You' : userNames[userId] || `User ${userId.slice(0, 4)}`;
                 return (
                   <View key={userId} style={[styles.gridTile, getGridTileStyle(idx, participantIds.length)]}>
-                    {tileStream && (ownTile ? !cameraOff : Boolean(userVideo)) ? (
-                      <RTCView streamURL={tileStream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={ownTile} zOrder={0} />
+                    {tileStream && hasVideo ? (
+                      <RTCView streamURL={tileStream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={ownTile} zOrder={ownTile ? 1 : 0} />
                     ) : (
                       <View style={styles.audioCardAvatarTile}>
                         <View style={styles.audioCardAvatar}>
