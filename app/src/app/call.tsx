@@ -24,7 +24,6 @@ import {
   VideoOff,
   Volume1,
   Volume2,
-  VolumeX,
 } from 'lucide-react-native';
 import {
   mediaDevices,
@@ -32,20 +31,19 @@ import {
   RTCPeerConnection,
   RTCSessionDescription,
   RTCView,
-  MediaStream,
+  type MediaStream,
 } from 'react-native-webrtc';
 import InCallManager from 'react-native-incall-manager';
-import { WebView } from 'react-native-webview';
 import { useKeepAwake } from 'expo-keep-awake';
 import * as Notifications from 'expo-notifications';
-import { colors } from '@/constants/theme';
 import { callRequest, type CallInfo } from '@/lib/calls';
 import { getActiveSocket, getRealtimeSocket } from '@/lib/realtime';
 import { socialApi, type OwnProfile } from '@/lib/social-api';
 import { dismissCallNotification } from '@/lib/push-notifications';
 import { MusicService } from '@/audio/MusicService';
 
-type Signal = { type: 'offer' | 'answer'; sdp: string } | { candidate: object };
+type Signal = { type: 'offer' | 'answer'; sdp: string } | { candidate: any };
+type RemoteTrack = { id: string; kind: 'audio' | 'video'; stream: MediaStream; userId: string };
 const ONGOING_CALL_NOTIF_ID = 'adda_active_call_notification';
 
 function formatDuration(sec: number): string {
@@ -55,11 +53,16 @@ function formatDuration(sec: number): string {
 }
 
 export default function CallScreen() {
-  useKeepAwake(); // Keeps screen and phone alive while on call without touching
+  useKeepAwake();
 
   const insets = useSafeAreaInsets();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
-  const { callId, role, name, media: paramMedia } = useLocalSearchParams<{ callId?: string; role?: string; name?: string; media?: string }>();
+  const { callId, role: paramRole, name, media: paramMedia } = useLocalSearchParams<{
+    callId?: string;
+    role?: string;
+    name?: string;
+    media?: string;
+  }>();
 
   const initialCameraOff = paramMedia === 'audio';
   const [call, setCall] = useState<CallInfo | null>(null);
@@ -67,15 +70,14 @@ export default function CallScreen() {
   const [callDuration, setCallDuration] = useState(0);
   const [local, setLocal] = useState<MediaStream | null>(null);
   const [remote, setRemote] = useState<MediaStream | null>(null);
-  const [groupTracks, setGroupTracks] = useState<{ id: string; kind: 'audio' | 'video'; stream: MediaStream; userId: string }[]>([]);
+  const [groupTracks, setGroupTracks] = useState<RemoteTrack[]>([]);
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(initialCameraOff);
   const [speakerOn, setSpeakerOn] = useState(true);
   const [isHeadsetConnected, setIsHeadsetConnected] = useState(false);
   const [routeToast, setRouteToast] = useState<string | null>(null);
   const [userNames, setUserNames] = useState<Record<string, string>>({});
-  const [mirotalkUrl, setMirotalkUrl] = useState('');
-  const mirotalkWebView = useRef<WebView>(null);
+  const [selfUserId, setSelfUserId] = useState('');
 
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mutedRef = useRef(false);
@@ -84,6 +86,8 @@ export default function CallScreen() {
   const isBluetoothRef = useRef(false);
   const isHeadsetConnectedRef = useRef(false);
   const pc = useRef<RTCPeerConnection | null>(null);
+  const groupPeers = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const pendingGroupCandidates = useRef<Map<string, RTCIceCandidate[]>>(new Map());
   const localRef = useRef<MediaStream | null>(null);
   const pendingCandidates = useRef<RTCIceCandidate[]>([]);
   const pendingSignals = useRef<{ callId: string; from: string; signal: Signal }[]>([]);
@@ -127,11 +131,9 @@ export default function CallScreen() {
 
   // InCallManager audio session management
   useEffect(() => {
-    // Release any background music completely so Android audio focus belongs solely to the call (no dual volume sliders!)
     MusicService.stopAll();
     try { InCallManager.stopRingtone(); } catch {}
 
-    // 1. Request Bluetooth permission on Android 12+ so InCallManager can start Bluetooth SCO
     if (Platform.OS === 'android' && Number(Platform.Version) >= 31) {
       void PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT).catch(() => {});
     }
@@ -140,7 +142,6 @@ export default function CallScreen() {
     InCallManager.start({ media: isVideo ? 'video' : 'audio', auto: true });
     InCallManager.setKeepScreenOn(true);
 
-    // Initial check for earphones/headsets
     void InCallManager.getIsWiredHeadsetPluggedIn().then(({ isWiredHeadsetPluggedIn }) => {
       const hasHeadset = Boolean(isWiredHeadsetPluggedIn);
       setIsHeadsetConnected(hasHeadset);
@@ -148,12 +149,10 @@ export default function CallScreen() {
       if (hasHeadset) {
         applyCallAudioRoute(false);
       } else {
-        const defaultSpeaker = isVideo;
-        applyCallAudioRoute(defaultSpeaker);
+        applyCallAudioRoute(isVideo);
       }
     }).catch(() => {});
 
-    // Listen for real audio device changes (wired headset, Bluetooth, or speaker)
     const audioDeviceSub = DeviceEventEmitter.addListener('onAudioDeviceChanged', (data: { selectedAudioDevice?: string; availableAudioDeviceList?: string }) => {
       let hasBt = false;
       let hasWired = false;
@@ -252,7 +251,7 @@ export default function CallScreen() {
             data: {
               kind: 'call',
               callId,
-              role,
+              role: paramRole || 'callee',
               name: displayName,
               isOngoing: true,
             },
@@ -268,7 +267,7 @@ export default function CallScreen() {
       sub.remove();
       void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
     };
-  }, [callId, name, role, call, status, callDuration]);
+  }, [callId, name, paramRole, call, status, callDuration]);
 
   // WebRTC Call logic
   useEffect(() => {
@@ -276,22 +275,15 @@ export default function CallScreen() {
     let active = true;
     let socket: Awaited<ReturnType<typeof getRealtimeSocket>> | null = null;
     let currentCall: CallInfo | null = null;
-    let selfId: string | null = null;
-    let isCaller: boolean | null = null;
-    let applyingDescription = false;
-    let answeredOffer = false;
-    let connectionTimer: ReturnType<typeof setTimeout> | null = null;
-    const clearConnectionTimer = () => { if (connectionTimer) clearTimeout(connectionTimer); connectionTimer = null; };
-    const onLocalStream = (stream: MediaStream) => {
-      if (!active) return;
-      localRef.current = stream;
-      setLocal(stream);
-    };
+    let selfId: string = '';
+    let role: 'caller' | 'callee' = (paramRole as 'caller' | 'callee') || 'callee';
+    let targetPeerId: string = '';
+    let isGroup = false;
+    const groupReadyReplies = new Set<string>();
 
     const close = (leave: boolean) => {
       if (ending.current) return;
       ending.current = true;
-      clearConnectionTimer();
       void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
       InCallManager.stop();
       if (leave) {
@@ -300,6 +292,9 @@ export default function CallScreen() {
         else void getRealtimeSocket().then(live => live.emit('call:leave', callId)).catch(() => {});
       }
       pc.current?.close(); pc.current = null;
+      groupPeers.current.forEach(p => p.close());
+      groupPeers.current.clear();
+      pendingGroupCandidates.current.clear();
       localRef.current?.getTracks().forEach(track => track.stop()); localRef.current = null;
       if (active) safeExit();
     };
@@ -307,78 +302,153 @@ export default function CallScreen() {
 
     const sendSignal = (to: string, signal: Signal) => socket?.emit('call:signal', { callId, to, signal });
 
-    let otherPeerId: string | null = null;
-
+    // 1:1 Offer Creator (ONLY called when peer is confirmed ready)
     const startOffer = async (peerId: string) => {
       if (!pc.current || offered.current || pc.current.signalingState !== 'stable') return;
       offered.current = true;
       try {
-        const offer = await pc.current.createOffer({
-          offerToReceiveAudio: true,
-          offerToReceiveVideo: (currentCall?.media ?? paramMedia) === 'video',
-        });
+        const offer = await pc.current.createOffer();
         await pc.current.setLocalDescription(offer);
         sendSignal(peerId, { type: 'offer', sdp: offer.sdp ?? '' });
-        clearConnectionTimer();
       } catch (error) {
         offered.current = false;
         if (active) setStatus(error instanceof Error ? error.message : 'Could not start media.');
       }
     };
 
+    // Helper: Create peer connection for a group participant
+    const getOrCreateGroupPeer = async (peerUserId: string, iceServers: any[], isInitiator: boolean) => {
+      let peer = groupPeers.current.get(peerUserId);
+      if (peer) return peer;
+
+      peer = new RTCPeerConnection({ iceServers });
+      groupPeers.current.set(peerUserId, peer);
+
+      if (localRef.current) {
+        localRef.current.getTracks().forEach(track => {
+          peer!.addTrack(track, localRef.current!);
+        });
+      }
+
+      const listen = peer as unknown as { addEventListener: (type: string, listener: any) => void };
+      listen.addEventListener('icecandidate', (event: any) => {
+        if (event.candidate) {
+          const cand = typeof event.candidate.toJSON === 'function' ? event.candidate.toJSON() : event.candidate;
+          sendSignal(peerUserId, { candidate: cand });
+        }
+      });
+
+      listen.addEventListener('track', (event: any) => {
+        const s = event.streams?.[0];
+        if (s && active) {
+          setGroupTracks(prev => {
+            const existing = prev.filter(t => t.userId !== peerUserId || t.kind !== event.track.kind);
+            return [...existing, { id: event.track.id, kind: event.track.kind as 'audio' | 'video', stream: s, userId: peerUserId }];
+          });
+        }
+      });
+
+      listen.addEventListener('connectionstatechange', () => {
+        if (!active || ending.current) return;
+        if (peer!.connectionState === 'connected') {
+          setStatus('Connected');
+        }
+      });
+
+      if (isInitiator) {
+        try {
+          const offer = await peer.createOffer();
+          await peer.setLocalDescription(offer);
+          sendSignal(peerUserId, { type: 'offer', sdp: offer.sdp ?? '' });
+        } catch (err) {
+          console.warn('[Call] Group offer failed for peer:', peerUserId, err);
+        }
+      }
+
+      return peer;
+    };
+
+    // Signal Dispatcher (Handles both 1:1 and Group mesh signals)
     const onSignal = async (event: { callId: string; from: string; signal: Signal }) => {
       if (event.callId !== callId || ending.current) return;
-      if (!pc.current) { pendingSignals.current.push(event); return; }
+      // call:join can replay buffered signaling before profile and camera setup finish.
+      if (!currentCall || !localRef.current) {
+        pendingSignals.current.push(event);
+        return;
+      }
+
+      if (isGroup) {
+        // Group Mesh Signaling
+        try {
+        const config = await socialApi<{ iceServers: any[] }>('/calls/ice').catch(() => ({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }));
+        if ('candidate' in event.signal) {
+          const candidate = new RTCIceCandidate(event.signal.candidate as any);
+          const peer = groupPeers.current.get(event.from);
+          if (peer && peer.remoteDescription) {
+            await peer.addIceCandidate(candidate).catch(() => {});
+          } else {
+            if (!pendingGroupCandidates.current.has(event.from)) pendingGroupCandidates.current.set(event.from, []);
+            pendingGroupCandidates.current.get(event.from)!.push(candidate);
+          }
+          return;
+        }
+
+        if (event.signal.type === 'offer') {
+          let peer = groupPeers.current.get(event.from);
+          if (!peer) {
+            peer = await getOrCreateGroupPeer(event.from, config.iceServers, false);
+          }
+          await peer.setRemoteDescription(new RTCSessionDescription(event.signal as any));
+          const pending = pendingGroupCandidates.current.get(event.from) || [];
+          pendingGroupCandidates.current.delete(event.from);
+          for (const c of pending) await peer.addIceCandidate(c).catch(() => {});
+          const answer = await peer.createAnswer();
+          await peer.setLocalDescription(answer);
+          sendSignal(event.from, { type: 'answer', sdp: answer.sdp ?? '' });
+          return;
+        }
+
+        if (event.signal.type === 'answer') {
+          const peer = groupPeers.current.get(event.from);
+          if (peer && peer.signalingState === 'have-local-offer') {
+            await peer.setRemoteDescription(new RTCSessionDescription(event.signal as any));
+            const pending = pendingGroupCandidates.current.get(event.from) || [];
+            pendingGroupCandidates.current.delete(event.from);
+            for (const c of pending) await peer.addIceCandidate(c).catch(() => {});
+          }
+          return;
+        }
+        } catch (error) {
+          if (active) setStatus(error instanceof Error ? error.message : 'Could not connect group media.');
+        }
+        return;
+      }
+
+      // 1:1 Direct Call Signaling (Exact a2cdbdc flow)
+      if (!pc.current) {
+        pendingSignals.current.push(event);
+        return;
+      }
       try {
         if ('candidate' in event.signal) {
-          const candData = event.signal.candidate;
-          if (candData && typeof candData === 'object' && ('candidate' in candData ? candData.candidate !== '' : true)) {
-            try {
-              const candidate = new RTCIceCandidate(candData as any);
-              if (pc.current.remoteDescription) {
-                await pc.current.addIceCandidate(candidate).catch(() => {});
-              } else {
-                pendingCandidates.current.push(candidate);
-              }
-            } catch {}
+          const candidate = new RTCIceCandidate(event.signal.candidate as any);
+          if (pc.current.remoteDescription) {
+            await pc.current.addIceCandidate(candidate).catch(() => {});
+          } else {
+            pendingCandidates.current.push(candidate);
           }
           return;
         }
-        if (applyingDescription) {
-          setTimeout(() => { void onSignal(event); }, 100);
-          return;
-        }
-        if (event.signal.type === 'answer') {
-          if (pc.current.signalingState !== 'have-local-offer') {
-            setTimeout(() => { void onSignal(event); }, 100);
-            return;
-          }
-          applyingDescription = true;
-          try {
-            await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal));
-            for (const candidate of pendingCandidates.current.splice(0)) {
-              await pc.current.addIceCandidate(candidate).catch(() => {});
-            }
-          } finally { applyingDescription = false; }
-          return;
+        if (event.signal.type === 'answer' && pc.current.signalingState !== 'have-local-offer') return;
+        if (event.signal.type === 'offer' && pc.current.signalingState !== 'stable') return;
+        await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal as any));
+        for (const candidate of pendingCandidates.current.splice(0)) {
+          await pc.current.addIceCandidate(candidate).catch(() => {});
         }
         if (event.signal.type === 'offer') {
-          if (pc.current.signalingState !== 'stable') {
-            setTimeout(() => { void onSignal(event); }, 100);
-            return;
-          }
-          applyingDescription = true;
-          try {
-            await pc.current.setRemoteDescription(new RTCSessionDescription(event.signal));
-            for (const candidate of pendingCandidates.current.splice(0)) {
-              await pc.current.addIceCandidate(candidate).catch(() => {});
-            }
-            const answer = await pc.current.createAnswer();
-            await pc.current.setLocalDescription(answer);
-            answeredOffer = true;
-            sendSignal(event.from, { type: 'answer', sdp: answer.sdp ?? '' });
-          } finally { applyingDescription = false; }
-          return;
+          const answer = await pc.current.createAnswer();
+          await pc.current.setLocalDescription(answer);
+          sendSignal(event.from, { type: 'answer', sdp: answer.sdp ?? '' });
         }
       } catch (error) {
         if (active && pc.current?.connectionState !== 'connected') {
@@ -388,28 +458,65 @@ export default function CallScreen() {
     };
 
     const onJoined = (event: { callId: string; userId: string }) => {
-      if (event.callId === callId && isCaller) {
-        const peer = otherPeerId || event.userId;
-        if (pc.current && peer && peer !== selfId) {
-          void startOffer(peer);
+      if (event.callId !== callId) return;
+      if (isGroup) {
+        if (localRef.current && event.userId !== selfId && selfId < event.userId) {
+          void socialApi<{ iceServers: any[] }>('/calls/ice')
+            .catch(() => ({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }))
+            .then(config => getOrCreateGroupPeer(event.userId, config.iceServers, true));
         }
+        return;
+      }
+      // 1:1: Joining means the other phone opened the call screen.
+      // Ping with ready so the callee responds with its ready once pc is created!
+      if (role === 'caller' && pc.current) {
+        socket?.emit('call:ready', callId);
       }
     };
 
     const onReady = (event: { callId: string; from: string }) => {
       if (event.callId !== callId) return;
-      if (isCaller) {
-        if (pc.current) void startOffer(event.from);
-      } else {
+      if (isGroup) {
+        if (localRef.current && event.from !== selfId && selfId < event.from && !groupPeers.current.has(event.from)) {
+          void socialApi<{ iceServers: any[] }>('/calls/ice')
+            .catch(() => ({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }))
+            .then(config => getOrCreateGroupPeer(event.from, config.iceServers, true));
+        } else if (localRef.current && selfId > event.from && !groupReadyReplies.has(event.from)) {
+          // The lower-ID peer may have received our first ready before its camera was ready.
+          groupReadyReplies.add(event.from);
+          socket?.emit('call:ready', callId);
+        }
+        return;
+      }
+      // 1:1 Ready Handshake
+      if (role !== 'caller') {
+        // Callee replies with ready only when this phone's pc is created
         if (pc.current) socket?.emit('call:ready', callId);
+        else readyPeer.current = event.from;
+      } else {
+        // Caller saves callee id and initiates offer!
+        readyPeer.current = event.from;
+        if (pc.current) void startOffer(event.from);
       }
     };
 
-    const onEnded = (event: { callId: string; reason: string }) => {
+    const onEnded = (event: { callId: string; reason?: string }) => {
       if (event.callId === callId) close(false);
     };
+
     const onParticipantLeft = (event: { callId: string; userId: string }) => {
-      if (event.callId === callId && currentCall?.target.kind === 'direct' && event.userId !== selfId) close(false);
+      if (event.callId !== callId) return;
+      if (isGroup) {
+        const peer = groupPeers.current.get(event.userId);
+        if (peer) {
+          peer.close();
+          groupPeers.current.delete(event.userId);
+        }
+        setGroupTracks(prev => prev.filter(t => t.userId !== event.userId));
+        groupReadyReplies.delete(event.userId);
+        return;
+      }
+      if (event.userId !== selfId) close(false);
     };
 
     void (async () => {
@@ -420,16 +527,25 @@ export default function CallScreen() {
         socket.on('call:ready', onReady);
         socket.on('call:ended', onEnded);
         socket.on('call:participant-left', onParticipantLeft);
+
         const joined = await callRequest<CallInfo>('call:join', callId);
         if (!active) return;
         currentCall = joined;
         setCall(joined);
         void dismissCallNotification(joined.id);
-        if (joined.target.kind === 'direct') selfId = (await socialApi<OwnProfile>('/me')).id;
-        isCaller = joined.target.kind === 'direct' ? joined.callerId === selfId : role === 'caller';
-        otherPeerId = joined.members.find(id => id !== selfId) || (isCaller ? joined.target.id : joined.callerId);
 
-        if (joined.media === 'video') {
+        const me = await socialApi<OwnProfile>('/me').catch(() => null);
+        selfId = me?.id || '';
+        setSelfUserId(selfId);
+
+        isGroup = joined.target.kind === 'group';
+        role = (paramRole as 'caller' | 'callee') || (joined.callerId === selfId ? 'caller' : 'callee');
+        targetPeerId = role === 'caller'
+          ? (joined.members.find(m => m !== selfId) || joined.target.id)
+          : joined.callerId;
+
+        const wantVideo = joined.media === 'video' || paramMedia === 'video';
+        if (wantVideo) {
           setCameraOff(false);
           cameraOffRef.current = false;
         } else if (!paramMedia) {
@@ -438,32 +554,24 @@ export default function CallScreen() {
           cameraOffRef.current = off;
         }
 
-        if (joined.target.kind === 'group') {
-          const meeting = await socialApi<{ url: string }>('/mirotalk/join', 'POST', { kind: 'call', id: joined.id });
-          if (!active) return;
-          setMirotalkUrl(meeting.url);
-          setStatus('Connected');
-          return;
-        }
-
-        const config = await socialApi<{ iceServers: { urls: string | string[]; username?: string; credential?: string }[] }>('/calls/ice');
-        const wantVideo = joined.media === 'video' || paramMedia === 'video';
+        // Request camera and audio permissions on Android
         if (Platform.OS === 'android') {
           const perms: any[] = [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
           if (wantVideo) perms.push(PermissionsAndroid.PERMISSIONS.CAMERA);
           await PermissionsAndroid.requestMultiple(perms).catch(() => {});
         }
 
+        // Acquire local media
         let stream: MediaStream;
         try {
-          stream = await mediaDevices.getUserMedia({ audio: true, video: wantVideo });
-        } catch (mediaErr) {
-          if (wantVideo) {
+          stream = await mediaDevices.getUserMedia({ audio: true, video: true });
+        } catch {
+          try {
             stream = await mediaDevices.getUserMedia({ audio: true, video: false });
             setCameraOff(true);
             cameraOffRef.current = true;
-          } else {
-            throw mediaErr;
+          } catch (err) {
+            throw err;
           }
         }
         if (!active) { stream.getTracks().forEach(track => track.stop()); return; }
@@ -472,69 +580,87 @@ export default function CallScreen() {
         localRef.current = stream;
         setLocal(stream);
 
+        const config = await socialApi<{ iceServers: any[] }>('/calls/ice').catch(() => ({
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+          ],
+        }));
+
+        if (isGroup) {
+          // Process offers and ICE that arrived while media was starting.
+          for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
+          setStatus('Waiting for others…');
+          socket.emit('call:ready', callId);
+
+          // Offer only to peers already in the call. Invited members are not yet connected.
+          for (const memberId of joined.joined) {
+            if (memberId !== selfId && selfId < memberId) {
+              void getOrCreateGroupPeer(memberId, config.iceServers, true);
+            }
+          }
+          return;
+        }
+
+        // 1:1 Call Setup
         const peer = new RTCPeerConnection({ iceServers: config.iceServers });
         pc.current = peer;
         stream.getTracks().forEach(track => peer.addTrack(track, stream));
 
-        const listen = peer as unknown as { addEventListener: (type: string, listener: (event: any) => void) => void };
-        listen.addEventListener('icecandidate', event => {
-          if (event.candidate && otherPeerId) {
+        const listen = peer as unknown as { addEventListener: (type: string, listener: any) => void };
+        listen.addEventListener('icecandidate', (event: any) => {
+          if (event.candidate) {
             const cand = typeof event.candidate.toJSON === 'function' ? event.candidate.toJSON() : event.candidate;
-            sendSignal(otherPeerId, { candidate: cand });
-          }
-        });
-        listen.addEventListener('track', (event: any) => {
-          if (!active) return;
-          const s = event.streams?.[0];
-          if (s) {
-            setRemote(new MediaStream(s.getTracks()));
-          } else if (event.track) {
-            setRemote(prev => {
-              const currentTracks = prev ? prev.getTracks().filter(t => t.id !== event.track.id) : [];
-              return new MediaStream([...currentTracks, event.track]);
-            });
+            sendSignal(targetPeerId, { candidate: cand });
           }
         });
 
-        let disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null;
-        const onConnStateChange = () => {
+        listen.addEventListener('track', (event: any) => {
+          const s = event.streams?.[0];
+          if (s && active) {
+            setRemote(s);
+          }
+        });
+
+        listen.addEventListener('connectionstatechange', () => {
           if (!active || ending.current) return;
-          const conn = peer.connectionState;
-          const ice = peer.iceConnectionState;
-          if (conn === 'connected' || ice === 'connected' || ice === 'completed') {
-            clearConnectionTimer();
-            if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
+          if (peer.connectionState === 'connected') {
             setStatus('Connected');
             setTimeout(() => {
               applyCallAudioRoute(speakerOnRef.current);
-            }, 150);
-          } else if (conn === 'failed' || ice === 'failed') {
-            if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
+            }, 100);
+          } else if (peer.connectionState === 'failed') {
             setStatus('Connection failed.');
-          } else if (conn === 'disconnected' || ice === 'disconnected') {
-            if (!disconnectGraceTimer) {
-              disconnectGraceTimer = setTimeout(() => {
-                disconnectGraceTimer = null;
-                if (!active || ending.current) return;
-                clearConnectionTimer();
-                setStatus('Reconnecting…');
-              }, 600);
-            }
+          } else if (peer.connectionState === 'disconnected') {
+            setStatus('Reconnecting…');
+          } else {
+            setStatus('Connecting…');
           }
-        };
-        listen.addEventListener('connectionstatechange', onConnStateChange);
-        listen.addEventListener('iceconnectionstatechange', onConnStateChange);
+        });
 
+        // Drain any signals received while acquiring media
         for (const signal of pendingSignals.current.splice(0)) await onSignal(signal);
 
-        if (isCaller) {
-          setStatus('Calling…');
-          if (otherPeerId) {
-            void startOffer(otherPeerId);
+        if (role === 'caller') {
+          if (readyPeer.current) {
+            void startOffer(readyPeer.current);
+          } else {
+            setStatus('Calling…');
+            socket.emit('call:ready', callId);
+            setTimeout(() => {
+              if (active && pc.current && !offered.current && targetPeerId) {
+                console.log('[Call] Initiating offer via fallback to', targetPeerId);
+                void startOffer(targetPeerId);
+              }
+            }, 2500);
           }
         } else {
           setStatus('Connecting…');
           socket.emit('call:ready', callId);
+          if (readyPeer.current) {
+            socket.emit('call:ready', callId);
+          }
         }
       } catch (error) {
         if (active) setStatus(error instanceof Error ? error.message : 'Call failed.');
@@ -548,25 +674,21 @@ export default function CallScreen() {
       socket?.off('call:ready', onReady);
       socket?.off('call:ended', onEnded);
       socket?.off('call:participant-left', onParticipantLeft);
-      clearConnectionTimer();
       void Notifications.dismissNotificationAsync(ONGOING_CALL_NOTIF_ID).catch(() => {});
       InCallManager.stop();
-      socket?.emit('call:leave', callId);
+      if (!ending.current) socket?.emit('call:leave', callId);
       pc.current?.close(); pc.current = null;
+      groupPeers.current.forEach(p => p.close());
+      groupPeers.current.clear();
+      pendingGroupCandidates.current.clear();
       localRef.current?.getTracks().forEach(track => track.stop()); localRef.current = null;
     };
-  }, [callId, role]);
+  }, [callId]);
 
   const toggleMute = () => {
     const next = !mutedRef.current;
     mutedRef.current = next;
     localRef.current?.getAudioTracks().forEach(track => { track.enabled = !next; });
-    if (mirotalkUrl && mirotalkWebView.current) {
-      mirotalkWebView.current.injectJavaScript(`
-        try { (document.getElementById('audioBtn') || document.getElementById('initAudioBtn'))?.click(); } catch(e) {}
-        true;
-      `);
-    }
     setMuted(next);
 
     // Root fix: when unmuting, WebRTC restarts AudioRecord.
@@ -583,13 +705,6 @@ export default function CallScreen() {
     cameraOffRef.current = next;
     setCameraOff(next);
 
-    if (mirotalkUrl && mirotalkWebView.current) {
-      mirotalkWebView.current.injectJavaScript(`
-        try { (document.getElementById('videoBtn') || document.getElementById('initVideoBtn'))?.click(); } catch(e) {}
-        true;
-      `);
-    }
-
     if (localRef.current) {
       const videoTracks = localRef.current.getVideoTracks();
       if (videoTracks.length === 0 && !next) {
@@ -599,11 +714,12 @@ export default function CallScreen() {
           if (track) {
             track.enabled = true;
             localRef.current.addTrack(track);
-            pc.current?.addTrack(track, localRef.current);
+            if (pc.current) pc.current.addTrack(track, localRef.current);
+            groupPeers.current.forEach(peer => peer.addTrack(track, localRef.current!));
             setLocal(localRef.current);
           }
         } catch (err) {
-          console.warn('Failed to enable camera in 1:1 call:', err);
+          console.warn('Failed to enable camera:', err);
         }
       } else {
         videoTracks.forEach(track => { track.enabled = !next; });
@@ -612,12 +728,6 @@ export default function CallScreen() {
   };
 
   const flipCamera = () => {
-    if (mirotalkUrl && mirotalkWebView.current) {
-      mirotalkWebView.current.injectJavaScript(`
-        try { document.getElementById('swapCameraBtn')?.click(); } catch(e) {}
-        true;
-      `);
-    }
     const videoTrack = localRef.current?.getVideoTracks()[0];
     if (videoTrack && typeof (videoTrack as any)._switchCamera === 'function') {
       (videoTrack as any)._switchCamera();
@@ -637,12 +747,6 @@ export default function CallScreen() {
   };
 
   const endCall = () => {
-    if (mirotalkUrl && mirotalkWebView.current) {
-      mirotalkWebView.current.injectJavaScript(`
-        try { document.getElementById('exitBtn')?.click(); } catch(e) {}
-        true;
-      `);
-    }
     if (closeRef.current) {
       closeRef.current(true);
     } else {
@@ -669,7 +773,7 @@ export default function CallScreen() {
   const isGroup = call?.target.kind === 'group' || groupTracks.length > 0;
   const isDirect1on1Video = !isGroup && isVideoCall;
   const displayName = name || (isGroup ? 'Group Call' : 'ADDA Call');
-  const participantIds = Array.from(new Set(groupTracks.map(t => t.userId)));
+  const participantIds = Array.from(new Set([...groupTracks.map(t => t.userId), ...(isGroup && selfUserId ? [selfUserId] : [])]));
 
   // Compute WhatsApp-style smart responsive grid tile dimensions
   const getGridTileStyle = (index: number, total: number) => {
@@ -686,7 +790,9 @@ export default function CallScreen() {
     if (total === 4) {
       return styles.tileQuarter;
     }
-    return styles.tileSixth;
+    if (total <= 6) return styles.tileSixth;
+    if (total <= 8) return styles.tileEighth;
+    return styles.tileTenth;
   };
 
   return (
@@ -709,35 +815,18 @@ export default function CallScreen() {
                 <Text style={styles.audioCallTimer}>{status === 'Connected' ? (remote ? 'Camera off' : 'Connecting video…') : status}</Text>
               </View>
             )
-          ) : isGroup && mirotalkUrl ? (
-            // Group Video Call with MiroTalk service (wrapped in clean native stage)
-            <View style={StyleSheet.absoluteFill}>
-              <WebView
-                ref={mirotalkWebView}
-                source={{ uri: mirotalkUrl }}
-                javaScriptEnabled
-                domStorageEnabled
-                mediaPlaybackRequiresUserAction={false}
-                injectedJavaScript={`
-                  const hideStyle = document.createElement('style');
-                  hideStyle.innerHTML = '#bottomButtons, #header, header, .navbar, .footer, #controlAudio, #controlVideo, #exitBtn, #chatRoom, #whiteboard, .swal2-container, .modal { display: none !important; } body { background: #0A0E14 !important; }';
-                  document.head.appendChild(hideStyle);
-                  true;
-                `}
-                onError={() => setStatus('Could not connect to group call.')}
-                style={{ flex: 1, backgroundColor: '#0A0E14' }}
-              />
-            </View>
           ) : participantIds.length > 0 ? (
-            // Group Video Call: Dynamic full-screen grid
+            // Group Video Call: Dynamic WhatsApp full-screen responsive grid
             <View style={styles.fullGridContainer}>
               {participantIds.map((userId, idx) => {
+                const ownTile = userId === selfUserId;
                 const userVideo = videoTracks.find(t => t.userId === userId);
-                const participantName = userNames[userId] || `User ${userId.slice(0, 4)}`;
+                const tileStream = ownTile ? local : userVideo?.stream;
+                const participantName = ownTile ? 'You' : userNames[userId] || `User ${userId.slice(0, 4)}`;
                 return (
                   <View key={userId} style={[styles.gridTile, getGridTileStyle(idx, participantIds.length)]}>
-                    {userVideo ? (
-                      <RTCView streamURL={userVideo.stream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" zOrder={0} />
+                    {tileStream && (ownTile ? !cameraOff : Boolean(userVideo)) ? (
+                      <RTCView streamURL={tileStream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={ownTile} zOrder={0} />
                     ) : (
                       <View style={styles.audioCardAvatarTile}>
                         <View style={styles.audioCardAvatar}>
@@ -774,7 +863,7 @@ export default function CallScreen() {
           )}
 
           {/* 1:1 or Group Floating PiP Preview (Top-Right) */}
-          {local && (
+          {!isGroup && local && (
             <Pressable onPress={flipCamera} style={[styles.pipContainer, { top: insets.top + 70 }]}>
               {!cameraOff && local.getVideoTracks().length > 0 ? (
                 <RTCView streamURL={local.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror={true} zOrder={1} />
@@ -795,22 +884,11 @@ export default function CallScreen() {
            AUDIO CALL SMART GRID / CENTERING
            ======================================================== */
         <View style={styles.audioStage}>
-          {mirotalkUrl ? (
-            <WebView
-              ref={mirotalkWebView}
-              source={{ uri: mirotalkUrl }}
-              javaScriptEnabled
-              domStorageEnabled
-              mediaPlaybackRequiresUserAction={false}
-              onError={() => setStatus('Could not connect to group call.')}
-              style={{ position: 'absolute', width: 2, height: 2, opacity: 0.01 }}
-            />
-          ) : null}
-          {participantIds.length > 1 ? (
+          {isGroup && participantIds.length > 0 ? (
             // Group Audio Grid (WhatsApp style full tiles)
             <View style={styles.fullGridContainer}>
               {participantIds.map((userId, idx) => {
-                const participantName = userNames[userId] || `User ${userId.slice(0, 4)}`;
+                const participantName = userId === selfUserId ? 'You' : userNames[userId] || `User ${userId.slice(0, 4)}`;
                 return (
                   <View key={userId} style={[styles.audioGridTile, getGridTileStyle(idx, participantIds.length)]}>
                     <View style={styles.audioCardAvatar}>
@@ -845,10 +923,10 @@ export default function CallScreen() {
           ======================================================== */}
       <View style={[styles.topHeader, { top: insets.top + 10 }]}>
         <View style={styles.headerInfoPill}>
-          <View style={styles.encryptedRow}>
+          {!isGroup && <View style={styles.encryptedRow}>
             <Lock size={12} color="#34D399" style={{ marginRight: 4 }} />
             <Text style={styles.encryptedText}>End-to-end encrypted</Text>
-          </View>
+          </View>}
           <Text style={styles.headerTitle} numberOfLines={1}>{displayName}</Text>
           <Text style={styles.headerSubtitle}>
             {status === 'Connected'
@@ -968,6 +1046,14 @@ const styles = StyleSheet.create({
   tileSixth: {
     width: '50%',
     height: '33.33%',
+  },
+  tileEighth: {
+    width: '50%',
+    height: '25%',
+  },
+  tileTenth: {
+    width: '50%',
+    height: '20%',
   },
   tileBadge: {
     position: 'absolute',
@@ -1145,7 +1231,6 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 17,
     fontWeight: '800',
-    textAlign: 'center',
   },
   headerSubtitle: {
     color: 'rgba(255, 255, 255, 0.75)',
