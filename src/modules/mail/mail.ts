@@ -36,10 +36,13 @@ function getFromAddress(): string {
 
 function renderOtpEmailHtml(email: string, otp: string, type: string): string {
   const isSignUp = type === 'email-verification' || type === 'sign-in';
-  const title = isSignUp ? 'Verify Your Email' : 'Verification Code';
+  const isPasswordReset = type === 'forget-password';
+  const title = isSignUp ? 'Verify Your Email' : isPasswordReset ? 'Reset Your Password' : 'Verification Code';
   const intro = isSignUp
     ? 'Welcome to ADDA! Please use the verification code below to confirm your email and complete your registration.'
-    : 'Use the verification code below to continue with your ADDA account.';
+    : isPasswordReset
+      ? 'Use this code to reset your ADDA password. If you did not request a reset, ignore this email.'
+      : 'Use the verification code below to continue with your ADDA account.';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -182,11 +185,13 @@ function renderOtpEmailHtml(email: string, otp: string, type: string): string {
 
 export async function sendOtpEmail({ email, otp, type }: SendOtpEmailParams): Promise<void> {
   const from = getFromAddress();
-  const subject = `Your ADDA verification code is ${otp}`;
+  const subject = type === 'forget-password'
+    ? 'Reset your ADDA password'
+    : 'Verify your ADDA email';
   const html = renderOtpEmailHtml(email, otp, type);
   const text = `Your ADDA verification code is: ${otp}. It expires in 5 minutes. If you did not request this code, please ignore this email.`;
 
-  console.log(`[ADDA Mail] Preparing to send OTP [${otp}] to ${email} (type: ${type})`);
+  console.log(`[ADDA Mail] Sending ${type} code to ${email}`);
 
   // 1. Try Resend REST API if RESEND_API_KEY is configured
   if (env.resendApiKey) {
@@ -219,9 +224,8 @@ export async function sendOtpEmail({ email, otp, type }: SendOtpEmailParams): Pr
       return;
     } catch (err: unknown) {
       console.error('[ADDA Mail/Resend ERROR]', err);
-      // Fall through to SMTP if available, otherwise print dev OTP
+      // Fall through to SMTP if available.
       if (!env.smtpHost) {
-        printDevOtp(email, otp, type, 'Resend API failed');
         throw err;
       }
     }
@@ -243,21 +247,10 @@ export async function sendOtpEmail({ email, otp, type }: SendOtpEmailParams): Pr
       return;
     } catch (err: unknown) {
       console.error('[ADDA Mail/SMTP ERROR]', err);
-      printDevOtp(email, otp, type, 'SMTP failed');
       throw err;
     }
   }
 
-  // 3. Fallback / Dev environment when neither is configured
-  printDevOtp(email, otp, type, 'No email provider configured (Set RESEND_API_KEY or SMTP_HOST in .env)');
-}
-
-function printDevOtp(email: string, otp: string, type: string, reason: string): void {
-  console.log('\n============================================================');
-  console.log(`[ADDA OTP DISPATCH] (${reason})`);
-  console.log(`Target Email:      ${email}`);
-  console.log(`Verification Code: ${otp}`);
-  console.log(`OTP Type:          ${type}`);
-  console.log(`Expires In:        5 minutes`);
-  console.log('============================================================\n');
+  // Never report success or write the OTP into logs when no delivery provider exists.
+  throw new Error('Email delivery is not configured. Set RESEND_API_KEY or SMTP_HOST.');
 }
